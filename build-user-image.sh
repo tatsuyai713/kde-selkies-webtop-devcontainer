@@ -167,7 +167,41 @@ if [[ ! -f "${DOCKERFILE_USER}" ]]; then
   exit 1
 fi
 
+# Determine if cross-architecture build is needed
+HOST_NATIVE_ARCH="${HOST_ARCH}"
+case "${HOST_ARCH}" in
+  x86_64) HOST_NATIVE_ARCH=amd64 ;;
+  aarch64) HOST_NATIVE_ARCH=arm64 ;;
+esac
+
+# Use appropriate builder based on whether this is a cross-arch build
+if [[ "${HOST_NATIVE_ARCH}" == "${TARGET_ARCH}" ]]; then
+  # Native build: use default builder
+  echo "Native architecture build detected (host: ${HOST_NATIVE_ARCH}, target: ${TARGET_ARCH})"
+  echo "Using default builder"
+  
+  # Ensure we're using the default builder
+  "${DOCKER_CMD[@]}" buildx use default 2>/dev/null || true
+  
+  BUILDER_ARG=""
+else
+  # Cross-architecture build: create and use multiarch builder
+  echo "Cross-architecture build detected (host: ${HOST_NATIVE_ARCH}, target: ${TARGET_ARCH})"
+  
+  BUILDER_NAME="multiarch-builder"
+  if ! "${DOCKER_CMD[@]}" buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
+    echo "Creating multiarch builder: ${BUILDER_NAME}"
+    "${DOCKER_CMD[@]}" buildx create --name "${BUILDER_NAME}" --driver docker-container --use
+  else
+    echo "Using existing multiarch builder: ${BUILDER_NAME}"
+    "${DOCKER_CMD[@]}" buildx use "${BUILDER_NAME}"
+  fi
+  
+  BUILDER_ARG="--builder=${BUILDER_NAME}"
+fi
+
 "${DOCKER_CMD[@]}" buildx build \
+  ${BUILDER_ARG} \
   --platform "${PLATFORM}" \
   ${NO_CACHE_FLAG} \
   -f "${DOCKERFILE_USER}" \
