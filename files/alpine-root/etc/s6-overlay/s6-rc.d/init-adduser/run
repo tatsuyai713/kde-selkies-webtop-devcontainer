@@ -23,7 +23,7 @@ if [[ -z ${LSIO_READ_ONLY_FS} ]] && [[ -z ${LSIO_NON_ROOT_USER} ]]; then
 
     # basic home and ownership for shared dirs
     install -d -m 755 "${USER_HOME}"
-    lsiown "${TARGET_USER}:${TARGET_USER}" /app /config /defaults /lsiopy "${USER_HOME}"
+    lsiown "${TARGET_USER}:${TARGET_USER}" /app /config /defaults /opt/selkies-env "${USER_HOME}"
 fi
 
 cat /run/branding 2>/dev/null || true

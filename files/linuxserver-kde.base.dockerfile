@@ -118,9 +118,7 @@ ENV HOME="/root" \
     TERM="xterm" \
     S6_CMD_WAIT_FOR_SERVICES_MAXTIME="0" \
     S6_VERBOSITY=1 \
-    S6_STAGE2_HOOK=/docker-mods \
-    VIRTUAL_ENV=/lsiopy \
-    PATH="/lsiopy/bin:$PATH"
+    S6_STAGE2_HOOK=/docker-mods
 
 # Generate sources.list dynamically based on UBUNTU_REL and arch
 ARG UBUNTU_REL
@@ -174,7 +172,7 @@ RUN \
   echo "**** generate locale ****" && \
   locale-gen en_US.UTF-8 && \
   echo "**** prepare shared folders ****" && \
-  mkdir -p /app /config /defaults /lsiopy && \
+  mkdir -p /app /config /defaults /opt/selkies-env && \
   echo "**** create video and render groups with standard GIDs ****" && \
   groupadd -g 44 video 2>/dev/null || groupmod -g 44 video 2>/dev/null || true && \
   groupadd -g 106 render 2>/dev/null || groupmod -g 106 render 2>/dev/null || true && \
@@ -248,9 +246,7 @@ ENV PS1="$(whoami)@$(hostname):$(pwd)\\$ " \
   TERM="xterm" \
   S6_CMD_WAIT_FOR_SERVICES_MAXTIME="0" \
   S6_VERBOSITY=1 \
-  S6_STAGE2_HOOK=/docker-mods \
-  VIRTUAL_ENV=/lsiopy \
-  PATH="/lsiopy/bin:$PATH"
+  S6_STAGE2_HOOK=/docker-mods
 
 RUN \
   echo "**** install runtime packages ****" && \
@@ -258,7 +254,7 @@ RUN \
     alpine-release bash ca-certificates catatonit coreutils curl findutils jq \
     netcat-openbsd procps-ng shadow tzdata && \
   echo "**** prepare shared folders ****" && \
-  mkdir -p /app /config /defaults /lsiopy && \
+  mkdir -p /app /config /defaults /opt/selkies-env && \
   echo "**** cleanup ****" && \
   rm -rf /tmp/*
 
@@ -431,18 +427,18 @@ RUN \
     cd "${SELKIES_DIR}" && \
     rm -rf /var/lib/apt/lists/*; \
   fi && \
-  python3 -m venv --system-site-packages /lsiopy && \
+  python3 -m venv --system-site-packages /opt/selkies-env && \
   export PKG_CONFIG_PATH="/usr/local/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig:/usr/lib/pkgconfig" && \
   if [ "${UBUNTU_VERSION}" = "22.04" ] || [ "${UBUNTU_VERSION}" = "24.04" ]; then \
     echo "av==14.4.0" > /tmp/selkies-constraints.txt; \
-    pip install -c /tmp/selkies-constraints.txt .; \
+    /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt .; \
   else \
-    pip install .; \
+    /opt/selkies-env/bin/pip install .; \
   fi && \
-  pip install setuptools && \
+  /opt/selkies-env/bin/pip install setuptools && \
   if [ "${UBUNTU_VERSION}" = "22.04" ]; then \
     echo "Installing pixelflux 1.4.7 for Ubuntu 22.04 (GLIBC 2.35)" && \
-    pip install pixelflux==1.4.7; \
+    /opt/selkies-env/bin/pip install pixelflux==1.4.7; \
   elif [ "${UBUNTU_VERSION}" = "24.04" ]; then \
     echo "Installing pixelflux from selkies dependencies for Ubuntu 24.04" && \
     echo "pixelflux already installed"; \
@@ -464,6 +460,10 @@ RUN \
     https://raw.githubusercontent.com/linuxserver/docker-templates/master/linuxserver.io/img/selkies-logo.png && \
   curl -o /usr/share/selkies/www/favicon.ico \
     https://raw.githubusercontent.com/linuxserver/docker-templates/refs/heads/master/linuxserver.io/img/selkies-icon.ico && \
+  echo "**** create selkies wrapper script ****" && \
+  echo '#!/bin/bash' > /usr/local/bin/selkies && \
+  echo 'exec /opt/selkies-env/bin/python3 -m selkies "$@"' >> /usr/local/bin/selkies && \
+  chmod +x /usr/local/bin/selkies && \
   rm -rf /tmp/*
 
 # Step 3: System configuration and tools

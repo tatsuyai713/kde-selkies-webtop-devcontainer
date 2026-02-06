@@ -170,8 +170,8 @@ RUN set -eux; \
     '  </policy>' \
     '</busconfig>' \
     > /etc/dbus-1/system.d/disable-packagekit.conf; \
-  mkdir -p /defaults /app /lsiopy && \
-  chown -R "${TARGET_UID}:${TARGET_GID}" /defaults /app /lsiopy
+  mkdir -p /defaults /app /opt/selkies-env && \
+  chown -R "${TARGET_UID}:${TARGET_GID}" /defaults /app /opt/selkies-env
 
 # optional Japanese locale and input (toggle via USER_LANGUAGE=ja)
 RUN set -eux; \
