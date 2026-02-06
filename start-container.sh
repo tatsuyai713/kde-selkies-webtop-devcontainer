@@ -424,9 +424,11 @@ case "${GPU_VENDOR}" in
     fi
     # WSLg support
     if [ -d "/mnt/wslg" ]; then
-      GPU_FLAGS+=(-v /mnt/wslg:/mnt/wslg:ro)
+      GPU_FLAGS+=(-v /mnt/wslg:/mnt/wslg:rw)
+      GPU_FLAGS+=(-v /mnt/wslg/.X11-unix:/tmp/.X11-unix:rw)
+      GPU_FLAGS+=(-v /usr/lib/wsl/drivers:/usr/lib/wsl/drivers:ro)
     fi
-    GPU_ENV_VARS+=(-e ENABLE_NVIDIA=true -e WSL_ENVIRONMENT=true -e DISABLE_ZINK=true)
+    GPU_ENV_VARS+=(-e ENABLE_NVIDIA=true -e WSL_ENVIRONMENT=true -e DISABLE_ZINK=true -e XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir -e LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-})
     ;;
   *)
     echo "Unsupported GPU vendor: ${GPU_VENDOR}" >&2
