@@ -53,10 +53,27 @@ nvidia_available() {
 # -1 means try NVENC if available, otherwise software
 
 # Determine GPU render node index for pixelflux
+# PIXELFLUX_VAAPI_RENDER_NODE_INDEX:
+#   -1 = Use NVENC (NVIDIA) or software fallback
+#   0+ = Use VA-API with /dev/dri/renderD(128+index)
 if [ "${GPU_VENDOR}" = "nvidia" ] || [ "${GPU_VENDOR}" = "nvidia-wsl" ]; then
-  # NVIDIA: pixelflux will auto-detect NVENC, set to -1
+  # NVIDIA: Explicitly disable VA-API to force NVENC
   export PIXELFLUX_VAAPI_RENDER_NODE_INDEX="-1"
-  echo "[svc-selkies] GPU_VENDOR=${GPU_VENDOR}: pixelflux will use NVENC hardware encoding"
+  # Find the NVIDIA render node to set CUDA_VISIBLE_DEVICES if needed
+  for renderD in /dev/dri/renderD*; do
+    if [ -e "$renderD" ]; then
+      RENDER_NUM=$(echo "$renderD" | grep -oP 'renderD\K[0-9]+')
+      DRIVER_LINK="/sys/class/drm/renderD${RENDER_NUM}/device/driver"
+      if [ -L "$DRIVER_LINK" ]; then
+        DRIVER_NAME=$(basename "$(readlink -f "$DRIVER_LINK")")
+        if [ "$DRIVER_NAME" = "nvidia" ]; then
+          echo "[svc-selkies] Found NVIDIA GPU at renderD${RENDER_NUM}"
+          break
+        fi
+      fi
+    fi
+  done
+  echo "[svc-selkies] GPU_VENDOR=${GPU_VENDOR}: pixelflux will use NVENC hardware encoding (VA-API disabled)"
   
   if nvidia_available; then
     NVIDIA_SMI_CMD=$(find_nvidia_smi)
@@ -116,16 +133,22 @@ SELKIES_CMD="selkies"
 CMD_OPTS=(--addr="localhost" --mode="websockets" --port="${PORT}")
 
 # Configure encoder based on GPU vendor
-ENCODER_TYPE="x264enc"  # Default to software encoder
+# NOTE: Selkies pixelflux only accepts: x264enc, x264enc-striped, jpeg
+# Hardware encoding (NVENC/VA-API) is controlled via:
+#   - --use-cpu=false (default): pixelflux auto-detects GPU and uses hardware encoding
+#   - --use-cpu=true: force software encoding
+#   - For VA-API, set PIXELFLUX_VAAPI_RENDER_NODE_INDEX env var (already done above)
+ENCODER_TYPE="x264enc"
 
 if [ "${GPU_VENDOR}" = "nvidia" ] || [ "${GPU_VENDOR}" = "nvidia-wsl" ]; then
-  ENCODER_TYPE="nvh264enc"
+  # NVIDIA: pixelflux auto-detects NVENC when --use-cpu=false (default)
   CMD_OPTS+=(--encoder="${ENCODER_TYPE}")
-  echo "[svc-selkies] Using NVIDIA NVENC encoder: ${ENCODER_TYPE}"
+  CMD_OPTS+=(--use-cpu=false)
+  echo "[svc-selkies] Using NVIDIA NVENC hardware encoding (pixelflux auto-detect)"
 elif [ "${GPU_VENDOR}" = "intel" ] || [ "${GPU_VENDOR}" = "amd" ]; then
-  # VA-API hardware encoder
-  ENCODER_TYPE="vah264enc"
+  # Intel/AMD: pixelflux uses VA-API via PIXELFLUX_VAAPI_RENDER_NODE_INDEX env var
   CMD_OPTS+=(--encoder="${ENCODER_TYPE}")
+  CMD_OPTS+=(--use-cpu=false)
   
   if [ -n "${VAAPI_INDEX}" ]; then
     DRI_NODE_PATH="/dev/dri/renderD$((128 + VAAPI_INDEX))"
@@ -134,11 +157,12 @@ elif [ "${GPU_VENDOR}" = "intel" ] || [ "${GPU_VENDOR}" = "amd" ]; then
       echo "[svc-selkies] Added --dri-node=${DRI_NODE_PATH} for VA-API encoding"
     fi
   fi
-  echo "[svc-selkies] Using VA-API encoder: ${ENCODER_TYPE}"
+  echo "[svc-selkies] Using VA-API hardware encoding (pixelflux via PIXELFLUX_VAAPI_RENDER_NODE_INDEX=${PIXELFLUX_VAAPI_RENDER_NODE_INDEX})"
 else
-  # Software encoder (x264)
+  # Software encoder (x264enc) - force CPU encoding
   CMD_OPTS+=(--encoder="${ENCODER_TYPE}")
-  echo "[svc-selkies] Using software encoder: ${ENCODER_TYPE}"
+  CMD_OPTS+=(--use-cpu=true)
+  echo "[svc-selkies] Using software encoding (CPU only)"
 fi
 
 # Enable H.264 streaming mode for lower latency (crucial for responsiveness!)
@@ -146,13 +170,31 @@ fi
 CMD_OPTS+=(--h264-streaming-mode=true)
 echo "[svc-selkies] H.264 streaming mode enabled for low latency"
 
-# Optimize CRF for better quality/latency balance (lower = better quality, more bandwidth)
-# Default is 25, we use 18-20 for better responsiveness
-SELKIES_H264_CRF="${SELKIES_H264_CRF:-18}"
+# Framerate configuration
+# SELKIES_FRAMERATE can be:
+#   - A single value (e.g., "60") for fixed framerate
+#   - A range (e.g., "30-60") to allow client-side selection within range
+# Lower values improve stability and reduce latency
+# Recommended: "30" for low latency, "30-60" for balanced performance
+SELKIES_FRAMERATE="${SELKIES_FRAMERATE:-30}"
+CMD_OPTS+=(--framerate="${SELKIES_FRAMERATE}")
+echo "[svc-selkies] Framerate set to: ${SELKIES_FRAMERATE}"
+
+# CRF (Constant Rate Factor) for H.264 encoding
+# Lower = better quality but larger file size and more latency
+# Higher = lower quality but faster encoding and less latency
+# Range: 0-51, Recommended: 23-28 for low latency, 18-22 for quality
+# Default: 25 for balanced latency/quality
+SELKIES_H264_CRF="${SELKIES_H264_CRF:-25}"
 CMD_OPTS+=(--h264-crf="${SELKIES_H264_CRF}")
 echo "[svc-selkies] H.264 CRF set to: ${SELKIES_H264_CRF}"
 
-echo "[svc-selkies] Using selkies with pixelflux (GPU_VENDOR=${GPU_VENDOR}, Encoder=${ENCODER_TYPE})"
+# Paint-over CRF for static scenes (higher quality when not moving)
+SELKIES_H264_PAINTOVER_CRF="${SELKIES_H264_PAINTOVER_CRF:-20}"
+CMD_OPTS+=(--h264-paintover-crf="${SELKIES_H264_PAINTOVER_CRF}")
+echo "[svc-selkies] H.264 Paint-over CRF set to: ${SELKIES_H264_PAINTOVER_CRF}"
+
+echo "[svc-selkies] Using selkies with pixelflux (GPU_VENDOR=${GPU_VENDOR}, use-cpu=${USE_CPU:-false})"
 
 # Default sink setup (wait until pulseaudio is ready, then create virtual sinks)
 if [ ! -f '/dev/shm/audio.lock' ]; then
