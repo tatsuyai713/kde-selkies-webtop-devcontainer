@@ -17,6 +17,7 @@ ARCH_OVERRIDE=${ARCH_OVERRIDE:-}
 SSL_DIR=${SSL_DIR:-}
 ENCODER=${ENCODER:-}
 GPU_VENDOR=${GPU_VENDOR:-} # deprecated (use ENCODER)
+FRAMERATE=${FRAMERATE:-30-60}
 GPU_ALL=false
 GPU_NUMS=""
 DOCKER_GPUS=""
@@ -43,6 +44,7 @@ Usage: $0 [-n name] [-i image-base] [-t version] [-u ubuntu_version] [-r WIDTHxH
   -a  image arch for tag (amd64/arm64). Overrides auto-detect
   -s  host directory containing cert.pem and cert.key to mount at ssl (recommended for WSS)
   -e, --encoder <type>  Encoder: software|nvidia|nvidia-wsl|intel|amd (required)
+  -f, --framerate <fps> Framerate: single value (60) or range (30-60). Default: 30-60
   -g, --gpu <value>     Docker --gpus value (optional): all or device=0,1
       --all             shortcut for --gpu all
       --num <list>      shortcut for --gpu device=<list>
@@ -75,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     -a|--arch) ARCH_OVERRIDE=$2; shift 2 ;;
     -s) SSL_DIR=$2; shift 2 ;;
     -e|--encoder) ENCODER=$2; shift 2 ;;
+    -f|--framerate) FRAMERATE=$2; shift 2 ;;
     -g|--gpu) DOCKER_GPUS=$2; shift 2 ;;
     --all) GPU_ALL=true; shift ;;
     --num) GPU_NUMS=$2; shift 2 ;;
@@ -503,6 +506,7 @@ docker run -d \
   -e PGID="${HOST_GID}" \
   -e ENCODER="${ENCODER}" \
   -e GPU_VENDOR="${GPU_VENDOR}" \
+  -e SELKIES_FRAMERATE="${FRAMERATE}" \
   --shm-size "${SHM_SIZE}" \
   --privileged \
   -v "${HOME}":"${HOST_HOME_MOUNT}":rw \
