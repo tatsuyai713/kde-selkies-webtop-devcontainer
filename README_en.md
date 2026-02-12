@@ -288,7 +288,7 @@ Note: Prefix with `USER_PASSWORD=...` to skip the interactive prompt.
 ./build-user-image.sh -v 2.0.0
 
 # Use a different base image
-./build-user-image.sh -b my-custom-base:1.0.0
+./build-user-image.sh -b my-custom-base:1.1.0
 ```
 
 ---
@@ -666,7 +666,7 @@ docker exec linuxserver-kde-$(whoami) pactl list sinks short
 |----------|-------------|---------|
 | `CONTAINER_NAME` | Container name | `linuxserver-kde-$(whoami)` |
 | `IMAGE_BASE` | Image base name | `webtop-kde` |
-| `IMAGE_VERSION` | Image version | `1.0.0` |
+| `IMAGE_VERSION` | Image version | `1.1.0` |
 
 #### Display
 

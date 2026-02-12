@@ -5,7 +5,7 @@ HOST_USER=${USER:-$(whoami)}
 NAME=${CONTAINER_NAME:-linuxserver-kde-${HOST_USER}}
 TARGET_IMAGE=${TARGET_IMAGE:-webtop-kde}
 TARGET_ARCH=${TARGET_ARCH:-}
-TARGET_VERSION=${TARGET_VERSION:-1.0.0}
+TARGET_VERSION=${TARGET_VERSION:-1.1.0}
 UBUNTU_VERSION=${UBUNTU_VERSION:-}
 RESTART=${RESTART:-false}
 
@@ -57,7 +57,7 @@ IMAGE_FROM_CONFIG=$(docker inspect --format '{{ .Config.Image }}' "$NAME" 2>/dev
 IMAGE_ID_FROM_CONTAINER=$(docker inspect --format '{{ .Image }}' "$NAME" 2>/dev/null || true)
 
 detect_arch_from_image_name() {
-  # Expect patterns like webtop-kde-<user>-amd64:1.0.0 or webtop-kde-<user>-arm64:tag
+  # Expect patterns like webtop-kde-<user>-amd64:1.1.0 or webtop-kde-<user>-arm64:tag
   local img="$1"
   local repo="${img%%:*}"
   local suffix="${repo##*-}"

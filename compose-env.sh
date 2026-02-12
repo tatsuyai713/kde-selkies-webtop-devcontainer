@@ -209,7 +209,7 @@ HOST_GID=$(id -g "${HOST_USER}")
 CONTAINER_NAME="${CONTAINER_NAME:-linuxserver-kde-${HOST_USER}}"
 IMAGE_BASE="${IMAGE_BASE:-webtop-kde}"
 IMAGE_TAG="${IMAGE_TAG:-}"
-IMAGE_VERSION="${IMAGE_VERSION:-1.0.0}"
+IMAGE_VERSION="${IMAGE_VERSION:-1.1.0}"
 SHM_SIZE="${SHM_SIZE:-4g}"
 
 # Determine architecture

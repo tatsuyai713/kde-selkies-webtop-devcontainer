@@ -6,7 +6,7 @@ FILES_DIR="${SCRIPT_DIR}/files"
 DOCKERFILE_USER="${FILES_DIR}/linuxserver-kde.user.dockerfile"
 
 HOST_ARCH=$(uname -m)
-VERSION=${VERSION:-1.0.0}
+VERSION=${VERSION:-1.1.0}
 UBUNTU_VERSION=${UBUNTU_VERSION:-24.04}
 USER_NAME=$(whoami)
 USER_UID=$(id -u)

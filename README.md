@@ -288,7 +288,7 @@ UID/GIDが一致するパーソナルイメージを作成（1-2分）：
 ./build-user-image.sh -v 2.0.0
 
 # 別のベースイメージを使用
-./build-user-image.sh -b my-custom-base:1.0.0
+./build-user-image.sh -b my-custom-base:1.1.0
 ```
 
 ---
@@ -666,7 +666,7 @@ docker exec linuxserver-kde-$(whoami) pactl list sinks short
 |------|------|----------|
 | `CONTAINER_NAME` | コンテナ名 | `linuxserver-kde-$(whoami)` |
 | `IMAGE_BASE` | イメージベース名 | `webtop-kde` |
-| `IMAGE_VERSION` | イメージバージョン | `1.0.0` |
+| `IMAGE_VERSION` | イメージバージョン | `1.1.0` |
 
 #### 表示
 

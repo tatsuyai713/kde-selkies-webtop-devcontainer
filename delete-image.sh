@@ -3,7 +3,7 @@ set -euo pipefail
 
 HOST_USER=${USER:-$(whoami)}
 IMAGE_BASE=${IMAGE_BASE:-webtop-kde}
-IMAGE_VERSION=${IMAGE_VERSION:-1.0.0}
+IMAGE_VERSION=${IMAGE_VERSION:-1.1.0}
 UBUNTU_VERSION=${UBUNTU_VERSION:-24.04}
 IMAGE_NAME=${IMAGE_NAME:-}
 FORCE=${FORCE:-false}
@@ -31,7 +31,7 @@ Default image: ${IMAGE_BASE}-${HOST_USER}-${TARGET_ARCH}-u${UBUNTU_VERSION}:${IM
 
 Environment variables:
   IMAGE_BASE      image base name (default: webtop-kde)
-  IMAGE_VERSION   image version (default: 1.0.0)
+  IMAGE_VERSION   image version (default: 1.1.0)
   UBUNTU_VERSION  Ubuntu version (default: 24.04)
   IMAGE_NAME      full image name (overrides auto-detection)
   TARGET_ARCH     architecture (default: auto-detect)
