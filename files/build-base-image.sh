@@ -144,34 +144,16 @@ case "${HOST_ARCH}" in
   aarch64) HOST_NATIVE_ARCH=arm64 ;;
 esac
 
-# Use appropriate builder based on whether this is a cross-arch build
-if [[ "${HOST_NATIVE_ARCH}" == "${TARGET_ARCH}" ]]; then
-  # Native build: use default builder
-  echo "Native architecture build detected (host: ${HOST_NATIVE_ARCH}, target: ${TARGET_ARCH})"
-  echo "Using default builder"
-  
-  # Ensure we're using the default builder
-  docker buildx use default 2>/dev/null || true
-  
-  BUILDER_ARG=""
-else
-  # Cross-architecture build: create and use multiarch builder
+# Cross-architecture builds rely on QEMU emulation.
+# On macOS Docker Desktop includes QEMU; on Linux install via:
+#   docker run --privileged --rm tonistiigi/binfmt --install all
+if [[ "${HOST_NATIVE_ARCH}" != "${TARGET_ARCH}" ]]; then
   echo "Cross-architecture build detected (host: ${HOST_NATIVE_ARCH}, target: ${TARGET_ARCH})"
-  
-  BUILDER_NAME="multiarch-builder"
-  if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
-    echo "Creating multiarch builder: ${BUILDER_NAME}"
-    docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use
-  else
-    echo "Using existing multiarch builder: ${BUILDER_NAME}"
-    docker buildx use "${BUILDER_NAME}"
-  fi
-  
-  BUILDER_ARG="--builder=${BUILDER_NAME}"
+else
+  echo "Native architecture build detected (host: ${HOST_NATIVE_ARCH}, target: ${TARGET_ARCH})"
 fi
 
 docker buildx build \
-  ${BUILDER_ARG} \
   --platform "${PLATFORM}" \
   ${NO_CACHE_FLAG} \
   -f "${DOCKERFILE_BASE}" \
