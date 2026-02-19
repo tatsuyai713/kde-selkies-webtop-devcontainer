@@ -22,6 +22,7 @@ GPU_ALL=false
 GPU_NUMS=""
 DOCKER_GPUS=""
 DRI_NODE=""
+DOCKER_MODE=${DOCKER_MODE:-dind}
 IMAGE_TAG_SET=false
 IMAGE_VERSION_DEFAULT=${IMAGE_VERSION:-1.1.0}
 HOST_ARCH_RAW=$(uname -m)
@@ -49,6 +50,9 @@ Usage: $0 [-n name] [-i image-base] [-t version] [-u ubuntu_version] [-r WIDTHxH
       --all             shortcut for --gpu all
       --num <list>      shortcut for --gpu device=<list>
       --dri-node <path> DRI render node for VA-API (e.g. /dev/dri/renderD129)
+  --docker-mode <mode>  Docker mode: dind (Docker-in-Docker, default) or dood (Docker-out-of-Docker)
+                        dind: start dockerd inside the container (requires --privileged)
+                        dood: mount host /var/run/docker.sock into the container
 
   Encoder Examples:
     --encoder software                      # Software encoding
@@ -82,6 +86,7 @@ while [[ $# -gt 0 ]]; do
     --all) GPU_ALL=true; shift ;;
     --num) GPU_NUMS=$2; shift 2 ;;
     --dri-node) DRI_NODE=$2; shift 2 ;;
+    --docker-mode) DOCKER_MODE=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
     -*) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -115,6 +120,16 @@ case "${ENCODER}" in
 esac
 
 GPU_VENDOR="${ENCODER}"
+
+DOCKER_MODE=$(echo "${DOCKER_MODE}" | tr '[:upper:]' '[:lower:]')
+case "${DOCKER_MODE}" in
+  dind|dood) ;;
+  *)
+    echo "Unsupported docker mode: ${DOCKER_MODE}. Use 'dind' or 'dood'." >&2
+    usage
+    exit 1
+    ;;
+esac
 
 if [[ -z "${DOCKER_GPUS}" ]]; then
   if [[ "${GPU_ALL}" = true ]]; then
@@ -439,7 +454,7 @@ case "${GPU_VENDOR}" in
     ;;
 esac
 
-echo "Starting: name=${NAME}, image=${IMAGE}, resolution=${RESOLUTION}, DPI=${DPI}, encoder=${ENCODER}, docker-gpus=${DOCKER_GPUS:-none}, host ports https=${HOST_PORT_SSL}->3001, http=${HOST_PORT_HTTP}->3000"
+echo "Starting: name=${NAME}, image=${IMAGE}, resolution=${RESOLUTION}, DPI=${DPI}, encoder=${ENCODER}, docker-gpus=${DOCKER_GPUS:-none}, docker-mode=${DOCKER_MODE}, host ports https=${HOST_PORT_SSL}->3001, http=${HOST_PORT_HTTP}->3000"
 echo "Chromium scale: ${SCALE_FACTOR} (CHROMIUM_FLAGS=${CHROMIUM_FLAGS_COMBINED})"
 
 # Add video and render groups for GPU access (use host GIDs)
@@ -458,6 +473,27 @@ fi
 PLATFORM_FLAGS=()
 if [[ -n "$PLATFORM" ]]; then
   PLATFORM_FLAGS=(--platform "$PLATFORM")
+fi
+
+DOCKER_MODE_FLAGS=()
+if [[ "${DOCKER_MODE}" == "dood" ]]; then
+  if [ ! -S /var/run/docker.sock ]; then
+    echo "Error: /var/run/docker.sock not found on host. Cannot use dood mode." >&2
+    exit 1
+  fi
+  DOCKER_MODE_FLAGS+=(-v /var/run/docker.sock:/var/run/docker.sock)
+  DOCKER_MODE_FLAGS+=(-e START_DOCKER=false)
+  # ホストのdocker socketのGIDをコンテナ内に渡してアクセス権を確保する
+  DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)
+  if [ -n "${DOCKER_SOCK_GID}" ] && [ "${DOCKER_SOCK_GID}" != "0" ]; then
+    DOCKER_MODE_FLAGS+=(--group-add="${DOCKER_SOCK_GID}")
+    echo "Docker mode: dood (host Docker socket) - mounting /var/run/docker.sock (docker socket GID: ${DOCKER_SOCK_GID})"
+  else
+    echo "Docker mode: dood (host Docker socket) - mounting /var/run/docker.sock"
+  fi
+else
+  DOCKER_MODE_FLAGS+=(-e START_DOCKER=true)
+  echo "Docker mode: dind (Docker-in-Docker) - starting dockerd inside container"
 fi
 SSL_FLAGS=()
 # default SSL dir fallback if not specified
@@ -514,4 +550,5 @@ docker run -d \
   -v "${HOME}/.ssh":"/home/${HOST_USER}/.ssh":rw \
   ${GPU_ENV_VARS[@]+"${GPU_ENV_VARS[@]}"} \
   ${SSL_FLAGS[@]+"${SSL_FLAGS[@]}"} \
+  ${DOCKER_MODE_FLAGS[@]+"${DOCKER_MODE_FLAGS[@]}"} \
   "$IMAGE"
