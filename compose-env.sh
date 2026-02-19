@@ -22,6 +22,7 @@ Options (same as start-container.sh):
   -s, --ssl <dir>        SSL directory path for HTTPS (optional)
   -a, --arch <arch>      Target architecture: amd64 or arm64 (default: host)
       --env-file <path>  Write KEY=VALUE pairs to the specified file instead of exports
+      --docker-mode <mode>  Docker mode: dind (Docker-in-Docker, default) or dood (Docker-out-of-Docker)
   -h, --help             Show this help
 
 Environment overrides:
@@ -44,6 +45,7 @@ GPU_ALL="${GPU_ALL:-false}"
 GPU_NUMS="${GPU_NUMS:-}"
 DOCKER_GPUS="${DOCKER_GPUS:-}"
 DRI_NODE="${DRI_NODE:-}"
+DOCKER_MODE="${DOCKER_MODE:-dind}"
 UBUNTU_VERSION="${UBUNTU_VERSION:-24.04}"
 RESOLUTION="${RESOLUTION:-1920x1080}"
 DPI="${DPI:-96}"
@@ -140,6 +142,14 @@ while [[ $# -gt 0 ]]; do
             ARCH_OVERRIDE="${2}"
             shift 2
             ;;
+        --docker-mode)
+            if [ -z "${2:-}" ]; then
+                echo "Error: --docker-mode requires a value (dind or dood)" >&2
+                exit 1
+            fi
+            DOCKER_MODE="${2}"
+            shift 2
+            ;;
         --env-file)
             if [ -z "${2:-}" ]; then
                 echo "Error: --env-file requires a path" >&2
@@ -186,6 +196,15 @@ case "${ENCODER}" in
 esac
 
 GPU_VENDOR="${ENCODER}"
+
+DOCKER_MODE=$(echo "${DOCKER_MODE}" | tr '[:upper:]' '[:lower:]')
+case "${DOCKER_MODE}" in
+    dind|dood) ;;
+    *)
+        echo "Error: Unsupported docker mode: ${DOCKER_MODE}. Use 'dind' or 'dood'." >&2
+        exit 1
+        ;;
+esac
 
 if [ -z "${DOCKER_GPUS}" ]; then
     if [ "${GPU_ALL}" = "true" ]; then
@@ -351,6 +370,25 @@ USER_UID="${HOST_UID}"
 USER_GID="${HOST_GID}"
 USER_NAME="${HOST_USER}"
 
+# Docker mode configuration
+DOCKER_SOCK_GID=""
+if [[ "${DOCKER_MODE}" == "dood" ]]; then
+    if [ ! -S /var/run/docker.sock ]; then
+        echo "Error: /var/run/docker.sock not found on host. Cannot use dood mode." >&2
+        exit 1
+    fi
+    START_DOCKER="false"
+    DOCKER_SOCK_MOUNT="/var/run/docker.sock:/var/run/docker.sock"
+    # ホストのdocker socketのGIDを取得してコンテナに渡す
+    DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)
+    if [ -n "${DOCKER_SOCK_GID}" ] && [ "${DOCKER_SOCK_GID}" != "0" ]; then
+        echo "Docker mode: dood (host Docker socket) - GID: ${DOCKER_SOCK_GID}" >&2
+    fi
+else
+    START_DOCKER="true"
+    DOCKER_SOCK_MOUNT=""
+fi
+
 # SSL configuration
 SSL_CERT_PATH=""
 SSL_KEY_PATH=""
@@ -374,6 +412,7 @@ ENV_VARS=(
     SSL_DIR SSL_CERT_PATH SSL_KEY_PATH
     HOST_HOME_MOUNT HOST_MNT_MOUNT
     USER_UID USER_GID USER_NAME
+    DOCKER_MODE START_DOCKER DOCKER_SOCK_MOUNT DOCKER_SOCK_GID
 )
 
 if [ -n "${DISABLE_ZINK}" ]; then
