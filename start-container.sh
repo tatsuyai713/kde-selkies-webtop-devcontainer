@@ -200,8 +200,19 @@ fi
 REPO_PREFIX="${IMAGE_BASE}-${HOST_USER}-${IMAGE_ARCH}-u${UBUNTU_VERSION}"
 
 if docker ps -a --format '{{.Names}}' | grep -qx "$NAME"; then
-  echo "Container ${NAME} already exists. Stop/remove it before starting a new one." >&2
-  exit 1
+  STATUS=$(docker inspect -f '{{.State.Status}}' "$NAME" 2>/dev/null || echo "unknown")
+  if [[ "$STATUS" == "exited" || "$STATUS" == "created" ]]; then
+    echo "Container ${NAME} exists in status: $STATUS. Restarting it..."
+    docker start "$NAME"
+    echo "Container ${NAME} started."
+    exit 0
+  elif [[ "$STATUS" == "running" ]]; then
+    echo "Container ${NAME} is already running. Stop or remove it before starting a new one." >&2
+    exit 1
+  else
+    echo "Container ${NAME} exists in status: $STATUS. Please remove or fix it manually." >&2
+    exit 1
+  fi
 fi
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
