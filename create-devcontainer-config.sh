@@ -42,6 +42,12 @@ case "${HOST_ARCH_RAW}" in
 esac
 TARGET_ARCH="${DETECTED_ARCH}"
 
+# Detect macOS (can be overridden interactively)
+IS_MAC=false
+if [ "$(uname -s)" = "Darwin" ]; then
+    IS_MAC=true
+fi
+
 # Interactive configuration
 echo "========================================"
 echo "Configuration Questions"
@@ -191,6 +197,35 @@ if [ -z "${SSL_DIR}" ]; then
         echo "Using SSL dir: ${SSL_DIR}"
     fi
 fi
+
+# Mac / Docker Desktop settings
+echo "7. Mac / Docker Desktop Settings"
+echo "---------------------------------"
+if [ "${IS_MAC}" = "true" ]; then
+    echo "macOS (Darwin) detected."
+    echo "Mac-specific settings apply:"
+    echo "  - platform declaration added to docker-compose (suppresses arch mismatch warning)"
+    echo "  - /dev/bus/usb skipped (not available in Docker Desktop VM)"
+    read -p "Enable Mac-specific settings? (Y/n): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
+        IS_MAC=false
+        echo "Mac-specific settings disabled."
+    else
+        echo "Mac-specific settings enabled."
+    fi
+else
+    echo "Non-macOS host detected ($(uname -s))."
+    read -p "Enable Mac / Docker Desktop-specific settings anyway? (y/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        IS_MAC=true
+        echo "Mac-specific settings enabled."
+    else
+        echo "Mac-specific settings disabled."
+    fi
+fi
+echo ""
 
 CURRENT_USER=$(whoami)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -398,6 +433,12 @@ services:
     network_mode: bridge
 EOF
 
+# Mac-specific: declare platform for Docker Desktop compatibility
+# Without this, Docker Desktop shows a warning when the image arch differs from host arch
+if [ "${IS_MAC}" = "true" ]; then
+    echo "    platform: linux/${TARGET_ARCH}" >> .devcontainer/docker-compose.override.yml
+fi
+
 DEVICE_ENTRIES=()
 VOLUME_ENTRIES=()
 GROUPS_TO_ADD=()
@@ -452,7 +493,10 @@ if [ -n "${GPU_DEVICES}" ]; then
     done
 fi
 
-DEVICE_ENTRIES+=("/dev/bus/usb:/dev/bus/usb:rwm")
+# /dev/bus/usb is not available in Mac Docker Desktop's VM
+if [ "${IS_MAC}" != "true" ]; then
+    DEVICE_ENTRIES+=("/dev/bus/usb:/dev/bus/usb:rwm")
+fi
 
 # Add SSL mount when available (match start-container.sh)
 if [ -n "${SSL_DIR}" ] && [ -f "${SSL_DIR}/cert.pem" ] && [ -f "${SSL_DIR}/cert.key" ]; then
@@ -560,6 +604,10 @@ echo "  - Resolution: ${RESOLUTION}"
 echo "  - DPI: ${DPI}"
 echo "  - Timezone: ${TIMEZONE}"
 echo "  - HTTPS Port: ${HOST_PORT_SSL}"
+if [ "${IS_MAC}" = "true" ]; then
+    echo "  - Platform (Mac): linux/${TARGET_ARCH}"
+    echo "  - USB devices: skipped (not available in Docker Desktop)"
+fi
 echo "  - HTTP Port: ${HOST_PORT_HTTP}"
 echo ""
 echo "========================================"
