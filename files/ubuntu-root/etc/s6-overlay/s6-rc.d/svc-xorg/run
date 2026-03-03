@@ -21,7 +21,9 @@ if [ "${DISABLE_DRI3}" != "false" ]; then
 fi
 
 # Clamp virtual screen max size based on env
-DEFAULT_RES="7680x4320"
+# Use 4K as default max to avoid excessive VRAM allocation.
+# Override with MAX_RES env var if higher resolution is needed.
+DEFAULT_RES="3840x2160"
 if [ ! -z ${MAX_RES+x} ]; then
   DEFAULT_RES="${MAX_RES}"
 fi
