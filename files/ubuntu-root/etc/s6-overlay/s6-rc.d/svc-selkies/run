@@ -184,13 +184,13 @@ echo "[svc-selkies] Framerate set to: ${SELKIES_FRAMERATE}"
 # Lower = better quality but larger file size and more latency
 # Higher = lower quality but faster encoding and less latency
 # Range: 0-51, Recommended: 23-28 for low latency, 18-22 for quality
-# Default: 25 for balanced latency/quality
-SELKIES_H264_CRF="${SELKIES_H264_CRF:-25}"
+# Default: 20 — good balance between quality and bandwidth for remote desktop
+SELKIES_H264_CRF="${SELKIES_H264_CRF:-20}"
 CMD_OPTS+=(--h264-crf="${SELKIES_H264_CRF}")
 echo "[svc-selkies] H.264 CRF set to: ${SELKIES_H264_CRF}"
 
 # Paint-over CRF for static scenes (higher quality when not moving)
-SELKIES_H264_PAINTOVER_CRF="${SELKIES_H264_PAINTOVER_CRF:-20}"
+SELKIES_H264_PAINTOVER_CRF="${SELKIES_H264_PAINTOVER_CRF:-18}"
 CMD_OPTS+=(--h264-paintover-crf="${SELKIES_H264_PAINTOVER_CRF}")
 echo "[svc-selkies] H.264 Paint-over CRF set to: ${SELKIES_H264_PAINTOVER_CRF}"
 

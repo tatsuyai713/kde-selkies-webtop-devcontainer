@@ -626,6 +626,21 @@ RUN if [ -f /usr/local/bin/patch-selkies-safari-keyboard.py ]; then \
       python3 /usr/local/bin/patch-selkies-safari-keyboard.py; \
     fi
 
+# Apply VRAM leak fix for Selkies resize handling
+# Fixes: GPU memory not released when browser viewport is resized
+RUN if [ -f /usr/local/bin/patch-selkies-vram-leak.py ]; then \
+      chmod +x /usr/local/bin/patch-selkies-vram-leak.py && \
+      python3 /usr/local/bin/patch-selkies-vram-leak.py; \
+    fi
+
+# Apply stripe position fix for H.264 macroblock alignment
+# Fixes: Rectangular artifacts around cursor due to H.264 encoder padding
+# stripes to macroblock boundaries (16px), causing overflow into adjacent stripes
+RUN if [ -f /usr/local/bin/patch-selkies-stripe-position.py ]; then \
+      chmod +x /usr/local/bin/patch-selkies-stripe-position.py && \
+      python3 /usr/local/bin/patch-selkies-stripe-position.py; \
+    fi
+
 # ports and volumes
 EXPOSE 3000 3001
 VOLUME /config
