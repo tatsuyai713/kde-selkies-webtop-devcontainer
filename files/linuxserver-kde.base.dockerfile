@@ -626,6 +626,14 @@ RUN if [ -f /usr/local/bin/patch-selkies-safari-keyboard.py ]; then \
       python3 /usr/local/bin/patch-selkies-safari-keyboard.py; \
     fi
 
+# Apply VRAM/RAM leak fix for pixelflux ScreenCapture
+# Ensures destroy_screen_capture_module() is called explicitly after stop_capture()
+# to immediately free GPU resources (NVENC sessions, buffers) instead of relying on __del__
+RUN if [ -f /usr/local/bin/patch-selkies-vram-leak.py ]; then \
+      chmod +x /usr/local/bin/patch-selkies-vram-leak.py && \
+      /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-vram-leak.py; \
+    fi
+
 # ports and volumes
 EXPOSE 3000 3001
 VOLUME /config
