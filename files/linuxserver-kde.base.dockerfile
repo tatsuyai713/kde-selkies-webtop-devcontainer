@@ -305,6 +305,8 @@ RUN \
 ###########################################
 FROM ubuntu-base-temp AS selkies-base
 
+COPY pixelflux/ /tmp/pixelflux/
+
 # set version label
 ARG VERSION
 LABEL build_version="Linuxserver.io version:- ${VERSION}"
@@ -436,14 +438,20 @@ RUN \
     /opt/selkies-env/bin/pip install .; \
   fi && \
   /opt/selkies-env/bin/pip install setuptools && \
-  if [ "${UBUNTU_VERSION}" = "22.04" ]; then \
-    echo "Installing pixelflux 1.4.7 for Ubuntu 22.04 (GLIBC 2.35)" && \
-    /opt/selkies-env/bin/pip install pixelflux==1.4.7; \
-  elif [ "${UBUNTU_VERSION}" = "24.04" ]; then \
-    echo "Installing pixelflux from selkies dependencies for Ubuntu 24.04" && \
-    echo "pixelflux already installed"; \
+  if [ "$(dpkg --print-architecture)" = "amd64" ] && [ "${UBUNTU_VERSION}" = "22.04" ]; then \
+    PIXELFLUX_WHL="/tmp/pixelflux/pixelflux-1.6.0-cp310-cp310-linux_x86_64.whl" && \
+    test -f "${PIXELFLUX_WHL}" && \
+    echo "Installing pixelflux from local wheel for Ubuntu 22.04: ${PIXELFLUX_WHL}" && \
+    /opt/selkies-env/bin/pip install --force-reinstall "${PIXELFLUX_WHL}"; \
+  elif [ "$(dpkg --print-architecture)" = "amd64" ] && [ "${UBUNTU_VERSION}" = "24.04" ]; then \
+    PIXELFLUX_WHL="/tmp/pixelflux/pixelflux-1.6.0-cp312-cp312-linux_x86_64.whl" && \
+    test -f "${PIXELFLUX_WHL}" && \
+    echo "Installing pixelflux from local wheel for Ubuntu 24.04: ${PIXELFLUX_WHL}" && \
+    /opt/selkies-env/bin/pip install --force-reinstall "${PIXELFLUX_WHL}"; \
+  elif [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+    echo "Warning: Unknown Ubuntu version ${UBUNTU_VERSION}; skipping local pixelflux wheel install"; \
   else \
-    echo "Warning: Unknown Ubuntu version ${UBUNTU_VERSION}, using default pixelflux"; \
+    echo "Skipping local pixelflux wheel install on $(dpkg --print-architecture); default pip resolution will be used"; \
   fi && \
   echo "**** install selkies interposer ****" && \
   cd addons/js-interposer && \
