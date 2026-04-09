@@ -364,6 +364,7 @@ RUN \
     g++ gcc git ${APT_EXTRA_PACKAGES} kbd ${LABWC_PKG} libatk1.0-0 libatk-bridge2.0-0 \
     libev4 libfontenc1 libfreetype6 libgbm1 libgcrypt20 libgirepository-1.0-1 \
     libgl1-mesa-dri libglu1-mesa libgnutls30 libgtk-3.0 libjpeg-turbo8 \
+    libyuv0 \
     libnginx-mod-http-fancyindex libnotify-bin libnss3 libnvidia-egl-wayland1 \
     libopus0 libp11-kit0 libpam0g libtasn1-6 libvulkan1 libwayland-client0 \
     libwayland-cursor0 libwayland-egl1 libwayland-server0 libx11-6 \
