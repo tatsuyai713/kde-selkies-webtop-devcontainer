@@ -264,13 +264,88 @@ source "${ENV_FILE}"
 set +a
 
 DEVCONTAINER_CONTAINER_NAME="${CONTAINER_NAME}"
+
+# Determine build language from timezone
+case "${TIMEZONE}" in
+    Asia/Tokyo) BUILD_LANGUAGE="ja" ;;
+    *) BUILD_LANGUAGE="en" ;;
+esac
+
 {
     echo ""
     echo "# Dev Container specific"
     echo "DEVCONTAINER_CONTAINER_NAME=${DEVCONTAINER_CONTAINER_NAME}"
+    echo ""
+    echo "# Build parameters (used by initializeCommand to rebuild image if needed)"
+    echo "BUILD_LANGUAGE=${BUILD_LANGUAGE}"
 } >> "${ENV_FILE}"
 export DEVCONTAINER_CONTAINER_NAME
 
+# Generate initialize.sh (called by devcontainer initializeCommand)
+cat > .devcontainer/initialize.sh << 'INIT_EOF'
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Load environment variables
+if [ -f "${SCRIPT_DIR}/.env" ]; then
+    set -a
+    . "${SCRIPT_DIR}/.env"
+    set +a
+fi
+
+# Remove existing container if any
+if [ -n "${CONTAINER_NAME:-}" ]; then
+    docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+fi
+
+# Check if user image exists, build if missing
+if [ -n "${USER_IMAGE:-}" ]; then
+    if ! docker image inspect "${USER_IMAGE}" >/dev/null 2>&1; then
+        echo ""
+        echo "========================================"
+        echo "User image not found: ${USER_IMAGE}"
+        echo "Building user image..."
+        echo "========================================"
+        echo ""
+
+        BUILD_SCRIPT="${PROJECT_ROOT}/quokka-devenv/build-user-image.sh"
+        if [ ! -x "${BUILD_SCRIPT}" ]; then
+            echo "Error: ${BUILD_SCRIPT} not found or not executable." >&2
+            exit 1
+        fi
+
+        BUILD_ARGS=(--ubuntu "${UBUNTU_VERSION:-24.04}" --arch "${IMAGE_ARCH:-amd64}" --language "${BUILD_LANGUAGE:-en}")
+        "${BUILD_SCRIPT}" "${BUILD_ARGS[@]}"
+
+        echo ""
+        echo "========================================"
+        echo "User image built successfully!"
+        echo "========================================"
+    else
+        echo "User image found: ${USER_IMAGE}"
+    fi
+fi
+INIT_EOF
+chmod +x .devcontainer/initialize.sh
+
+# Workspace folder (relative to this script)
+CURRENT_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LINK_PATH="/home/${CURRENT_USER}/quokka-workspace"
+
+if [ -L "${LINK_PATH}" ]; then
+    read -p "Remove existing symlink ${LINK_PATH}? [y/N]: " confirm
+    if [[ "${confirm}" =~ ^[Yy]$ ]]; then
+        rm -f "${LINK_PATH}"
+    else
+        echo "Symlink not removed. Exiting."
+        exit 1
+    fi
+fi
+
+ln -srf "${CURRENT_SCRIPT_DIR}/../quokka-workspace" "${LINK_PATH}"
 WORKSPACE_FOLDER="/home/${CURRENT_USER}/host_home"
 
 GPU_DEVICES=""
@@ -334,7 +409,7 @@ cat > .devcontainer/devcontainer.json << EOF
   "runServices": ["webtop"],
   "overrideCommand": false,
   "shutdownAction": "none",
-  "initializeCommand": "cd \${localWorkspaceFolder:-${PWD}} && if [ -f .devcontainer/.env ]; then CN=\$(sed -n 's/^CONTAINER_NAME=//p' .devcontainer/.env | head -n1); fi; if [ -n \"\$CN\" ]; then docker rm -f \"\$CN\" >/dev/null 2>&1 || true; fi",
+  "initializeCommand": "cd \${localWorkspaceFolder:-${PWD}} && bash .devcontainer/initialize.sh",
   "forwardPorts": [
 ${FORWARD_PORTS_JSON}
   ],
@@ -413,6 +488,8 @@ services:
       - PGID=\${HOST_GID}
       - GPU_VENDOR=\${GPU_VENDOR}
       - ENABLE_NVIDIA=\${ENABLE_NVIDIA}
+      - NVIDIA_VISIBLE_DEVICES=\${NVIDIA_VISIBLE_DEVICES:-void}
+      - NVIDIA_DRIVER_CAPABILITIES=\${NVIDIA_DRIVER_CAPABILITIES:-all}
       - LIBVA_DRIVER_NAME=\${LIBVA_DRIVER_NAME}
       - WSL_ENVIRONMENT=\${WSL_ENVIRONMENT}
       - DISABLE_ZINK=\${DISABLE_ZINK}
@@ -586,6 +663,7 @@ echo "Created files:"
 echo "  - .devcontainer/devcontainer.json"
 echo "  - .devcontainer/docker-compose.base.yml"
 echo "  - .devcontainer/docker-compose.override.yml"
+echo "  - .devcontainer/initialize.sh"
 echo "  - .devcontainer/.env"
 echo "  - .devcontainer/README.md"
 echo "  - .env (for docker-compose)"
