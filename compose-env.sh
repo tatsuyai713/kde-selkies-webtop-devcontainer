@@ -18,6 +18,8 @@ Options (same as start-container.sh):
   -u, --ubuntu <ver>     Ubuntu version: 22.04 or 24.04 (default: 24.04)
   -r, --resolution <res> Resolution in WIDTHxHEIGHT format (default: 1920x1080)
   -d, --dpi <dpi>        DPI setting (default: 96)
+  -S, --stream-scale <f> Stream resolution scale (0.25-1.0, default: 1.0)
+  -f, --framerate <fps>  Framerate: single value (60) or range (30-60), default: 30-60
   -t, --timezone <tz>    Timezone (default: UTC, example: Asia/Tokyo)
   -s, --ssl <dir>        SSL directory path for HTTPS (optional)
   -a, --arch <arch>      Target architecture: amd64 or arm64 (default: host)
@@ -49,6 +51,8 @@ DOCKER_MODE="${DOCKER_MODE:-dind}"
 UBUNTU_VERSION="${UBUNTU_VERSION:-24.04}"
 RESOLUTION="${RESOLUTION:-1920x1080}"
 DPI="${DPI:-96}"
+STREAM_SCALE="${STREAM_SCALE:-1.0}"
+FRAMERATE="${FRAMERATE:-30-60}"
 TIMEZONE="${TIMEZONE:-UTC}"
 SSL_DIR="${SSL_DIR:-}"
 OUTPUT_MODE="export"
@@ -118,6 +122,22 @@ while [[ $# -gt 0 ]]; do
             DPI="${2}"
             shift 2
             ;;
+        -S|--stream-scale)
+            if [ -z "${2:-}" ]; then
+                echo "Error: --stream-scale requires a value (0.25-1.0)" >&2
+                exit 1
+            fi
+            STREAM_SCALE="${2}"
+            shift 2
+            ;;
+        -f|--framerate)
+            if [ -z "${2:-}" ]; then
+                echo "Error: --framerate requires a value (e.g. 30 or 30-60)" >&2
+                exit 1
+            fi
+            FRAMERATE="${2}"
+            shift 2
+            ;;
         -t|--timezone)
             if [ -z "${2:-}" ]; then
                 echo "Error: --timezone requires a value (e.g. Asia/Tokyo)" >&2
@@ -175,6 +195,25 @@ done
 if [[ ! $RESOLUTION =~ ^[0-9]+x[0-9]+$ ]]; then
     echo "Error: Resolution must be WIDTHxHEIGHT (e.g. 1920x1080)" >&2
     exit 1
+fi
+
+if ! awk "BEGIN { v=${STREAM_SCALE}+0; exit !(v >= 0.25 && v <= 1.0) }" 2>/dev/null; then
+    echo "Error: STREAM_SCALE must be between 0.25 and 1.0 (got: ${STREAM_SCALE})" >&2
+    exit 1
+fi
+
+if [[ ! "${FRAMERATE}" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
+    echo "Error: FRAMERATE must be a single integer (e.g. 30) or a range (e.g. 30-60). Got: ${FRAMERATE}" >&2
+    exit 1
+fi
+
+if [[ "${FRAMERATE}" == *-* ]]; then
+    FRAMERATE_MIN=${FRAMERATE%-*}
+    FRAMERATE_MAX=${FRAMERATE#*-}
+    if (( FRAMERATE_MIN > FRAMERATE_MAX )); then
+        echo "Error: FRAMERATE range is invalid: ${FRAMERATE}. Minimum must be <= maximum." >&2
+        exit 1
+    fi
 fi
 
 if [ -z "${ENCODER}" ]; then
@@ -277,8 +316,24 @@ ORIG_CHROMIUM_FLAGS="${CHROMIUM_FLAGS:-}"
 if [ -n "${ORIG_CHROMIUM_FLAGS}" ]; then
     CHROMIUM_FLAGS="--force-device-scale-factor=${SCALE_FACTOR} ${ORIG_CHROMIUM_FLAGS}"
 else
-    CHROMIUM_FLAGS="--force-device-scale-factor=${SCALE_FACTOR}"
+CHROMIUM_FLAGS="--force-device-scale-factor=${SCALE_FACTOR}"
 fi
+
+case "${TIMEZONE}" in
+    Asia/Tokyo)
+        RUNTIME_TZ="Asia/Tokyo"
+        RUNTIME_LANG="ja_JP.UTF-8"
+        RUNTIME_LC_ALL="ja_JP.UTF-8"
+        RUNTIME_LANGUAGE="ja_JP:ja"
+        ;;
+    *)
+        TIMEZONE="UTC"
+        RUNTIME_TZ="UTC"
+        RUNTIME_LANG="en_US.UTF-8"
+        RUNTIME_LC_ALL="en_US.UTF-8"
+        RUNTIME_LANGUAGE="en_US:en"
+        ;;
+esac
 
 # Ports (UID-based, but allow overrides)
 HOST_PORT_SSL="${PORT_SSL_OVERRIDE:-$((HOST_UID + 30000))}"
@@ -405,7 +460,8 @@ ENV_VARS=(
     HOST_USER HOST_UID HOST_GID CONTAINER_NAME USER_IMAGE CONTAINER_HOSTNAME
     IMAGE_BASE IMAGE_TAG IMAGE_VERSION IMAGE_ARCH UBUNTU_VERSION
     HOST_PORT_SSL HOST_PORT_HTTP HOST_IP
-    WIDTH HEIGHT DPI SCALE_FACTOR FORCE_DEVICE_SCALE_FACTOR CHROMIUM_FLAGS SHM_SIZE RESOLUTION TIMEZONE
+    WIDTH HEIGHT DPI STREAM_SCALE FRAMERATE SCALE_FACTOR FORCE_DEVICE_SCALE_FACTOR CHROMIUM_FLAGS SHM_SIZE RESOLUTION TIMEZONE
+    RUNTIME_TZ RUNTIME_LANG RUNTIME_LC_ALL RUNTIME_LANGUAGE
     ENCODER GPU_VENDOR GPU_ALL GPU_NUMS DOCKER_GPUS DRI_NODE
     ENABLE_NVIDIA LIBVA_DRIVER_NAME NVIDIA_VISIBLE_DEVICES GPU_DEVICES
     WSL_ENVIRONMENT DISABLE_ZINK XDG_RUNTIME_DIR LD_LIBRARY_PATH

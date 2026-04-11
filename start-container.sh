@@ -20,6 +20,8 @@ IMAGE_OVERRIDE=${IMAGE_NAME:-}
 UBUNTU_VERSION=${UBUNTU_VERSION:-24.04}
 RESOLUTION=${RESOLUTION:-1920x1080}
 DPI=${DPI:-96}
+STREAM_SCALE=${STREAM_SCALE:-1.0}
+TIMEZONE=${TIMEZONE:-UTC}
 
 # ------------------------------------------------------------------------------
 # Shared memory settings: tmpfs mounted at /dev/shm
@@ -55,15 +57,35 @@ case "${HOST_ARCH_RAW}" in
   *) DETECTED_ARCH="${HOST_ARCH_RAW}" ;;
 esac
 
+HOST_IS_MAC=false
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  HOST_IS_MAC=true
+fi
+IS_MAC=${IS_MAC:-${HOST_IS_MAC}}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_INTERACTIVE_SCRIPT="${SCRIPT_DIR}/interactive-common.sh"
+if [[ ! -f "${COMMON_INTERACTIVE_SCRIPT}" ]]; then
+  echo "Error: ${COMMON_INTERACTIVE_SCRIPT} not found." >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+. "${COMMON_INTERACTIVE_SCRIPT}"
+
 usage() {
   cat <<EOF
 Usage: $0 [-n name] [-i image-base] [-t version] [-u ubuntu_version] [-r WIDTHxHEIGHT] [-d dpi] [-p platform] [-a arch] [-s ssl_dir]
+Run without options to start an interactive configuration flow.
   -n  container name (default: ${NAME})
   -i  image base name; final image becomes <base>-<user>-<arch>-u<ubuntu_ver>:<version> (default base: ${IMAGE_BASE})
   -t  image version tag (default: ${IMAGE_VERSION_DEFAULT})
   -u, --ubuntu  Ubuntu version (22.04 or 24.04). Default: ${UBUNTU_VERSION}
   -r  resolution (e.g. 1920x1080, default: ${RESOLUTION})
   -d  DPI (default: ${DPI})
+  -S, --stream-scale <factor>  Stream resolution scale (0.25-1.0). Default: ${STREAM_SCALE}
+                               Scales down the virtual desktop resolution for lower bandwidth streaming.
+                               Example: 0.5 with 1920x1080 streams at 960x540. DPI scaling is unaffected.
+      --timezone <tz>          Timezone (default: ${TIMEZONE}, example: Asia/Tokyo)
   -p  platform for docker run (e.g. linux/arm64). Default: host
   -a  image arch for tag (amd64/arm64). Overrides auto-detect
   -s  host directory containing cert.pem and cert.key to mount at ssl (recommended for WSS)
@@ -98,6 +120,155 @@ Docker GPU examples (optional):
 EOF
 }
 
+to_lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+prompt_text_default() {
+  local __var_name="$1"
+  local prompt="$2"
+  local default_value="$3"
+  local answer
+
+  read -r -p "${prompt} (default: ${default_value}): " answer
+  printf -v "${__var_name}" '%s' "${answer:-$default_value}"
+}
+
+prompt_optional_text() {
+  local __var_name="$1"
+  local prompt="$2"
+  local answer
+
+  read -r -p "${prompt}: " answer
+  printf -v "${__var_name}" '%s' "${answer}"
+}
+
+prompt_yes_no_default() {
+  local prompt="$1"
+  local default_choice="$2"
+  local suffix=""
+  local default_answer=""
+  local answer=""
+  local normalized=""
+
+  case "${default_choice}" in
+    yes)
+      suffix="Y/n"
+      default_answer="y"
+      ;;
+    no)
+      suffix="y/N"
+      default_answer="n"
+      ;;
+    *)
+      echo "Internal error: invalid yes/no default '${default_choice}'." >&2
+      exit 1
+      ;;
+  esac
+
+  while true; do
+    read -r -p "${prompt} (${suffix}): " answer
+    answer="${answer:-$default_answer}"
+    normalized=$(to_lower "${answer}")
+    case "${normalized}" in
+      y|yes) return 0 ;;
+      n|no) return 1 ;;
+      *)
+        echo "Please enter y or n, then press Enter."
+        ;;
+    esac
+  done
+}
+
+prompt_choice_default() {
+  local __var_name="$1"
+  local prompt="$2"
+  local default_value="$3"
+  local pattern="$4"
+  local answer
+
+  while true; do
+    read -r -p "${prompt} (default: ${default_value}): " answer
+    answer="${answer:-$default_value}"
+    if [[ "${answer}" =~ ${pattern} ]]; then
+      printf -v "${__var_name}" '%s' "${answer}"
+      return 0
+    fi
+    echo "Invalid selection: ${answer}"
+  done
+}
+
+prompt_required_text() {
+  local __var_name="$1"
+  local prompt="$2"
+  local answer
+
+  while true; do
+    read -r -p "${prompt}: " answer
+    if [[ -n "${answer}" ]]; then
+      printf -v "${__var_name}" '%s' "${answer}"
+      return 0
+    fi
+    echo "A value is required."
+  done
+}
+
+normalize_arch_or_die() {
+  local input="$1"
+  case "$(to_lower "${input}")" in
+    amd64|x86_64)
+      printf '%s' "amd64"
+      ;;
+    arm64|aarch64)
+      printf '%s' "arm64"
+      ;;
+    *)
+      echo "Unsupported architecture: ${input}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+handle_existing_container() {
+  if ! docker ps -a --format '{{.Names}}' | grep -qx "${NAME}"; then
+    return 0
+  fi
+
+  local status
+  status=$(docker inspect -f '{{.State.Status}}' "${NAME}" 2>/dev/null || echo "unknown")
+
+  case "${status}" in
+    exited|created)
+      echo "Container ${NAME} exists in status: ${status}. Starting with the previous configuration..."
+      docker start "${NAME}" >/dev/null
+      echo "Container ${NAME} started."
+      exit 0
+      ;;
+    running)
+      echo "Container ${NAME} is already running."
+      exit 0
+      ;;
+    *)
+      echo "Container ${NAME} exists in status: ${status}. Remove or fix it manually." >&2
+      exit 1
+      ;;
+  esac
+}
+
+interactive_setup() {
+  CONTAINER_NAME="${NAME}"
+  TARGET_ARCH="${ARCH_OVERRIDE:-${DETECTED_ARCH}}"
+  shared_apply_locale_from_timezone "${TIMEZONE}"
+  shared_collect_interactive_settings
+  NAME="${CONTAINER_NAME}"
+  ARCH_OVERRIDE="${TARGET_ARCH}"
+}
+
+INTERACTIVE_MODE=false
+if [[ $# -eq 0 ]]; then
+  INTERACTIVE_MODE=true
+fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n) NAME=$2; shift 2 ;;
@@ -106,6 +277,8 @@ while [[ $# -gt 0 ]]; do
     -u|--ubuntu) UBUNTU_VERSION=$2; shift 2 ;;
     -r) RESOLUTION=$2; shift 2 ;;
     -d) DPI=$2; shift 2 ;;
+    -S|--stream-scale) STREAM_SCALE=$2; shift 2 ;;
+    --timezone) TIMEZONE=$2; shift 2 ;;
     -p) PLATFORM=$2; shift 2 ;;
     -a|--arch) ARCH_OVERRIDE=$2; shift 2 ;;
     -s) SSL_DIR=$2; shift 2 ;;
@@ -123,15 +296,46 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+handle_existing_container
+
+if [[ "${INTERACTIVE_MODE}" == "true" ]]; then
+  interactive_setup
+fi
+
+shared_apply_locale_from_timezone "${TIMEZONE}"
+
 if [[ ! $RESOLUTION =~ ^[0-9]+x[0-9]+$ ]]; then
   echo "Resolution must be WIDTHxHEIGHT (e.g. 1920x1080)" >&2
   exit 1
+fi
+
+if ! awk "BEGIN { v=${STREAM_SCALE}+0; exit !(v >= 0.25 && v <= 1.0) }" 2>/dev/null; then
+  echo "STREAM_SCALE must be between 0.25 and 1.0 (got: ${STREAM_SCALE})" >&2
+  exit 1
+fi
+
+if [[ ! "${FRAMERATE}" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
+  echo "FRAMERATE must be a single integer (e.g. 30) or a range (e.g. 30-60). Got: ${FRAMERATE}" >&2
+  exit 1
+fi
+
+if [[ "${FRAMERATE}" == *-* ]]; then
+  FRAMERATE_MIN=${FRAMERATE%-*}
+  FRAMERATE_MAX=${FRAMERATE#*-}
+  if (( FRAMERATE_MIN > FRAMERATE_MAX )); then
+    echo "FRAMERATE range is invalid: ${FRAMERATE}. Minimum must be <= maximum." >&2
+    exit 1
+  fi
 fi
 
 if [[ -z "${ENCODER}" ]]; then
   echo "Error: --encoder is required." >&2
   usage
   exit 1
+fi
+
+if [[ -n "${ARCH_OVERRIDE}" ]]; then
+  ARCH_OVERRIDE="$(normalize_arch_or_die "${ARCH_OVERRIDE}")"
 fi
 
 ENCODER=$(echo "${ENCODER}" | tr '[:upper:]' '[:lower:]')
@@ -181,6 +385,7 @@ if [[ -n "${PLATFORM}" ]]; then
   esac
 elif [[ -n "${ARCH_OVERRIDE}" ]]; then
   IMAGE_ARCH="${ARCH_OVERRIDE}"
+  PLATFORM="linux/${IMAGE_ARCH}"
 else
   IMAGE_ARCH="${DETECTED_ARCH}"
 fi
@@ -216,10 +421,10 @@ HOST_HOME_MOUNT="/home/${HOST_USER}/host_home"
 HOST_MNT_MOUNT="/home/${HOST_USER}/host_mnt"
 
 MNT_FLAGS=()
-if [[ "$(uname -s)" != "Darwin" ]]; then
+if [[ "${IS_MAC}" != "true" && -d "/mnt" ]]; then
   MNT_FLAGS=(-v "/mnt":"${HOST_MNT_MOUNT}":rw)
 else
-  echo "Info: Skipping /mnt mount on macOS due to Docker Desktop file sharing restrictions." >&2
+  echo "Info: Skipping /mnt mount in Mac / Docker Desktop mode." >&2
 fi
 
 if [[ -n "${IMAGE_OVERRIDE}" ]]; then
@@ -228,22 +433,6 @@ else
   IMAGE="${IMAGE_BASE}-${HOST_USER}-${IMAGE_ARCH}-u${UBUNTU_VERSION}:${IMAGE_TAG}"
 fi
 REPO_PREFIX="${IMAGE_BASE}-${HOST_USER}-${IMAGE_ARCH}-u${UBUNTU_VERSION}"
-
-if docker ps -a --format '{{.Names}}' | grep -qx "$NAME"; then
-  STATUS=$(docker inspect -f '{{.State.Status}}' "$NAME" 2>/dev/null || echo "unknown")
-  if [[ "$STATUS" == "exited" || "$STATUS" == "created" ]]; then
-    echo "Container ${NAME} exists in status: $STATUS. Restarting..."
-    docker start "$NAME"
-    echo "Container ${NAME} started."
-    exit 0
-  elif [[ "$STATUS" == "running" ]]; then
-    echo "Container ${NAME} is already running. Stop or remove it before starting a new one." >&2
-    exit 1
-  else
-    echo "Container ${NAME} exists in status: $STATUS. Remove or fix it manually." >&2
-    exit 1
-  fi
-fi
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Image ${IMAGE} not found. Searching for fallback tags under ${REPO_PREFIX}:*" >&2
@@ -518,7 +707,7 @@ if [[ -n "${SHM_EXTRA_OPTS}" ]]; then
 fi
 echo "Using tmpfs for /dev/shm: ${SHM_TMPFS_OPTS}"
 
-echo "Starting: name=${NAME}, image=${IMAGE}, resolution=${RESOLUTION}, dpi=${DPI}, encoder=${ENCODER}, docker-gpus=${DOCKER_GPUS:-none}, docker-mode=${DOCKER_MODE}, ports https=${HOST_PORT_SSL}->3001 http=${HOST_PORT_HTTP}->3000"
+echo "Starting: name=${NAME}, image=${IMAGE}, resolution=${RESOLUTION}, dpi=${DPI}, stream-scale=${STREAM_SCALE}, framerate=${FRAMERATE}, timezone=${TIMEZONE}, encoder=${ENCODER}, docker-gpus=${DOCKER_GPUS:-none}, docker-mode=${DOCKER_MODE}, ports https=${HOST_PORT_SSL}->3001 http=${HOST_PORT_HTTP}->3000"
 echo "Chromium scale: ${SCALE_FACTOR} (CHROMIUM_FLAGS=${CHROMIUM_FLAGS_COMBINED})"
 
 docker run -d \
@@ -533,6 +722,10 @@ docker run -d \
   -p ${HOST_PORT_HTTP}:3000 \
   -p ${HOST_PORT_SSL}:3001 \
   -e DISPLAY=:1 \
+  -e TZ="${RUNTIME_TZ}" \
+  -e LANG="${RUNTIME_LANG}" \
+  -e LC_ALL="${RUNTIME_LC_ALL}" \
+  -e LANGUAGE="${RUNTIME_LANGUAGE}" \
   -e DPI="$DPI" \
   -e SCALE_FACTOR="${SCALE_FACTOR}" \
   -e FORCE_DEVICE_SCALE_FACTOR="${SCALE_FACTOR}" \
@@ -540,6 +733,7 @@ docker run -d \
   -e DISPLAY_WIDTH="$WIDTH" \
   -e DISPLAY_HEIGHT="$HEIGHT" \
   -e CUSTOM_RESOLUTION="$RESOLUTION" \
+  -e STREAM_SCALE="${STREAM_SCALE}" \
   -e USER_UID="${HOST_UID}" \
   -e USER_GID="${HOST_GID}" \
   -e USER_NAME="${HOST_USER}" \

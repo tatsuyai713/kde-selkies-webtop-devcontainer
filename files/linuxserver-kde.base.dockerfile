@@ -323,6 +323,7 @@ ENV DISPLAY=:1 \
     DISABLE_ZINK=false \
     DISABLE_DRI3=false \
     DPI=96 \
+    STREAM_SCALE=1.0 \
     TITLE=Selkies
 
 ARG APT_EXTRA_PACKAGES=""
@@ -635,12 +636,26 @@ RUN if [ -f /usr/local/bin/patch-selkies-safari-keyboard.py ]; then \
       python3 /usr/local/bin/patch-selkies-safari-keyboard.py; \
     fi
 
+# Patch Selkies frontend assets so primary clients fit scaled streams to the viewport
+# and remove the legacy HTML-injected workaround from older builds
+RUN if [ -f /usr/local/bin/patch-selkies-stream-scale-ui.py ]; then \
+      chmod +x /usr/local/bin/patch-selkies-stream-scale-ui.py && \
+      python3 /usr/local/bin/patch-selkies-stream-scale-ui.py; \
+    fi
+
 # Apply VRAM/RAM leak fix for pixelflux ScreenCapture
 # Ensures destroy_screen_capture_module() is called explicitly after stop_capture()
 # to immediately free GPU resources (NVENC sessions, buffers) instead of relying on __del__
 RUN if [ -f /usr/local/bin/patch-selkies-vram-leak.py ]; then \
       chmod +x /usr/local/bin/patch-selkies-vram-leak.py && \
       /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-vram-leak.py; \
+    fi
+
+# Apply STREAM_SCALE support: scale browser-reported resolution by STREAM_SCALE env var
+# Allows low-bandwidth streaming without affecting DPI or application scaling
+RUN if [ -f /usr/local/bin/patch-selkies-stream-scale.py ]; then \
+      chmod +x /usr/local/bin/patch-selkies-stream-scale.py && \
+      /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-stream-scale.py; \
     fi
 
 # ports and volumes

@@ -4,6 +4,15 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+COMMON_INTERACTIVE_SCRIPT="${SCRIPT_DIR}/interactive-common.sh"
+if [ ! -f "${COMMON_INTERACTIVE_SCRIPT}" ]; then
+    echo "Error: ${COMMON_INTERACTIVE_SCRIPT} not found." >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+. "${COMMON_INTERACTIVE_SCRIPT}"
+
 echo "========================================"
 echo "VS Code Dev Container Configuration"
 echo "========================================"
@@ -11,12 +20,51 @@ echo "This script will create a .devcontainer configuration"
 echo "for using this container with VS Code."
 echo ""
 
+to_lower() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+prompt_yes_no_default() {
+    local prompt="$1"
+    local default_choice="$2"
+    local suffix=""
+    local default_answer=""
+    local answer=""
+    local normalized=""
+
+    case "${default_choice}" in
+        yes)
+            suffix="Y/n"
+            default_answer="y"
+            ;;
+        no)
+            suffix="y/N"
+            default_answer="n"
+            ;;
+        *)
+            echo "Internal error: invalid yes/no default '${default_choice}'." >&2
+            exit 1
+            ;;
+    esac
+
+    while true; do
+        read -r -p "${prompt} (${suffix}): " answer
+        answer="${answer:-$default_answer}"
+        normalized=$(to_lower "${answer}")
+        case "${normalized}" in
+            y|yes) return 0 ;;
+            n|no) return 1 ;;
+            *)
+                echo "Please enter y or n, then press Enter."
+                ;;
+        esac
+    done
+}
+
 # Check if .devcontainer already exists
 if [ -d ".devcontainer" ]; then
     echo "⚠️  .devcontainer directory already exists."
-    read -p "Overwrite existing configuration? (y/N): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    if ! prompt_yes_no_default "Overwrite existing configuration?" "no"; then
         echo "Cancelled."
         exit 0
     fi
@@ -30,10 +78,16 @@ GPU_ALL="false"
 GPU_NUMS=""
 DOCKER_GPUS=""
 DRI_NODE=""
+DOCKER_MODE="dind"
 UBUNTU_VERSION="24.04"
 RESOLUTION="1920x1080"
 DPI="96"
+STREAM_SCALE="1.0"
+FRAMERATE="30-60"
+TIMEZONE="UTC"
 SSL_DIR=""
+CURRENT_USER=$(whoami)
+CONTAINER_NAME="${CONTAINER_NAME:-linuxserver-kde-${CURRENT_USER}}"
 HOST_ARCH_RAW=$(uname -m)
 case "${HOST_ARCH_RAW}" in
     x86_64|amd64) DETECTED_ARCH="amd64" ;;
@@ -47,188 +101,12 @@ IS_MAC=false
 if [ "$(uname -s)" = "Darwin" ]; then
     IS_MAC=true
 fi
+HOST_IS_MAC="${IS_MAC}"
 
-# Interactive configuration
-echo "========================================"
-echo "Configuration Questions"
-echo "========================================"
-echo ""
-
-# Encoder configuration
-echo "1. Encoder Configuration"
-echo "------------------------"
-echo "Select encoder type:"
-echo "  1) Software (CPU)"
-echo "  2) NVIDIA (NVENC)"
-echo "  3) NVIDIA WSL2 (NVENC)"
-echo "  4) Intel (VA-API)"
-echo "  5) AMD (VA-API)"
-read -p "Select [1-5] (default: 1): " encoder_choice
-
-case "${encoder_choice}" in
-    2)
-        ENCODER="nvidia"
-        echo "NVIDIA encoder selected."
-        ;;
-    3)
-        ENCODER="nvidia-wsl"
-        echo "NVIDIA WSL2 encoder selected."
-        ;;
-    4)
-        ENCODER="intel"
-        echo "Intel encoder selected."
-        echo ""
-        echo "DRI Node Configuration (for multi-GPU systems)"
-        echo "----------------------------------------------"
-        echo "If you have multiple GPUs (e.g., NVIDIA + Intel), you may need to specify"
-        echo "which render node to use for VA-API encoding."
-        echo "Run 'ls -la /dev/dri/renderD*' to see available nodes."
-        read -p "Specify DRI node? (e.g., /dev/dri/renderD129, or press Enter to skip): " DRI_NODE_INPUT
-        DRI_NODE="${DRI_NODE_INPUT}"
-        ;;
-    5)
-        ENCODER="amd"
-        echo "AMD encoder selected."
-        echo ""
-        echo "DRI Node Configuration (for multi-GPU systems)"
-        echo "----------------------------------------------"
-        echo "If you have multiple GPUs (e.g., NVIDIA + AMD), you may need to specify"
-        echo "which render node to use for VA-API encoding."
-        echo "Run 'ls -la /dev/dri/renderD*' to see available nodes."
-        read -p "Specify DRI node? (e.g., /dev/dri/renderD129, or press Enter to skip): " DRI_NODE_INPUT
-        DRI_NODE="${DRI_NODE_INPUT}"
-        ;;
-    *)
-        ENCODER="none"
-        echo "Software encoder selected."
-        ;;
-esac
-
+shared_apply_locale_from_timezone "${TIMEZONE}"
+shared_collect_interactive_settings
+TARGET_ARCH="$(shared_normalize_arch_or_die "${TARGET_ARCH}")"
 GPU_VENDOR="${ENCODER}"
-
-# Docker GPU selection (optional, mostly for NVIDIA)
-if [ "${ENCODER}" = "nvidia" ] || [ "${ENCODER}" = "nvidia-wsl" ]; then
-    echo ""
-    echo "Docker GPU Selection (Optional)"
-    echo "-------------------------------"
-    read -p "Enable Docker --gpus? (Y/n): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-        if [ "${ENCODER}" = "nvidia-wsl" ]; then
-            GPU_ALL="true"
-            GPU_NUMS=""
-            echo "WSL2 uses all GPUs (gpus=all)."
-        else
-            read -p "Use all NVIDIA GPUs? (Y/n): " -n 1 -r
-            echo
-            if [[ $REPLY =~ ^[Nn]$ ]]; then
-                read -p "Enter GPU device numbers (comma-separated, e.g., 0,1): " GPU_NUMS
-                GPU_ALL="false"
-            else
-                GPU_ALL="true"
-                GPU_NUMS=""
-            fi
-        fi
-    fi
-fi
-echo ""
-
-# Ubuntu version
-echo "2. Ubuntu Version"
-echo "----------------"
-read -p "Ubuntu version (22.04 or 24.04, default: 24.04): " UBUNTU_VERSION
-UBUNTU_VERSION="${UBUNTU_VERSION:-24.04}"
-echo ""
-
-# Architecture
-echo "3. Architecture"
-echo "---------------"
-read -p "Target architecture (amd64 or arm64, default: ${DETECTED_ARCH}): " TARGET_ARCH_INPUT
-TARGET_ARCH_INPUT="${TARGET_ARCH_INPUT:-${DETECTED_ARCH}}"
-case "${TARGET_ARCH_INPUT}" in
-    amd64|x86_64) TARGET_ARCH="amd64" ;;
-    arm64|aarch64) TARGET_ARCH="arm64" ;;
-    *)
-        echo "Unsupported architecture: ${TARGET_ARCH_INPUT}" >&2
-        exit 1
-        ;;
-esac
-echo ""
-
-# Display settings
-echo "4. Display Settings"
-echo "-------------------"
-read -p "Display resolution (default: 1920x1080): " RESOLUTION
-RESOLUTION="${RESOLUTION:-1920x1080}"
-read -p "DPI (default: 96): " DPI
-DPI="${DPI:-96}"
-echo ""
-
-# Language/Timezone settings
-echo "5. Language/Timezone Settings"
-echo "-----------------------------"
-echo "Select language (affects timezone):"
-echo "  ja) Japanese (Asia/Tokyo)"
-echo "  en) English (UTC)"
-read -p "Select language [ja/en] (default: en): " lang_choice
-case "${lang_choice}" in
-    ja|JA|jp|JP)
-        TIMEZONE="Asia/Tokyo"
-        echo "Japanese selected. Timezone: Asia/Tokyo"
-        ;;
-    *)
-        TIMEZONE="UTC"
-        echo "English selected. Timezone: UTC"
-        ;;
-esac
-echo ""
-
-# SSL directory (optional)
-echo "6. SSL Configuration (Optional)"
-echo "-------------------------------"
-read -p "SSL directory path (leave empty to skip): " SSL_DIR
-echo ""
-
-# Default SSL dir fallback (same as start-container.sh)
-if [ -z "${SSL_DIR}" ]; then
-    DEFAULT_SSL_DIR="$(pwd)/ssl"
-    if [ -d "${DEFAULT_SSL_DIR}" ]; then
-        SSL_DIR="${DEFAULT_SSL_DIR}"
-        echo "Using SSL dir: ${SSL_DIR}"
-    fi
-fi
-
-# Mac / Docker Desktop settings
-echo "7. Mac / Docker Desktop Settings"
-echo "---------------------------------"
-if [ "${IS_MAC}" = "true" ]; then
-    echo "macOS (Darwin) detected."
-    echo "Mac-specific settings apply:"
-    echo "  - platform declaration added to docker-compose (suppresses arch mismatch warning)"
-    echo "  - /dev/bus/usb skipped (not available in Docker Desktop VM)"
-    read -p "Enable Mac-specific settings? (Y/n): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Nn]$ ]]; then
-        IS_MAC=false
-        echo "Mac-specific settings disabled."
-    else
-        echo "Mac-specific settings enabled."
-    fi
-else
-    echo "Non-macOS host detected ($(uname -s))."
-    read -p "Enable Mac / Docker Desktop-specific settings anyway? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        IS_MAC=true
-        echo "Mac-specific settings enabled."
-    else
-        echo "Mac-specific settings disabled."
-    fi
-fi
-echo ""
-
-CURRENT_USER=$(whoami)
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE_ENV_SCRIPT="${SCRIPT_DIR}/compose-env.sh"
 
 if [ ! -x "${COMPOSE_ENV_SCRIPT}" ]; then
@@ -240,7 +118,7 @@ fi
 mkdir -p .devcontainer
 
 # Build compose-env arguments
-COMPOSE_ARGS=(--encoder "${ENCODER}" --ubuntu "${UBUNTU_VERSION}" --resolution "${RESOLUTION}" --dpi "${DPI}" --arch "${TARGET_ARCH}" --timezone "${TIMEZONE}")
+COMPOSE_ARGS=(--encoder "${ENCODER}" --ubuntu "${UBUNTU_VERSION}" --resolution "${RESOLUTION}" --dpi "${DPI}" --stream-scale "${STREAM_SCALE}" --framerate "${FRAMERATE}" --arch "${TARGET_ARCH}" --timezone "${TIMEZONE}" --docker-mode "${DOCKER_MODE}")
 if [ "${GPU_ALL}" = "true" ]; then
     COMPOSE_ARGS+=(--all)
 elif [ -n "${GPU_NUMS}" ]; then
@@ -255,7 +133,7 @@ fi
 
 # Generate environment variables
 ENV_FILE=".devcontainer/.env"
-"${COMPOSE_ENV_SCRIPT}" "${COMPOSE_ARGS[@]}" --env-file "${ENV_FILE}"
+CONTAINER_NAME="${CONTAINER_NAME}" "${COMPOSE_ENV_SCRIPT}" "${COMPOSE_ARGS[@]}" --env-file "${ENV_FILE}"
 
 # Load generated environment values
 set -a
@@ -264,12 +142,6 @@ source "${ENV_FILE}"
 set +a
 
 DEVCONTAINER_CONTAINER_NAME="${CONTAINER_NAME}"
-
-# Determine build language from timezone
-case "${TIMEZONE}" in
-    Asia/Tokyo) BUILD_LANGUAGE="ja" ;;
-    *) BUILD_LANGUAGE="en" ;;
-esac
 
 {
     echo ""
@@ -333,19 +205,6 @@ chmod +x .devcontainer/initialize.sh
 
 # Workspace folder (relative to this script)
 CURRENT_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LINK_PATH="/home/${CURRENT_USER}/quokka-workspace"
-
-if [ -L "${LINK_PATH}" ]; then
-    read -p "Remove existing symlink ${LINK_PATH}? [y/N]: " confirm
-    if [[ "${confirm}" =~ ^[Yy]$ ]]; then
-        rm -f "${LINK_PATH}"
-    else
-        echo "Symlink not removed. Exiting."
-        exit 1
-    fi
-fi
-
-ln -srf "${CURRENT_SCRIPT_DIR}/../quokka-workspace" "${LINK_PATH}"
 WORKSPACE_FOLDER="/home/${CURRENT_USER}/host_home"
 
 GPU_DEVICES=""
@@ -474,6 +333,10 @@ services:
       - HOST_HOSTNAME=\${CONTAINER_HOSTNAME}
       - SHELL=/bin/bash
       - DISPLAY=:1
+      - TZ=\${RUNTIME_TZ}
+      - LANG=\${RUNTIME_LANG}
+      - LC_ALL=\${RUNTIME_LC_ALL}
+      - LANGUAGE=\${RUNTIME_LANGUAGE}
       - DPI=\${DPI}
       - SCALE_FACTOR=\${SCALE_FACTOR}
       - FORCE_DEVICE_SCALE_FACTOR=\${FORCE_DEVICE_SCALE_FACTOR}
@@ -481,6 +344,9 @@ services:
       - DISPLAY_WIDTH=\${WIDTH}
       - DISPLAY_HEIGHT=\${HEIGHT}
       - CUSTOM_RESOLUTION=\${RESOLUTION}
+      - STREAM_SCALE=\${STREAM_SCALE}
+      - SELKIES_FRAMERATE=\${FRAMERATE}
+      - START_DOCKER=\${START_DOCKER}
       - USER_UID=\${USER_UID}
       - USER_GID=\${USER_GID}
       - USER_NAME=\${USER_NAME}
@@ -510,11 +376,7 @@ services:
     network_mode: bridge
 EOF
 
-# Mac-specific: declare platform for Docker Desktop compatibility
-# Without this, Docker Desktop shows a warning when the image arch differs from host arch
-if [ "${IS_MAC}" = "true" ]; then
-    echo "    platform: linux/${TARGET_ARCH}" >> .devcontainer/docker-compose.override.yml
-fi
+echo "    platform: linux/${TARGET_ARCH}" >> .devcontainer/docker-compose.override.yml
 
 DEVICE_ENTRIES=()
 VOLUME_ENTRIES=()
@@ -528,6 +390,9 @@ if [ -n "${VIDEO_GID}" ]; then
 fi
 if [ -n "${RENDER_GID}" ]; then
     GROUPS_TO_ADD+=("${RENDER_GID}")
+fi
+if [ -n "${DOCKER_SOCK_GID}" ] && [ "${DOCKER_SOCK_GID}" != "0" ]; then
+    GROUPS_TO_ADD+=("${DOCKER_SOCK_GID}")
 fi
 
 if [ "${#GROUPS_TO_ADD[@]}" -gt 0 ]; then
@@ -579,9 +444,12 @@ fi
 if [ -n "${SSL_DIR}" ] && [ -f "${SSL_DIR}/cert.pem" ] && [ -f "${SSL_DIR}/cert.key" ]; then
     VOLUME_ENTRIES+=("\${SSL_DIR}:/config/ssl:ro")
 fi
+if [ -n "${DOCKER_SOCK_MOUNT}" ]; then
+    VOLUME_ENTRIES+=("\${DOCKER_SOCK_MOUNT}")
+fi
 
 # Add /mnt mount on non-mac hosts (Docker Desktop for Mac does not share /mnt by default)
-if [ "$(uname -s)" != "Darwin" ] && [ -d "/mnt" ]; then
+if [ "${IS_MAC}" != "true" ] && [ -d "/mnt" ]; then
     VOLUME_ENTRIES+=("/mnt:\${HOST_MNT_MOUNT}:rw")
 fi
 
@@ -631,8 +499,12 @@ fi
 
 cat >> .devcontainer/README.md << EOF
 - **Ubuntu Version**: ${UBUNTU_VERSION}
+- **Container Name**: ${CONTAINER_NAME}
+- **Docker Mode**: ${DOCKER_MODE}
 - **Resolution**: ${RESOLUTION}
 - **DPI**: ${DPI}
+- **Stream Scale**: ${STREAM_SCALE}
+- **Framerate**: ${FRAMERATE}
 - **Timezone**: ${TIMEZONE}
 
 ## Access URLs
@@ -669,6 +541,7 @@ echo "  - .devcontainer/README.md"
 echo "  - .env (for docker-compose)"
 echo ""
 echo "Configuration summary:"
+echo "  - Container name: ${CONTAINER_NAME}"
 echo "  - Encoder: ${ENCODER}"
 if [ "${ENCODER}" = "nvidia" ] || [ "${ENCODER}" = "nvidia-wsl" ]; then
     if [ "${GPU_ALL}" = "true" ]; then
@@ -678,8 +551,11 @@ if [ "${ENCODER}" = "nvidia" ] || [ "${ENCODER}" = "nvidia-wsl" ]; then
     fi
 fi
 echo "  - Ubuntu: ${UBUNTU_VERSION}"
+echo "  - Docker mode: ${DOCKER_MODE}"
 echo "  - Resolution: ${RESOLUTION}"
 echo "  - DPI: ${DPI}"
+echo "  - Stream scale: ${STREAM_SCALE}"
+echo "  - Framerate: ${FRAMERATE}"
 echo "  - Timezone: ${TIMEZONE}"
 echo "  - HTTPS Port: ${HOST_PORT_SSL}"
 if [ "${IS_MAC}" = "true" ]; then

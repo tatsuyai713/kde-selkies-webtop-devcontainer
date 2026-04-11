@@ -68,6 +68,12 @@ if [ -f /usr/local/bin/patch-selkies-safari-keyboard.py ]; then
   python3 /usr/local/bin/patch-selkies-safari-keyboard.py
 fi
 
+# Ensure STREAM_SCALE UI fix is applied to the actual runtime web root
+if [ -f /usr/local/bin/patch-selkies-stream-scale-ui.py ]; then
+  chmod +x /usr/local/bin/patch-selkies-stream-scale-ui.py
+  DASHBOARD=web python3 /usr/local/bin/patch-selkies-stream-scale-ui.py
+fi
+
 sed -i "s|REPLACE_DOWNLOADS_PATH|$FILE_MANAGER_PATH|g" /usr/share/selkies/web/nginx/footer.html 2>/dev/null || true
 cp \
   /usr/share/selkies/www/icon.png \
