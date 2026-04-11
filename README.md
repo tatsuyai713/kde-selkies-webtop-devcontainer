@@ -26,12 +26,13 @@
 ./build-user-image.sh -u 22.04                                # Ubuntu 22.04
 
 # 2. コンテナを起動
+./start-container.sh                                          # 対話設定で起動
 ./start-container.sh --encoder software                       # ソフトウェアエンコード
-./start-container.sh --encoder nvidia --gpu all               # NVIDIA NVENC（全GPU）
+./start-container.sh --encoder nvidia --all                   # NVIDIA NVENC（全GPU）
 ./start-container.sh --encoder nvidia --num 0                 # NVIDIA NVENC（GPU 0のみ）
 ./start-container.sh --encoder intel                          # Intel VA-API
-./start-container.sh --encoder amd                            # AMD VA-API
-./start-container.sh --encoder nvidia-wsl --gpu all           # WSL2 + NVIDIA NVENC
+./start-container.sh --encoder amd -r 1920x1080 -S 0.5        # AMD VA-API + 実解像度半分
+./start-container.sh --encoder nvidia-wsl --all               # WSL2 + NVIDIA NVENC
 
 # 3. ブラウザでアクセス
 # → https://localhost:<30000+UID> (例: UID=1000 → https://localhost:31000)
@@ -45,13 +46,17 @@
 ./stop-container.sh --rm               # 停止して削除（commitした後のみ推奨）
 ```
 
-以上で完了です！ 🎉
+`./start-container.sh` を引数なしで実行すると、`create-devcontainer-config.sh` と同じ項目を対話形式で設定できます。
 
 ### VS Code Dev Container を使用する場合
 
 ```bash
 # 1. Dev Container設定を生成
 ./create-devcontainer-config.sh
+
+# start-container.sh と同じ対話項目を使用:
+# container name / Ubuntu / arch / docker mode / encoder / GPU / resolution / DPI
+# stream scale / framerate / timezone / SSL / Mac settings
 
 # 2. VS Codeで開く
 # VS Codeで「F1」→「Dev Containers: Reopen in Container」を選択
@@ -92,13 +97,14 @@
   - ヒストリー最適化（重複無視、追記モード、タイムスタンプ）
   - 便利なエイリアス（ll, la, grep色付けなど）
 
-- **🎮 柔軟なエンコーダー/GPU選択**: 明確なコマンド引数
+- **🎮 柔軟な起動設定**: 対話/CLI の両方で同じ設定項目を利用可能
   - `--encoder nvidia` - NVIDIA NVENC
   - `--encoder intel` - Intel VA-API
   - `--encoder amd` - AMD VA-API
   - `--encoder software` - ソフトウェアエンコード
-  - `--gpu all` - Docker全GPU使用（NVIDIA）
-  - `--num 0,1` - 特定GPUデバイス指定
+  - `--all` / `--num 0,1` - Docker GPU割り当て（`docker --gpus`、encoder と独立）
+  - `-S 0.5` - 実際の配信解像度を 50% に縮小
+  - `--docker-mode dind|dood` - コンテナ内 Docker かホスト Docker socket を選択
 
 ### 開発者体験
 
@@ -108,7 +114,8 @@
 
 - **🛠️ 完全な管理スクリプト**: 全操作用シェルスクリプト
   - `build-user-image.sh` - パスワード付きビルド
-  - `start-container.sh --encoder <type>` - エンコーダー選択で起動
+  - `start-container.sh` - 対話/CLI で起動、既存コンテナは自動再利用
+  - `create-devcontainer-config.sh` - 同じ設定項目で Dev Container 設定を生成
   - `stop/shell-container.sh` - ライフサイクル管理
   - `commit-container.sh` - 変更を保存
 
@@ -297,32 +304,41 @@ UID/GIDが一致するパーソナルイメージを作成（1-2分）：
 
 ### コンテナの起動
 
-`start-container.sh`スクリプトはGPUとオプションの引数を使用：
+`start-container.sh` は 2 通りの使い方があります。
 
 ```bash
-# 構文: ./start-container.sh [--gpu <type>] [options]
-# デフォルト: オプション未指定時はソフトウェアレンダリング
+# 対話モード
+./start-container.sh
 
-# NVIDIA GPUオプション:
-./start-container.sh --gpu nvidia --all              # 全利用可能NVIDIA GPUを使用
-./start-container.sh --gpu nvidia --num 0            # NVIDIA GPU 0のみ使用
-./start-container.sh --gpu nvidia --num 0,1          # NVIDIA GPU 0と1を使用
-
-# Intel/AMD GPUオプション:
-./start-container.sh --gpu intel                     # Intel統合GPU使用（Quick Sync Video）
-./start-container.sh --gpu amd                       # AMD GPU使用（VCE/VCN）
-
-# WSL2 NVIDIA:
-./start-container.sh --gpu nvidia-wsl --all          # WSL2でのNVIDIA GPU
-
-# ソフトウェアレンダリング:
-./start-container.sh                                 # GPUなし（デフォルト）
-./start-container.sh --gpu none                      # GPUなしを明示的に指定
-
-# 解像度とDPI:
-./start-container.sh --gpu nvidia --all -r 3840x2160 -d 192    # 4K HiDPI
-./start-container.sh -r 2560x1440 -d 144                       # WQHD
+# CLI モード
+./start-container.sh --encoder software
+./start-container.sh --encoder nvidia --all
+./start-container.sh --encoder nvidia --num 0
+./start-container.sh --encoder intel --dri-node /dev/dri/renderD129
+./start-container.sh --encoder amd -r 2560x1440 -d 144 -S 0.5
+./start-container.sh --encoder nvidia-wsl --all --docker-mode dood
+./start-container.sh --encoder software -a amd64              # docker run --platform linux/amd64 を自動付与
 ```
+
+**対話モードで設定できる項目（Dev Container 作成時と同一）:**
+
+- container name
+- Ubuntu version
+- target architecture
+- docker mode (`dind` / `dood`)
+- encoder type
+- Docker GPU selection (`--all` / `--num`)
+- DRI node
+- resolution / DPI / stream scale / framerate
+- timezone / language
+- SSL directory
+- Mac / Docker Desktop settings
+
+**既存コンテナがある場合の挙動:**
+
+- 同名コンテナが停止中なら、以前の設定のまま再開
+- 同名コンテナが起動中なら、そのまま終了
+- その場合は対話項目は表示されません
 
 **UIDベースのポート割り当て（マルチユーザー対応）:**
 
@@ -346,6 +362,8 @@ WebRTCによるリモートアクセスが可能：
 - **ホスト名:** `Docker-$(hostname)`に設定
 - **ホストホームマウント:** `~/host_home`で利用可能
 - **コンテナ名:** `linuxserver-kde-{username}`
+- **docker mode:** `dind` はコンテナ内 `dockerd`、`dood` はホスト `/var/run/docker.sock` を利用
+- **STREAM_SCALE:** 表示だけでなく、エンコード前の実解像度も縮小
 
 ### 変更の保存（重要！）
 
@@ -378,7 +396,7 @@ exit
 ./stop-container.sh --rm
 
 # 4. 次回起動時、commitしたイメージで全変更が反映
-./start-container.sh --gpu intel
+./start-container.sh --encoder intel
 ```
 
 ### コンテナの停止
@@ -431,7 +449,8 @@ IMAGE_NAME=ghcr.io/tatsuyai713/your-base ./files/push-base-image.sh
 |--------|-------------|-------|
 | `files/build-base-image.sh` | ベースイメージをビルド | `./files/build-base-image.sh [-a arch]` |
 | `build-user-image.sh` | ユーザー固有イメージをビルド | `./build-user-image.sh [-l ja]` |
-| `start-container.sh` | デスクトップコンテナを起動 | `./start-container.sh [--gpu <type>]` |
+| `start-container.sh` | デスクトップコンテナを起動/再開 | `./start-container.sh` または `./start-container.sh --encoder <type>` |
+| `create-devcontainer-config.sh` | Dev Container設定を生成 | `./create-devcontainer-config.sh` |
 | `stop-container.sh` | コンテナを停止 | `./stop-container.sh [--rm]` |
 
 ### 管理スクリプト
@@ -442,29 +461,26 @@ IMAGE_NAME=ghcr.io/tatsuyai713/your-base ./files/push-base-image.sh
 | `commit-container.sh` | コンテナ変更をイメージに保存 | `./commit-container.sh` |
 | `files/push-base-image.sh` | ベースイメージをGHCRへPush | `./files/push-base-image.sh` |
 
-### GPUオプション詳細
+### 起動オプション詳細
 
 ```bash
 ./start-container.sh [オプション]
 
-GPU選択:
-  -g, --gpu <vendor>    GPUベンダー: none|nvidia|nvidia-wsl|intel|amd
-  --all                 全GPU使用（nvidia/nvidia-wsl用）
-  --num <list>          カンマ区切りGPUリスト（nvidia用、WSL非対応）
-
-GPU使用例:
-  --gpu nvidia --all          # NVIDIA GPU - 全利用可能
-  --gpu nvidia --num 0,1      # NVIDIA GPU - 特定GPU
-  --gpu nvidia-wsl --all      # WSL2上のNVIDIA
-  --gpu intel                 # Intel統合/ディスクリートGPU（VA-API）
-  --gpu amd                   # AMD GPU（VA-API + 利用可能ならROCm）
-  --gpu none                  # ソフトウェアレンダリングのみ
-
-その他オプション:
-  -n <name>             コンテナ名
-  -r <WxH>              解像度（例: 1920x1080）
-  -d <dpi>              DPI（例: 96, 144, 192）
-  -s <ssl_dir>          SSL証明書ディレクトリ
+主なオプション:
+  -e, --encoder <type>        software|nvidia|nvidia-wsl|intel|amd
+  -g, --gpu <value>           Docker --gpus 値: all または device=0,1
+  --all                       --gpu all のショートカット
+  --num <list>                --gpu device=<list> のショートカット
+  --dri-node <path>           Intel/AMD 用の render node を明示
+  -r <WxH>                    解像度（例: 1920x1080）
+  -d <dpi>                    DPI（例: 96, 144, 192）
+  -S <factor>                 実配信解像度の倍率（0.25-1.0）
+  -f <fps|min-max>            フレームレート（例: 30, 30-60）
+  --timezone <tz>             タイムゾーン（例: Asia/Tokyo）
+  --docker-mode <mode>        dind または dood
+  -a <arch>                   amd64 / arm64
+  -p <platform>               docker run --platform を明示指定
+  -s <ssl_dir>                SSL証明書ディレクトリ
 ```
 
 ---
@@ -478,6 +494,10 @@ GPU使用例:
 ./start-container.sh -r 1920x1080 -d 96              # 標準
 ./start-container.sh -r 2560x1440 -d 144             # WQHD HiDPI
 ./start-container.sh -r 3840x2160 -d 192             # 4K HiDPI
+
+# STREAM_SCALE（実際の配信解像度を縮小）
+./start-container.sh --encoder software -r 1920x1080 -S 0.5
+# 1920x1080 のウィンドウを 960x540 でエンコードして配信
 ```
 
 ### ビデオエンコード
@@ -491,8 +511,7 @@ GPU使用例:
 | AMD | VA-API | 高 | 低 |
 | なし | Software (libx264) | 中 | 高 |
 
-エンコーダーは`--gpu`オプションに基づいてPixelfluxが自動選択します。
-ハードウェアエンコードはゼロコピーパイプラインにより低遅延を実現します。
+エンコーダーは `--encoder` に基づいて選択されます。`-S/--stream-scale` を指定すると、表示だけでなくエンコード前の実解像度自体を縮小するため、帯域だけでなく encoder 負荷の削減にも効きます。
 
 ### オーディオ設定
 
@@ -520,7 +539,7 @@ cp /path/to/your/cert.pem ssl/
 cp /path/to/your/key.pem ssl/cert.key
 
 # 3. コンテナ起動（ssl/フォルダを自動検出）
-./start-container.sh --gpu nvidia --all
+./start-container.sh --encoder nvidia --all
 ```
 
 ### 自己署名証明書の生成
@@ -674,12 +693,17 @@ docker exec linuxserver-kde-$(whoami) pactl list sinks short
 |------|------|----------|
 | `RESOLUTION` | 解像度 | `1920x1080` |
 | `DPI` | DPI設定 | `96` |
+| `STREAM_SCALE` | 実配信解像度の倍率 | `1.0` |
+| `FRAMERATE` | Selkies フレームレート | `30-60` |
+| `TIMEZONE` | タイムゾーン | `UTC` |
 
 #### GPU
 
 | 変数 | 説明 | デフォルト |
 |------|------|----------|
-| `GPU_VENDOR` | GPUベンダー | `none` |
+| `ENCODER` | エンコーダー種別 | 未設定 |
+| `GPU_VENDOR` | GPUベンダー | `software` |
+| `DOCKER_MODE` | Docker モード | `dind` |
 
 #### ネットワーク
 
@@ -696,6 +720,9 @@ docker exec linuxserver-kde-$(whoami) pactl list sinks short
 devcontainer-ubuntu-kde-selkies-for-mac/
 ├── build-user-image.sh           # ユーザーイメージビルド
 ├── start-container.sh            # コンテナ起動
+├── create-devcontainer-config.sh # Dev Container設定生成
+├── compose-env.sh                # compose/devcontainer 用 env 生成
+├── interactive-common.sh         # 対話設定の共通処理
 ├── stop-container.sh             # コンテナ停止
 ├── shell-container.sh            # シェルアクセス
 ├── commit-container.sh           # 変更保存

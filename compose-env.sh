@@ -368,11 +368,6 @@ case "${GPU_VENDOR}" in
     nvidia)
         ENABLE_NVIDIA="true"
         DISABLE_ZINK="true"
-        if [ "${DOCKER_GPUS}" = "all" ]; then
-            NVIDIA_VISIBLE_DEVICES="all"
-        elif [[ "${DOCKER_GPUS}" =~ ^device= ]]; then
-            NVIDIA_VISIBLE_DEVICES="${DOCKER_GPUS#device=}"
-        fi
         if [ -d "/dev/dri" ]; then
             GPU_DEVICES="/dev/dri:/dev/dri:rwm"
         fi
@@ -383,11 +378,6 @@ case "${GPU_VENDOR}" in
         DISABLE_ZINK="true"
         XDG_RUNTIME_DIR="/mnt/wslg/runtime-dir"
         LD_LIBRARY_PATH="/usr/lib/wsl/lib"
-        if [ "${DOCKER_GPUS}" = "all" ]; then
-            NVIDIA_VISIBLE_DEVICES="all"
-        elif [[ "${DOCKER_GPUS}" =~ ^device= ]]; then
-            NVIDIA_VISIBLE_DEVICES="${DOCKER_GPUS#device=}"
-        fi
         ;;
     intel)
         LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-iHD}"
@@ -420,6 +410,15 @@ case "${GPU_VENDOR}" in
         ENABLE_NVIDIA="false"
         ;;
 esac
+
+if [ -n "${DOCKER_GPUS}" ]; then
+    ENABLE_NVIDIA="true"
+    if [ "${DOCKER_GPUS}" = "all" ]; then
+        NVIDIA_VISIBLE_DEVICES="all"
+    elif [[ "${DOCKER_GPUS}" =~ ^device= ]]; then
+        NVIDIA_VISIBLE_DEVICES="${DOCKER_GPUS#device=}"
+    fi
+fi
 
 USER_UID="${HOST_UID}"
 USER_GID="${HOST_GID}"

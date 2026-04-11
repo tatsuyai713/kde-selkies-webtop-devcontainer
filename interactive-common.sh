@@ -136,8 +136,10 @@ shared_collect_interactive_settings() {
     local default_encoder_choice="1"
     local default_docker_mode_choice="1"
     local default_lang_choice="en"
+    local default_gpu_choice="1"
     local encoder_choice=""
     local docker_mode_choice=""
+    local gpu_choice=""
     local arch_choice=""
     local lang_choice=""
     local default_mac_choice="no"
@@ -159,6 +161,12 @@ shared_collect_interactive_settings() {
         Asia/Tokyo) default_lang_choice="ja" ;;
         *) default_lang_choice="en" ;;
     esac
+
+    if [[ "${GPU_ALL:-false}" == "true" || "${DOCKER_GPUS:-}" == "all" ]]; then
+        default_gpu_choice="2"
+    elif [[ -n "${GPU_NUMS:-}" || "${DOCKER_GPUS:-}" == device=* ]]; then
+        default_gpu_choice="3"
+    fi
 
     case "${IS_MAC:-false}" in
         true) default_mac_choice="yes" ;;
@@ -183,8 +191,8 @@ shared_collect_interactive_settings() {
     esac
     echo ""
 
-    echo "2. Encoder Configuration"
-    echo "------------------------"
+    echo "2. Encoder and GPU Configuration"
+    echo "--------------------------------"
     echo "Select encoder type:"
     echo "  1) Software (CPU)"
     echo "  2) NVIDIA (NVENC)"
@@ -233,23 +241,27 @@ shared_collect_interactive_settings() {
     GPU_ALL="false"
     GPU_NUMS=""
     DOCKER_GPUS=""
-    if [[ "${ENCODER}" == "nvidia" || "${ENCODER}" == "nvidia-wsl" ]]; then
-        echo ""
-        echo "Docker GPU Selection"
-        echo "--------------------"
-        if shared_prompt_yes_no_default "Enable Docker --gpus?" "yes"; then
-            if [[ "${ENCODER}" == "nvidia-wsl" ]]; then
-                GPU_ALL="true"
-                echo "WSL2 uses all GPUs (gpus=all)."
-            else
-                if shared_prompt_yes_no_default "Use all NVIDIA GPUs?" "yes"; then
-                    GPU_ALL="true"
-                else
-                    shared_prompt_required_text GPU_NUMS "Enter GPU device numbers (comma-separated, e.g. 0,1)"
-                fi
-            fi
-        fi
-    fi
+    echo ""
+
+    echo "Docker GPU Selection"
+    echo "--------------------"
+    echo "Select Docker GPU attachment (independent from encoder):"
+    echo "  1) None"
+    echo "  2) All GPUs (--gpus all)"
+    echo "  3) Specific devices (--gpus device=...)"
+    shared_prompt_choice_default gpu_choice "Select [1-3]" "${default_gpu_choice}" '^[1-3]$'
+    case "${gpu_choice}" in
+        2)
+            GPU_ALL="true"
+            DOCKER_GPUS="all"
+            ;;
+        3)
+            shared_prompt_required_text GPU_NUMS "Enter GPU device numbers (comma-separated, e.g. 0,1)"
+            DOCKER_GPUS="device=${GPU_NUMS}"
+            ;;
+        *)
+            ;;
+    esac
     echo ""
 
     echo "3. Display Settings"

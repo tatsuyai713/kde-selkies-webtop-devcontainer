@@ -26,12 +26,13 @@ A containerized Kubuntu (KDE Plasma) desktop environment accessible via browser.
 ./build-user-image.sh -u 22.04                                # Ubuntu 22.04
 
 # 2. Start container
+./start-container.sh                                          # Interactive configuration
 ./start-container.sh --encoder software                       # Software encoding
-./start-container.sh --encoder nvidia --gpu all               # NVIDIA NVENC (all GPUs)
+./start-container.sh --encoder nvidia --all                   # NVIDIA NVENC (all GPUs)
 ./start-container.sh --encoder nvidia --num 0                 # NVIDIA NVENC (GPU 0 only)
 ./start-container.sh --encoder intel                          # Intel VA-API
-./start-container.sh --encoder amd                            # AMD VA-API
-./start-container.sh --encoder nvidia-wsl --gpu all           # WSL2 + NVIDIA NVENC
+./start-container.sh --encoder amd -r 1920x1080 -S 0.5        # AMD VA-API + half stream resolution
+./start-container.sh --encoder nvidia-wsl --all               # WSL2 + NVIDIA NVENC
 
 # 3. Access via browser
 # → https://localhost:<30000+UID> (e.g., UID=1000 → https://localhost:31000)
@@ -45,7 +46,7 @@ A containerized Kubuntu (KDE Plasma) desktop environment accessible via browser.
 ./stop-container.sh --rm               # Stop and remove (only after commit!)
 ```
 
-That's it! 🎉
+Running `./start-container.sh` with no arguments opens the same interactive settings screen used by `create-devcontainer-config.sh`.
 
 ### Using VS Code Dev Container
 
@@ -97,8 +98,9 @@ That's it! 🎉
   - `--encoder intel` - Intel VA-API
   - `--encoder amd` - AMD VA-API
   - `--encoder software` - Software encoding
-  - `--gpu all` - Use all Docker GPUs (NVIDIA)
-  - `--num 0,1` - Specific GPU devices
+  - `--all` / `--num 0,1` - Docker GPU attachment (`docker --gpus`), independent from encoder
+  - `-S 0.5` - Reduce actual streamed resolution to 50%
+  - `--docker-mode dind|dood` - Choose inner Docker or host Docker socket
 
 ### Developer Experience
 
@@ -108,7 +110,8 @@ That's it! 🎉
 
 - **🛠️ Complete Management Scripts:** Shell scripts for all operations
   - `build-user-image.sh` - Build with password
-  - `start-container.sh --encoder <type>` - Start with encoder selection
+  - `start-container.sh` - Start or resume the desktop container (interactive with no args)
+  - `create-devcontainer-config.sh` - Generate Dev Container files with the same settings
   - `stop/shell-container.sh` - Lifecycle management
   - `commit-container.sh` - Save your changes
 
@@ -297,31 +300,27 @@ Note: Prefix with `USER_PASSWORD=...` to skip the interactive prompt.
 
 ### Starting the Container
 
-The `start-container.sh` script uses GPU and optional arguments:
+The `start-container.sh` script uses encoder selection plus optional Docker GPU attachment:
 
 ```bash
-# Syntax: ./start-container.sh [--gpu <type>] [options]
-# Default: Software rendering if no options specified
+# Syntax: ./start-container.sh [options]
+# No arguments -> interactive configuration
 
-# NVIDIA GPU options:
-./start-container.sh --gpu nvidia --all              # Use all available NVIDIA GPUs
-./start-container.sh --gpu nvidia --num 0            # Use NVIDIA GPU 0 only
-./start-container.sh --gpu nvidia --num 0,1          # Use NVIDIA GPU 0 and 1
+# Encoder selection:
+./start-container.sh --encoder software
+./start-container.sh --encoder intel
+./start-container.sh --encoder amd
+./start-container.sh --encoder nvidia --all
+./start-container.sh --encoder nvidia-wsl --all
 
-# Intel/AMD GPU options:
-./start-container.sh --gpu intel                     # Use Intel integrated GPU (Quick Sync Video)
-./start-container.sh --gpu amd                       # Use AMD GPU (VCE/VCN)
+# Docker GPU attachment (optional, independent from encoder):
+./start-container.sh --encoder nvidia --all
+./start-container.sh --encoder nvidia --num 0,1
+./start-container.sh --encoder software --gpu all             # expose NVIDIA GPUs without using NVENC
 
-# WSL2 NVIDIA:
-./start-container.sh --gpu nvidia-wsl --all          # NVIDIA GPU on WSL2
-
-# Software rendering:
-./start-container.sh                                 # No GPU (default)
-./start-container.sh --gpu none                      # Explicitly specify no GPU
-
-# Resolution and DPI:
-./start-container.sh --gpu nvidia --all -r 3840x2160 -d 192    # 4K HiDPI
-./start-container.sh -r 2560x1440 -d 144                       # WQHD
+# Resolution, DPI, and stream scaling:
+./start-container.sh --encoder nvidia --all -r 3840x2160 -d 192
+./start-container.sh --encoder amd -r 2560x1440 -d 144 -S 0.5
 ```
 
 **UID-Based Port Assignment (Multi-User Support):**
@@ -378,7 +377,7 @@ exit
 ./stop-container.sh --rm
 
 # 4. Next startup uses the committed image with all your changes
-./start-container.sh --gpu intel
+./start-container.sh --encoder intel
 ```
 
 ### Stopping the Container
@@ -431,7 +430,7 @@ IMAGE_NAME=ghcr.io/tatsuyai713/your-base ./files/push-base-image.sh
 |--------|-------------|-------|
 | `files/build-base-image.sh` | Build the base image | `./files/build-base-image.sh [-a arch]` |
 | `build-user-image.sh` | Build user-specific image | `./build-user-image.sh [-l ja]` |
-| `start-container.sh` | Start the desktop container | `./start-container.sh [--gpu <type>]` |
+| `start-container.sh` | Start or resume the desktop container | `./start-container.sh` or `./start-container.sh --encoder <type>` |
 | `stop-container.sh` | Stop the container | `./stop-container.sh [--rm]` |
 
 ### Management Scripts
@@ -448,17 +447,21 @@ IMAGE_NAME=ghcr.io/tatsuyai713/your-base ./files/push-base-image.sh
 ./start-container.sh [options]
 
 GPU Selection:
-  -g, --gpu <vendor>    GPU vendor: none|nvidia|nvidia-wsl|intel|amd
-  --all                 Use all GPUs (for nvidia/nvidia-wsl)
-  --num <list>          Comma-separated GPU list (for nvidia, not supported on WSL)
+  -e, --encoder <type>  software|nvidia|nvidia-wsl|intel|amd
+  -g, --gpu <value>     Docker --gpus value: all or device=0,1
+  --all                 Shortcut for --gpu all
+  --num <list>          Shortcut for --gpu device=<list>
+  --dri-node <path>     DRI render node for VA-API
+  --docker-mode <mode>  dind or dood
+  -S, --stream-scale    Stream resolution scale (0.25-1.0)
 
-GPU Examples:
-  --gpu nvidia --all          # NVIDIA GPU - all available
-  --gpu nvidia --num 0,1      # NVIDIA GPU - specific GPUs
-  --gpu nvidia-wsl --all      # NVIDIA on WSL2
-  --gpu intel                 # Intel integrated/discrete GPU (VA-API)
-  --gpu amd                   # AMD GPU (VA-API + ROCm if available)
-  --gpu none                  # Software rendering only
+Examples:
+  --encoder nvidia --all      # NVIDIA NVENC with all Docker GPUs
+  --encoder nvidia --num 0,1  # NVIDIA NVENC with specific devices
+  --encoder intel             # Intel VA-API
+  --encoder amd               # AMD VA-API
+  --encoder software          # Software rendering
+  --encoder software --gpu all  # expose NVIDIA GPUs for non-encoding workloads
 
 Other Options:
   -n <name>             Container name
@@ -491,7 +494,7 @@ Other Options:
 | AMD | VA-API | High | Low |
 | None | Software (libx264) | Medium | High |
 
-Encoder is automatically selected by Pixelflux based on `--gpu` option.
+Encoder selection follows `--encoder`. Docker GPU exposure is controlled separately by `--gpu`, `--all`, or `--num`.
 Hardware encoding achieves low latency through zero-copy pipeline.
 
 ### Audio Settings
@@ -520,7 +523,7 @@ cp /path/to/your/cert.pem ssl/
 cp /path/to/your/key.pem ssl/cert.key
 
 # 3. Start container (auto-detects ssl/ folder)
-./start-container.sh --gpu nvidia --all
+./start-container.sh --encoder nvidia --all
 ```
 
 ### Self-Signed Certificate Generation
