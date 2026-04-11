@@ -623,10 +623,10 @@ docker exec linuxserver-kde-$(whoami) vulkaninfo | head -50
 
 ```bash
 # Check PulseAudio server
-docker exec linuxserver-kde-$(whoami) pactl info
+docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pactl info'
 
 # List sinks
-docker exec linuxserver-kde-$(whoami) pactl list sinks short
+docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pactl list sinks short'
 ```
 
 **Solutions:**

@@ -196,8 +196,19 @@ echo "[svc-selkies] H.264 Paint-over CRF set to: ${SELKIES_H264_PAINTOVER_CRF}"
 
 echo "[svc-selkies] Using selkies with pixelflux (GPU_VENDOR=${GPU_VENDOR}, use-cpu=${USE_CPU:-false})"
 
+pulse_has_sink() {
+  local sink_name="$1"
+  s6-setuidgid "$TARGET_USER" with-contenv pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -qx "${sink_name}"
+}
+
+pulse_has_source() {
+  local source_name="$1"
+  s6-setuidgid "$TARGET_USER" with-contenv pactl list short sources 2>/dev/null | awk '{print $2}' | grep -qx "${source_name}"
+}
+
 # Default sink setup (wait until pulseaudio is ready, then create virtual sinks)
-if [ ! -f '/dev/shm/audio.lock' ]; then
+if [ ! -f '/dev/shm/audio.lock' ] || ! pulse_has_sink output || ! pulse_has_sink input || ! pulse_has_source output.monitor; then
+  rm -f /dev/shm/audio.lock
   # ensure pulseaudio is up
   for i in $(seq 1 30); do
     if s6-setuidgid "$TARGET_USER" with-contenv pactl info >/dev/null 2>&1; then
@@ -207,15 +218,25 @@ if [ ! -f '/dev/shm/audio.lock' ]; then
     sleep 0.5
   done
   if [ "${READY:-0}" -eq 1 ]; then
-    s6-setuidgid "$TARGET_USER" with-contenv pactl \
-      load-module module-null-sink \
-      sink_name="output" \
-      sink_properties=device.description="output"
-    s6-setuidgid "$TARGET_USER" with-contenv pactl \
-      load-module module-null-sink \
-      sink_name="input" \
-      sink_properties=device.description="input"
-    touch /dev/shm/audio.lock
+    if ! pulse_has_sink output; then
+      s6-setuidgid "$TARGET_USER" with-contenv pactl \
+        load-module module-null-sink \
+        sink_name="output" \
+        sink_properties=device.description="output" >/dev/null
+    fi
+    if ! pulse_has_sink input; then
+      s6-setuidgid "$TARGET_USER" with-contenv pactl \
+        load-module module-null-sink \
+        sink_name="input" \
+        sink_properties=device.description="input" >/dev/null
+    fi
+    s6-setuidgid "$TARGET_USER" with-contenv pactl set-default-sink output >/dev/null 2>&1 || true
+    s6-setuidgid "$TARGET_USER" with-contenv pactl set-default-source output.monitor >/dev/null 2>&1 || true
+    if pulse_has_sink output && pulse_has_sink input && pulse_has_source output.monitor; then
+      touch /dev/shm/audio.lock
+    else
+      echo "[svc-selkies] pulseaudio recovered, but virtual sinks are incomplete (audio may still be missing)." >&2
+    fi
   else
     echo "[svc-selkies] pulseaudio not ready; skipped null-sink setup (audio may be missing)." >&2
   fi

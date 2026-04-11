@@ -1,5 +1,14 @@
 #!/usr/bin/with-contenv bash
 TARGET_USER="${CUSTOM_USER:-${USER_NAME:-root}}"
+PULSE_DIR="${PULSE_RUNTIME_PATH:-/defaults}"
+TARGET_GROUP="$(id -gn "${TARGET_USER}" 2>/dev/null || printf '%s' "${TARGET_USER}")"
+
+# Pulseaudio requires a user-owned secure runtime dir. If a root shell ever
+# autospawned a daemon here, stale socket/pid files can block the real service.
+install -d -m 700 "${PULSE_DIR}"
+chown "${TARGET_USER}:${TARGET_GROUP}" "${PULSE_DIR}"
+chmod 700 "${PULSE_DIR}"
+rm -f "${PULSE_DIR}/native" "${PULSE_DIR}/pid"
 
 exec s6-setuidgid "$TARGET_USER" \
   /usr/bin/pulseaudio \
