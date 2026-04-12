@@ -21,6 +21,31 @@ if [[ -z ${LSIO_READ_ONLY_FS} ]] && [[ -z ${LSIO_NON_ROOT_USER} ]]; then
         useradd -M -d "${USER_HOME}" -u "${PUID}" -g "${PGID}" -s /bin/bash "${TARGET_USER}" || true
     fi
 
+    # In dood mode, prefer the actual mounted socket gid seen inside the container.
+    DOCKER_SOCKET_GID=""
+    if [[ "${START_DOCKER:-true}" == "false" ]] && [[ -S /var/run/docker.sock ]]; then
+        DOCKER_SOCKET_GID=$(stat -Lc '%g' /var/run/docker.sock 2>/dev/null || stat -c '%g' /var/run/docker.sock 2>/dev/null || true)
+    fi
+    if [[ -z "${DOCKER_SOCKET_GID}" ]]; then
+        DOCKER_SOCKET_GID="${DOCKER_SOCK_GID:-}"
+    fi
+
+    # Ensure the runtime user can access the mounted docker socket, even when
+    # Docker Desktop rewrites the bind mount to root:root inside the container.
+    if [[ -n ${DOCKER_SOCKET_GID:-} ]]; then
+        if ! id -G "${TARGET_USER}" | grep -qw "${DOCKER_SOCKET_GID}"; then
+            DOCKER_GROUP_NAME=$(getent group "${DOCKER_SOCKET_GID}" | awk -F: '{print $1}')
+            if [[ -z "${DOCKER_GROUP_NAME}" ]]; then
+                DOCKER_GROUP_NAME="dockersock$(head /dev/urandom | tr -dc 'a-z0-9' | head -c4)"
+                groupadd "${DOCKER_GROUP_NAME}"
+                groupmod -g "${DOCKER_SOCKET_GID}" "${DOCKER_GROUP_NAME}"
+                echo "**** creating docker socket group ${DOCKER_GROUP_NAME} with id ${DOCKER_SOCKET_GID} ****"
+            fi
+            echo "**** adding docker socket gid ${DOCKER_SOCKET_GID} to ${TARGET_USER} ****"
+            usermod -a -G "${DOCKER_GROUP_NAME}" "${TARGET_USER}"
+        fi
+    fi
+
     # basic home and ownership for shared dirs
     install -d -m 755 "${USER_HOME}"
     lsiown "${TARGET_USER}:${TARGET_USER}" /app /config /defaults /opt/selkies-env "${USER_HOME}"

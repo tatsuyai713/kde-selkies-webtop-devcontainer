@@ -124,6 +124,25 @@ to_lower() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
+get_socket_gid() {
+  local socket_path="$1"
+  local gid=""
+
+  if [[ ! -S "${socket_path}" ]]; then
+    return 1
+  fi
+
+  gid=$(stat -Lc '%g' "${socket_path}" 2>/dev/null || true)
+  if [[ -z "${gid}" ]]; then
+    gid=$(stat -Lf '%g' "${socket_path}" 2>/dev/null || true)
+  fi
+  if [[ "${gid}" =~ ^[0-9]+$ ]]; then
+    printf '%s' "${gid}"
+    return 0
+  fi
+  return 1
+}
+
 prompt_text_default() {
   local __var_name="$1"
   local prompt="$2"
@@ -663,8 +682,11 @@ if [[ "${DOCKER_MODE}" == "dood" ]]; then
   DOCKER_MODE_FLAGS+=(-v /var/run/docker.sock:/var/run/docker.sock)
   DOCKER_MODE_FLAGS+=(-e START_DOCKER=false)
 
-  # Try to pass the docker socket group id for permission compatibility (Linux host only).
-  DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)
+  # Pass the docker socket group id for permission compatibility on Linux and macOS.
+  DOCKER_SOCK_GID=$(get_socket_gid /var/run/docker.sock 2>/dev/null || true)
+  if [ -n "${DOCKER_SOCK_GID}" ]; then
+    DOCKER_MODE_FLAGS+=(-e DOCKER_SOCK_GID="${DOCKER_SOCK_GID}")
+  fi
   if [ -n "${DOCKER_SOCK_GID}" ] && [ "${DOCKER_SOCK_GID}" != "0" ]; then
     DOCKER_MODE_FLAGS+=(--group-add="${DOCKER_SOCK_GID}")
     echo "Docker mode: dood (mounting /var/run/docker.sock, gid: ${DOCKER_SOCK_GID})"

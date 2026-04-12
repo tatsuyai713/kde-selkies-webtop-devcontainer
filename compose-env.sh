@@ -40,6 +40,25 @@ EOF
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+get_socket_gid() {
+    local socket_path="$1"
+    local gid=""
+
+    if [[ ! -S "${socket_path}" ]]; then
+        return 1
+    fi
+
+    gid=$(stat -Lc '%g' "${socket_path}" 2>/dev/null || true)
+    if [[ -z "${gid}" ]]; then
+        gid=$(stat -Lf '%g' "${socket_path}" 2>/dev/null || true)
+    fi
+    if [[ "${gid}" =~ ^[0-9]+$ ]]; then
+        printf '%s' "${gid}"
+        return 0
+    fi
+    return 1
+}
+
 # Defaults (matching start-container.sh)
 ENCODER="${ENCODER:-}"
 GPU_VENDOR="${GPU_VENDOR:-}"
@@ -434,7 +453,7 @@ if [[ "${DOCKER_MODE}" == "dood" ]]; then
     START_DOCKER="false"
     DOCKER_SOCK_MOUNT="/var/run/docker.sock:/var/run/docker.sock"
     # ホストのdocker socketのGIDを取得してコンテナに渡す
-    DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)
+    DOCKER_SOCK_GID=$(get_socket_gid /var/run/docker.sock 2>/dev/null || true)
     if [ -n "${DOCKER_SOCK_GID}" ] && [ "${DOCKER_SOCK_GID}" != "0" ]; then
         echo "Docker mode: dood (host Docker socket) - GID: ${DOCKER_SOCK_GID}" >&2
     fi
