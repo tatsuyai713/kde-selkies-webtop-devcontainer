@@ -282,6 +282,8 @@ USER_PASSWORD=yourpass ./build-user-image.sh
 - 停止してもコンテナは削除されない（再起動や commit がいつでも可能）
 - ホスト名: `Docker-$(hostname)`
 - ホストホーム: `~/host_home` でマウント
+- ホスト `/mnt`: `~/host_mnt` でマウント（Linux/WSL2 のみ、macOS ではスキップ）
+  - WSL2 では Windows ドライブにアクセス可能（例: `~/host_mnt/c/Users/...`）
 - コンテナ名: `linuxserver-kde-{username}`
 - `dind` はコンテナ内 `dockerd`、`dood` はホスト Docker socket を利用
 - `STREAM_SCALE` は表示だけでなくエンコード前の実解像度を縮小

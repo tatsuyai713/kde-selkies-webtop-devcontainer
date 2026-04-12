@@ -282,6 +282,8 @@ container name, Ubuntu version, architecture, docker mode (`dind`/`dood`), encod
 - Containers persist after stop (restart or commit anytime)
 - Hostname: `Docker-$(hostname)`
 - Host home mounted at `~/host_home`
+- Host `/mnt` mounted at `~/host_mnt` (Linux/WSL2 only, skipped on macOS)
+  - On WSL2 this gives access to Windows drives (e.g. `~/host_mnt/c/Users/...`)
 - Container name: `linuxserver-kde-{username}`
 - `dind` runs `dockerd` inside the container; `dood` shares the host Docker socket
 - `STREAM_SCALE` reduces the actual encoding resolution, not just the display
