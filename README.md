@@ -1,789 +1,651 @@
 # kde-selkies-webtop-devcontainer
 
-**[English Version (README_en.md)](README_en.md)**
+**[日本語版 (README_ja.md)](README_ja.md)**
 
-ブラウザからアクセス可能なコンテナ化されたKubuntu (KDE Plasma) デスクトップ環境。Selkies WebRTCストリーミングを使用し、VNC/RDPなしでフル機能のLinuxデスクトップを提供します。VS Code Dev Containerにも対応。
+A containerized Kubuntu (KDE Plasma) desktop accessible from any browser. Powered by Selkies WebRTC streaming — no VNC or RDP needed.
 
-### 機能対応表（プラットフォーム）
+Works on **Ubuntu/Linux**, **macOS (Docker Desktop)**, and **WSL2**. All platforms share the same entry points: `build-user-image.sh`, `start-container.sh`, and `create-devcontainer-config.sh`.
 
-| 環境 | GPUレンダリング | WebGL/Vulkan | ハードウェアエンコード | 備考 |
-|------|----------------|--------------|----------------------|------|
-| **Ubuntu + NVIDIA GPU** | ✅ 対応 | ✅ 対応 | ✅ NVENC | 高パフォーマンス |
-| **Ubuntu + Intel GPU** | ✅ 対応 | ✅ 対応 | ✅ VA-API (QSV) | 統合GPU可 |
-| **Ubuntu + AMD GPU** | ✅ 対応 | ✅ 対応 | ✅ VA-API | RDNA/GCN対応 |
-| **WSL2 + NVIDIA GPU** | ❌ ソフトウェア | ❌ ソフトウェアのみ | ✅ NVENC | WSL2で動作確認済み |
-| **macOS (Docker)** | ❌ 非対応 | ❌ ソフトウェアのみ | ❌ 非対応 | VM制限 |
+## Why This Project?
+
+This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/docker-webtop) that focuses on developer usability and multi-platform support.
+
+| | Original | This Project |
+|---|---|---|
+| **Image delivery** | Pull-ready image | Two-stage local build (user image in 1-2 min) |
+| **Container user** | Root | Your own UID/GID (non-root) |
+| **UID/GID setup** | Manual | Automatic matching |
+| **Password handling** | Plaintext in command | Environment variable |
+| **Shell** | Generic bash | Ubuntu Desktop bash (color prompt, Git branch, aliases) |
+| **GPU selection** | Auto-detect | Explicit `--encoder` / `--gpu` flags |
+| **Dependency versions** | Floating | Pinned (VirtualGL 3.1.4, Pixelflux 1.6.0, Selkies by commit hash) |
+| **Docker-in-Docker** | — | `--docker-mode dind\|dood` |
+| **Stream tuning** | — | `-S` stream scale, `-f` framerate control |
+| **Dev Container** | — | `create-devcontainer-config.sh` (same settings as CLI) |
+| **Language support** | English only | Multi-language (EN/JA) |
+
+## Key Features
+
+- **Two-stage build** — Heavy base image (5-10 GB, built once) + lightweight user image (~100 MB, 1-2 min). No more 30-60 min waits.
+- **Non-root by default** — Containers run under your own user. Proper permission separation, sudo when needed.
+- **Automatic UID/GID matching** — Mounted host directories just work. No "permission denied" on shared folders.
+- **Unified configuration** — `start-container.sh` (day-to-day) and `create-devcontainer-config.sh` (VS Code Dev Container) share the same interactive settings.
+- **Explicit encoder/GPU control** — `--encoder nvidia|intel|amd|software|nvidia-wsl` selects the encoder. `--all`/`--num` controls Docker GPU assignment independently.
+- **Stream scaling** — `-S 0.5` halves the actual encoding resolution, reducing both bandwidth and encoder load.
+- **Docker mode switching** — `--docker-mode dood` (host socket) or `dind` (container-internal dockerd).
+- **Browser-only access** — `https://localhost:<30000+UID>` after startup. No SSH/RDP distribution needed.
+- **Secure passwords** — Set via environment variable; never exposed in commands or logs.
+- **Multi-language** — `-l ja` at build time installs Japanese input (Mozc), timezone, and locale.
+- **Version-pinned** — Reproducible builds with pinned VirtualGL 3.1.4, Pixelflux 1.6.0, and Selkies (pinned by git commit hash).
+
+## Platform Support
+
+| Environment | GPU Rendering | WebGL / Vulkan | HW Encoding | Notes |
+|---|---|---|---|---|
+| **Ubuntu + NVIDIA GPU** | ✅ | ✅ | ✅ NVENC | Best performance |
+| **Ubuntu + Intel GPU** | ✅ | ✅ | ✅ VA-API (QSV) | Integrated GPU OK |
+| **Ubuntu + AMD GPU** | ✅ | ✅ | ✅ VA-API | RDNA / GCN |
+| **WSL2 + NVIDIA GPU** | ❌ Software | ❌ Software | ✅ NVENC | Encoding works, rendering is software |
+| **macOS (Docker Desktop)** | ❌ | ❌ Software | ❌ | VM limitation; workflow is identical |
 
 ---
 
-## クイックスタート
+## Quick Start
 
 ```bash
-# 1. ユーザーイメージをビルド（1-2分）
-# ベースイメージはGHCRから自動取得されます
-./build-user-image.sh                                         # 英語環境
-./build-user-image.sh -l ja                                   # 日本語環境
-./build-user-image.sh -u 22.04                                # Ubuntu 22.04
+# 1. Build user image (1-2 min; base image pulled from GHCR automatically)
+./build-user-image.sh                    # English (default)
+./build-user-image.sh -l ja              # Japanese environment
+./build-user-image.sh -u 22.04           # Ubuntu 22.04
 
-# 2. コンテナを起動
-./start-container.sh                                          # 対話設定で起動
-./start-container.sh --encoder software                       # ソフトウェアエンコード
-./start-container.sh --encoder nvidia --all                   # NVIDIA NVENC（全GPU）
-./start-container.sh --encoder nvidia --num 0                 # NVIDIA NVENC（GPU 0のみ）
-./start-container.sh --encoder intel                          # Intel VA-API
-./start-container.sh --encoder amd -r 1920x1080 -S 0.5        # AMD VA-API + 実解像度半分
-./start-container.sh --encoder nvidia-wsl --all               # WSL2 + NVIDIA NVENC
+# 2. Start the container
+./start-container.sh                     # Interactive settings
+./start-container.sh --encoder software  # Software encoding
+./start-container.sh --encoder nvidia --all          # NVIDIA NVENC (all GPUs)
+./start-container.sh --encoder nvidia --num 0        # NVIDIA NVENC (GPU 0 only)
+./start-container.sh --encoder intel                 # Intel VA-API
+./start-container.sh --encoder amd -r 1920x1080 -S 0.5  # AMD + half stream resolution
+./start-container.sh --encoder nvidia-wsl --all      # WSL2 + NVIDIA NVENC
 
-# 3. ブラウザでアクセス
-# → https://localhost:<30000+UID> (例: UID=1000 → https://localhost:31000)
-# → http://localhost:<40000+UID>  (例: UID=1000 → http://localhost:41000)
+# 3. Open in browser
+#    https://localhost:<30000+UID>  (e.g. UID 1000 → https://localhost:31000)
+#    http://localhost:<40000+UID>   (e.g. UID 1000 → http://localhost:41000)
 
-# 4. 変更を保存（重要！コンテナ削除前に必ず実行）
+# 4. Save changes (IMPORTANT — do this before removing the container)
 ./commit-container.sh
 
-# 5. 停止
-./stop-container.sh                    # 停止（コンテナ保持、再起動可能）
-./stop-container.sh --rm               # 停止して削除（commitした後のみ推奨）
+# 5. Stop
+./stop-container.sh            # Stop (container persists, can restart)
+./stop-container.sh --rm       # Stop and remove (only recommended after commit)
 ```
 
-`./start-container.sh` を引数なしで実行すると、`create-devcontainer-config.sh` と同じ項目を対話形式で設定できます。
+### Platform-Specific Examples
 
-### VS Code Dev Container を使用する場合
+**Ubuntu / Linux**
+```bash
+./build-user-image.sh -u 22.04
+./start-container.sh --encoder intel
+```
+
+**macOS (Docker Desktop)**
+```bash
+./build-user-image.sh -u 22.04 -a amd64
+./start-container.sh --encoder software -a amd64 --docker-mode dood
+```
+
+**WSL2 + NVIDIA**
+```bash
+./build-user-image.sh -u 22.04
+./start-container.sh --encoder nvidia-wsl --all
+```
+
+### VS Code Dev Container
 
 ```bash
-# 1. Dev Container設定を生成
+# 1. Generate Dev Container configuration (same interactive settings as start-container.sh)
 ./create-devcontainer-config.sh
 
-# start-container.sh と同じ対話項目を使用:
-# container name / Ubuntu / arch / docker mode / encoder / GPU / resolution / DPI
-# stream scale / framerate / timezone / SSL / Mac settings
+# 2. In VS Code: F1 → "Dev Containers: Reopen in Container"
 
-# 2. VS Codeで開く
-# VS Codeで「F1」→「Dev Containers: Reopen in Container」を選択
-
-# 3. コンテナ内でワークスペースが自動的に開きます
-# ブラウザから https://localhost:<表示されたポート> でデスクトップにアクセス
+# 3. Access the desktop at https://localhost:<displayed-port>
 ```
 
 ---
 
-## 🚀 このプロジェクトの特徴
+## Table of Contents
 
-### アーキテクチャの改善
-
-- **🏗️ 2段階ビルドシステム**: ベースイメージ（5-10 GB）とユーザーイメージ（~100 MB、1-2分でビルド）を分離
-  - ベースイメージはシステムパッケージとデスクトップ環境を含む
-  - ユーザーイメージはあなたのUID/GIDに合わせたユーザーを追加
-  - 毎回30-60分待つ必要なし！
-
-- **🔒 非rootコンテナ実行**: デフォルトでユーザー権限で実行
-  - `fakeroot`ハックや権限エスカレーション回避策を削除
-  - システムとユーザー操作の適切な権限分離
-  - 必要時はsudoアクセス可能
-
-- **📁 自動UID/GID一致**: ファイル権限がシームレスに動作
-  - ユーザーイメージが自動的にホストのUID/GIDに一致
-  - マウントしたホストディレクトリの所有権が正しく設定
-  - 共有フォルダでの「permission denied」エラーなし
-
-### ユーザー体験の向上
-
-- **🔐 セキュアパスワード管理**: 環境変数でパスワード入力
-  - コマンドにパスワードを平文で表示しない
-  - イメージ内に安全に保存
-
-- **💻 Ubuntu Desktop標準環境**: 完全な`.bashrc`設定
-  - Git branch検出付きカラープロンプト
-  - ヒストリー最適化（重複無視、追記モード、タイムスタンプ）
-  - 便利なエイリアス（ll, la, grep色付けなど）
-
-- **🎮 柔軟な起動設定**: 対話/CLI の両方で同じ設定項目を利用可能
-  - `--encoder nvidia` - NVIDIA NVENC
-  - `--encoder intel` - Intel VA-API
-  - `--encoder amd` - AMD VA-API
-  - `--encoder software` - ソフトウェアエンコード
-  - `--all` / `--num 0,1` - Docker GPU割り当て（`docker --gpus`、encoder と独立）
-  - `-S 0.5` - 実際の配信解像度を 50% に縮小
-  - `--docker-mode dind|dood` - コンテナ内 Docker かホスト Docker socket を選択
-
-### 開発者体験
-
-- **📦 バージョン固定**: 再現可能なビルドを保証
-  - VirtualGL 3.1.4、Selkies 1.6.2
-  - 「昨日は動いた」問題なし
-
-- **🛠️ 完全な管理スクリプト**: 全操作用シェルスクリプト
-  - `build-user-image.sh` - パスワード付きビルド
-  - `start-container.sh` - 対話/CLI で起動、既存コンテナは自動再利用
-  - `create-devcontainer-config.sh` - 同じ設定項目で Dev Container 設定を生成
-  - `stop/shell-container.sh` - ライフサイクル管理
-  - `commit-container.sh` - 変更を保存
-
-- **🌐 多言語サポート**: 日本語環境対応
-  - ビルド時に`-l ja`で日本語入力（Mozc）
-  - タイムゾーン（Asia/Tokyo）とロケール（ja_JP.UTF-8）自動設定
-  - fcitx入力メソッドフレームワーク含む
-  - 英語がデフォルト
-
-### なぜこのフォーク？
-
-| 元プロジェクト | このフォーク |
-|---------------|-------------|
-| Pull可能イメージ | ローカルビルド（1-2分） |
-| rootコンテナ | ユーザー権限コンテナ |
-| 手動UID/GID設定 | 自動マッチング |
-| コマンドにパスワード | 環境変数で安全に |
-| 汎用bash | Ubuntu Desktop bash |
-| GPU自動検出 | エンコーダー/GPU明示的選択 |
-| バージョンドリフト | バージョン固定 |
-| 英語のみ | 多言語（EN/JP） |
+- [Why This Project?](#why-this-project)
+- [Key Features](#key-features)
+- [Platform Support](#platform-support)
+- [Quick Start](#quick-start)
+- [System Requirements](#system-requirements)
+- [Two-Stage Build System](#two-stage-build-system)
+- [Intel/AMD GPU Host Setup](#intelamd-gpu-host-setup)
+- [Setup (Build User Image)](#setup-build-user-image)
+- [Usage](#usage)
+- [Appendix: Build Base Image](#appendix-build-base-image)
+- [Appendix: Scripts Reference](#appendix-scripts-reference)
+- [Appendix: Configuration](#appendix-configuration)
+- [Appendix: HTTPS/SSL](#appendix-httpsssl)
+- [Troubleshooting](#troubleshooting)
+- [Known Limitations](#known-limitations)
+- [Appendix: Advanced Topics](#appendix-advanced-topics)
 
 ---
 
-## 目次
+## System Requirements
 
-- [システム要件](#システム要件)
-- [2段階ビルドシステム](#2段階ビルドシステム)
-- [Intel/AMD GPUホストセットアップ](#intelamd-gpuホストセットアップ)
-- [セットアップ（通常使用）](#セットアップ通常使用)
-- [使い方](#使い方)
-- [付録: ベースイメージのビルド](#付録-ベースイメージのビルド)
-- [付録: スクリプトリファレンス](#付録-スクリプトリファレンス)
-- [付録: 設定](#付録-設定)
-- [付録: HTTPS/SSL](#付録-httpsssl)
-- [トラブルシューティング](#トラブルシューティング)
-- [既知の制限](#既知の制限)
-- [付録: 高度なトピック](#付録-高度なトピック)
+### Required
+
+- **Docker** 20.10+ (Docker Desktop 4.0+)
+- **8 GB+ RAM** (16 GB recommended)
+- **20 GB+ free disk space**
+
+### GPU (Optional — for hardware acceleration)
+
+- **NVIDIA GPU** ✅ Tested
+  - Driver 470+, Maxwell generation or newer
+  - NVIDIA Container Toolkit installed
+- **Intel GPU** ✅ Tested
+  - Integrated graphics (HD Graphics, Iris, Arc) with Quick Sync Video
+  - VA-API drivers included in the container
+  - **Host setup required** (see below)
+- **AMD GPU** ⚠️ Partially tested
+  - Radeon with VCE/VCN encoder
+  - VA-API drivers included in the container
+  - **Host setup required** (see below)
 
 ---
 
-## システム要件
-
-### 必須
-- **Docker** 20.10以降（Docker Desktop 4.0+）
-- **8GB以上のRAM**（16GB推奨）
-- **20GB以上のディスク空き容量**
-
-### GPU（オプション、ハードウェアアクセラレーション用）
-- **NVIDIA GPU** ✅ テスト済み
-  - ドライバーバージョン 470以降
-  - Maxwell世代以降
-  - NVIDIA Container Toolkit インストール済み
-- **Intel GPU** ✅ テスト済み
-  - Intel統合グラフィックス（HD Graphics, Iris, Arc）
-  - Quick Sync Videoサポート
-  - VA-APIドライバはコンテナに含む
-  - **ホストセットアップ必要**（下記参照）
-- **AMD GPU** ⚠️ 部分的にテスト済み
-  - VCE/VCNエンコーダー搭載Radeonグラフィックス
-  - VA-APIドライバはコンテナに含む
-  - **ホストセットアップ必要**（下記参照）
-
-## 2段階ビルドシステム
-
-このプロジェクトは高速セットアップと適切なファイル権限のために2段階ビルドアプローチを使用：
+## Two-Stage Build System
 
 ```
 ┌─────────────────────────┐
-│   ベースイメージ (5-10 GB)  │  ← 初回のみビルド（30-60分）
-│  • 全システムパッケージ    │
-│  • デスクトップ環境       │
-│  • プリインストールアプリ  │
+│   Base Image (5-10 GB)  │  ← Built once (30-60 min) or pulled from GHCR
+│  • System packages      │
+│  • Desktop environment  │
+│  • Pre-installed apps   │
 └────────────┬────────────┘
              │
-             ↓ これを基にビルド
+             ↓  builds on top
 ┌────────────┴────────────┐
-│ ユーザーイメージ (~100 MB) │  ← あなたがビルド（1-2分）
-│  • あなたのユーザー名      │
-│  • あなたのUID/GID        │
-│  • あなたのパスワード      │
+│ User Image (~100 MB)    │  ← You build this (1-2 min)
+│  • Your username        │
+│  • Your UID/GID         │
+│  • Your password        │
 └─────────────────────────┘
 ```
 
-**メリット:**
+**Benefits:**
+- ✅ **Fast setup** — No 30-60 min build wait
+- ✅ **Proper permissions** — Files match your host UID/GID
+- ✅ **Easy updates** — Pull new base image, rebuild user image
 
-- ✅ **高速セットアップ:** 30-60分のビルド待ち不要
-- ✅ **適切な権限:** ファイルがホストのUID/GIDに一致
-- ✅ **簡単な更新:** 新しいベースイメージをビルド、ユーザーイメージを再ビルド
-
-**なぜUID/GID一致が重要？**
-
-- ホストディレクトリ（`$HOME`など）をマウントする際、ファイルに一致する所有権が必要
-- UID/GID不一致だと権限エラーが発生
-- ユーザーイメージが自動的にホストの認証情報に一致
+**Why UID/GID matching matters:**
+Mounting host directories (e.g. `$HOME`) requires matching file ownership. Without it you get permission errors. The user image handles this automatically.
 
 ---
 
-## Intel/AMD GPUホストセットアップ
+## Intel/AMD GPU Host Setup
 
-Intel/AMD GPUでハードウェアエンコード（VA-API）を使用する場合、ホスト側のセットアップが必要：
+Required only for Intel/AMD hardware encoding (VA-API). NVIDIA GPUs do not need this.
 
-### 1. ユーザーをvideo/renderグループに追加
-
-コンテナがGPUデバイス（`/dev/dri/*`）にアクセスするには、ホストユーザーが`video`と`render`グループのメンバーである必要があります：
+### 1. Add user to video/render groups
 
 ```bash
-# video/renderグループに追加
 sudo usermod -aG video,render $USER
-
-# ログアウト＆再ログインまたは再起動してグループ変更を適用
-# 確認:
-groups
-# 出力に "video" と "render" が含まれていることを確認
+# Log out and back in, then verify:
+groups  # should include "video" and "render"
 ```
 
-### 2. VA-APIドライバーのインストール（Intel）
+### 2. Install VA-API drivers
 
-IntelGPUハードウェアエンコード用：
-
+**Intel:**
 ```bash
-# VA-APIツールとIntelドライバーをインストール
-sudo apt update
-sudo apt install vainfo intel-media-va-driver-non-free
-
-# インストール確認（H.264エンコードサポートを確認）:
-vainfo
-# 出力に "VAProfileH264Main : VAEntrypointEncSlice" などが含まれていることを確認
+sudo apt update && sudo apt install vainfo intel-media-va-driver-non-free
+vainfo  # should show VAProfileH264Main : VAEntrypointEncSlice
 ```
 
-### 3. VA-APIドライバーのインストール（AMD）
-
-AMD GPUハードウェアエンコード用：
-
+**AMD:**
 ```bash
-# VA-APIツールとAMDドライバーをインストール
-sudo apt update
-sudo apt install vainfo mesa-va-drivers
-
-# インストール確認:
-vainfo
-# 出力に "VAProfileH264Main : VAEntrypointEncSlice" などが含まれていることを確認
+sudo apt update && sudo apt install vainfo mesa-va-drivers
+vainfo  # should show VAProfileH264Main : VAEntrypointEncSlice
 ```
 
-**注意:**
-- NVIDIA GPUはこのセットアップ不要
-- ホストでVA-APIが正しく動作すれば、コンテナでも自動的に動作
-- グループ変更後は必ずログアウト/再ログインまたは再起動
+> If VA-API works on the host, it automatically works inside the container.
 
 ---
 
-## セットアップ（通常使用）
+## Setup (Build User Image)
 
-ベースイメージはGHCRから自動取得されるため、通常利用ではビルド不要です。
-
-### ユーザーイメージのビルド
-
-UID/GIDが一致するパーソナルイメージを作成（1-2分）：
+The base image is pulled from GHCR automatically — no manual base build needed for typical use.
 
 ```bash
-# 英語（デフォルト）
+# English (default)
 ./build-user-image.sh
 
-# 日本語
+# Japanese
 ./build-user-image.sh -l ja
+
+# Skip password prompt
+USER_PASSWORD=yourpass ./build-user-image.sh
 ```
 
-※ `USER_PASSWORD=...` を先に付けると対話プロンプトを省略できます。
-
-**オプション: カスタマイズ**
-
+**Options:**
 ```bash
-# Ubuntu 22.04を使用
-./build-user-image.sh -u 22.04
-
-# 別バージョン
-./build-user-image.sh -v 2.0.0
-
-# 別のベースイメージを使用
-./build-user-image.sh -b my-custom-base:1.1.0
+./build-user-image.sh -u 22.04           # Ubuntu 22.04
+./build-user-image.sh -v 2.0.0           # Custom version
+./build-user-image.sh -b my-base:1.1.0   # Custom base image tag
+./build-user-image.sh -i ghcr.io/you/img  # Custom base image name
+./build-user-image.sh -a amd64           # Architecture hint
+./build-user-image.sh -p linux/amd64     # Explicit platform override
+./build-user-image.sh -n                 # Build without Docker cache
 ```
 
 ---
 
-## 使い方
+## Usage
 
-### コンテナの起動
+### Starting the Container
 
-`start-container.sh` は 2 通りの使い方があります。
+Two modes: **interactive** (no args) or **CLI** (with flags).
 
 ```bash
-# 対話モード
+# Interactive — prompts for all settings
 ./start-container.sh
 
-# CLI モード
+# CLI examples
 ./start-container.sh --encoder software
 ./start-container.sh --encoder nvidia --all
 ./start-container.sh --encoder nvidia --num 0
 ./start-container.sh --encoder intel --dri-node /dev/dri/renderD129
 ./start-container.sh --encoder amd -r 2560x1440 -d 144 -S 0.5
 ./start-container.sh --encoder nvidia-wsl --all --docker-mode dood
-./start-container.sh --encoder software -a amd64              # docker run --platform linux/amd64 を自動付与
+./start-container.sh --encoder software -a amd64   # adds --platform linux/amd64
 ```
 
-**対話モードで設定できる項目（Dev Container 作成時と同一）:**
+**Interactive settings** (same items used by `create-devcontainer-config.sh`):
 
-- container name
-- Ubuntu version
-- target architecture
-- docker mode (`dind` / `dood`)
-- encoder type
-- Docker GPU selection (`--all` / `--num`)
-- DRI node
-- resolution / DPI / stream scale / framerate
-- timezone / language
-- SSL directory
-- Mac / Docker Desktop settings
+container name, Ubuntu version, architecture, docker mode (`dind`/`dood`), encoder, Docker GPU selection (`--all`/`--num`), DRI node, resolution, DPI, stream scale, framerate, timezone, language, SSL directory, Mac/Docker Desktop options.
 
-**既存コンテナがある場合の挙動:**
+**Existing container behavior:**
+- Stopped container with the same name → resumes with previous settings (no prompts)
+- Running container with the same name → script exits
 
-- 同名コンテナが停止中なら、以前の設定のまま再開
-- 同名コンテナが起動中なら、そのまま終了
-- その場合は対話項目は表示されません
+**UID-based port assignment** (multi-user safe):
+- HTTPS: `30000 + UID` (e.g. UID 1000 → port 31000)
+- HTTP: `40000 + UID` (e.g. UID 1000 → port 41000)
 
-**UIDベースのポート割り当て（マルチユーザー対応）:**
+**Remote access:** WebRTC-based. LAN IP is auto-detected; access from `https://<host-ip>:<https-port>`.
 
-ポートは自動的にユーザーIDに基づいて割り当てられ、同一ホストで複数ユーザーが使用可能：
+**Container notes:**
+- Containers persist after stop (restart or commit anytime)
+- Hostname: `Docker-$(hostname)`
+- Host home mounted at `~/host_home`
+- Container name: `linuxserver-kde-{username}`
+- `dind` runs `dockerd` inside the container; `dood` shares the host Docker socket
+- `STREAM_SCALE` reduces the actual encoding resolution, not just the display
 
-- **HTTPSポート**: `30000 + UID`（例: UID 1000 → ポート 31000）
-- **HTTPポート**: `40000 + UID`（例: UID 1000 → ポート 41000）
-
-アクセス: `https://localhost:${HTTPS_PORT}`（例: UID 1000で `https://localhost:31000`）
-
-**リモートアクセス（LAN/WAN）:**
-
-WebRTCによるリモートアクセスが可能：
-
-- LAN IPアドレスを自動検出
-- リモートPCからアクセス: `https://<host-ip>:<https-port>`
-
-**コンテナの特徴:**
-
-- **コンテナ永続化:** 停止しても削除されない（再起動またはcommit可能）
-- **ホスト名:** `Docker-$(hostname)`に設定
-- **ホストホームマウント:** `~/host_home`で利用可能
-- **コンテナ名:** `linuxserver-kde-{username}`
-- **docker mode:** `dind` はコンテナ内 `dockerd`、`dood` はホスト `/var/run/docker.sock` を利用
-- **STREAM_SCALE:** 表示だけでなく、エンコード前の実解像度も縮小
-
-### 変更の保存（重要！）
-
-ソフトウェアをインストールしたり設定を変更した場合：
+### Saving Changes (Important!)
 
 ```bash
-# コンテナ状態をイメージに保存
 ./commit-container.sh
 ```
 
-**重要な注意:**
+- ⚠️ **Always commit before `./stop-container.sh --rm`** — otherwise changes are lost
+- Image format: `webtop-kde-{username}-{arch}-u{ubuntu_version}:{version}`
+- Committed images persist after container deletion
+- Next startup automatically uses the committed image
 
-- ⚠️ **`./stop-container.sh --rm`の前に必ずcommit** - commitしないと変更が失われます
-- ✅ イメージ名形式は `webtop-kde-{username}-{arch}:{version}`
-- ✅ commitしたイメージはコンテナ削除後も残る
-- ✅ 次回起動時は自動的にcommitしたイメージを使用
-
-**ワークフロー例:**
-
+**Typical workflow:**
 ```bash
-# 1. コンテナ内で作業、ソフトウェアインストール、設定変更
-./shell-container.sh
-# ... パッケージインストール、環境設定 ...
+./shell-container.sh          # Work inside the container
+# ... install packages, configure environment ...
 exit
-
-# 2. 変更をイメージに保存
-./commit-container.sh
-
-# 3. コンテナを安全に停止・削除（変更はイメージに保存済み）
-./stop-container.sh --rm
-
-# 4. 次回起動時、commitしたイメージで全変更が反映
-./start-container.sh --encoder intel
+./commit-container.sh         # Save to image
+./stop-container.sh --rm      # Safe to remove now
+./start-container.sh --encoder intel   # Resumes with all changes
 ```
 
-### コンテナの停止
+### Stopping the Container
 
 ```bash
-# 停止（再起動またはcommit用に保持）
-./stop-container.sh
-
-# 停止して削除
-./stop-container.sh --rm
-# または
-./stop-container.sh -r
+./stop-container.sh            # Stop (keeps container)
+./stop-container.sh --rm       # Stop and remove
 ```
 
 ---
 
-## 付録: ベースイメージのビルド
+## Appendix: Build Base Image
 
-ベースイメージは初回のみビルドが必要（30-60分）：
+Only needed if you want to build from scratch instead of pulling from GHCR (30-60 min):
 
 ```bash
-# デフォルトのリポジトリ: ghcr.io/tatsuyai713/webtop-kde
-# ホストアーキテクチャに合わせて自動検出
-./files/build-base-image.sh                         # Ubuntu 24.04 (デフォルト)
+./files/build-base-image.sh                         # Ubuntu 24.04, auto-detect arch
 ./files/build-base-image.sh -u 22.04                # Ubuntu 22.04
-
-# または明示的に指定
 ./files/build-base-image.sh -a amd64                # Intel/AMD 64-bit
 ./files/build-base-image.sh -a arm64                # Apple Silicon / ARM
-./files/build-base-image.sh -a amd64 -u 22.04       # AMD64 + Ubuntu 22.04
+./files/build-base-image.sh -a amd64 -u 22.04       # Combine options
+./files/build-base-image.sh --no-cache               # Clean rebuild
 
-# キャッシュなしでビルド（問題がある場合）
-./files/build-base-image.sh --no-cache
-
-# GHCRに保存する場合（デフォルトのリポジトリ名を使用）
+# Push to GHCR
 ./files/push-base-image.sh
 
-# リポジトリ名を変える場合
-IMAGE_NAME=ghcr.io/tatsuyai713/your-base ./files/build-base-image.sh
-IMAGE_NAME=ghcr.io/tatsuyai713/your-base ./files/push-base-image.sh
+# Custom repository
+IMAGE_NAME=ghcr.io/you/your-base ./files/build-base-image.sh
+IMAGE_NAME=ghcr.io/you/your-base ./files/push-base-image.sh
 ```
 
 ---
 
-## 付録: スクリプトリファレンス
+## Appendix: Scripts Reference
 
-### コアスクリプト
+### Core Scripts
 
-| スクリプト | 説明 | 使い方 |
-|--------|-------------|-------|
-| `files/build-base-image.sh` | ベースイメージをビルド | `./files/build-base-image.sh [-a arch]` |
-| `build-user-image.sh` | ユーザー固有イメージをビルド | `./build-user-image.sh [-l ja]` |
-| `start-container.sh` | デスクトップコンテナを起動/再開 | `./start-container.sh` または `./start-container.sh --encoder <type>` |
-| `create-devcontainer-config.sh` | Dev Container設定を生成 | `./create-devcontainer-config.sh` |
-| `stop-container.sh` | コンテナを停止 | `./stop-container.sh [--rm]` |
+| Script | Description | Usage |
+|---|---|---|
+| `build-user-image.sh` | Build user-specific image | `./build-user-image.sh [-l ja] [-u 22.04]` |
+| `start-container.sh` | Start or resume the container | `./start-container.sh [--encoder <type>]` |
+| `create-devcontainer-config.sh` | Generate Dev Container config | `./create-devcontainer-config.sh` |
+| `stop-container.sh` | Stop the container | `./stop-container.sh [--rm]` |
 
-### 管理スクリプト
+### Management Scripts
 
-| スクリプト | 説明 | 使い方 |
-|--------|-------------|-------|
-| `shell-container.sh` | コンテナシェルにアクセス | `./shell-container.sh` |
-| `commit-container.sh` | コンテナ変更をイメージに保存 | `./commit-container.sh` |
-| `files/push-base-image.sh` | ベースイメージをGHCRへPush | `./files/push-base-image.sh` |
+| Script | Description | Usage |
+|---|---|---|
+| `shell-container.sh` | Open a shell inside the container | `./shell-container.sh` |
+| `commit-container.sh` | Save container state to image | `./commit-container.sh` |
+| `logs-container.sh` | View container logs | `./logs-container.sh` |
+| `restart-container.sh` | Restart the container | `./restart-container.sh` |
+| `delete-image.sh` | Delete the user image | `./delete-image.sh` |
+| `files/build-base-image.sh` | Build the base image | `./files/build-base-image.sh [-a arch]` |
+| `files/push-base-image.sh` | Push base image to GHCR | `./files/push-base-image.sh` |
 
-### 起動オプション詳細
+### Start Options
 
-```bash
-./start-container.sh [オプション]
+```
+./start-container.sh [options]
 
-主なオプション:
-  -e, --encoder <type>        software|nvidia|nvidia-wsl|intel|amd
-  -g, --gpu <value>           Docker --gpus 値: all または device=0,1
-  --all                       --gpu all のショートカット
-  --num <list>                --gpu device=<list> のショートカット
-  --dri-node <path>           Intel/AMD 用の render node を明示
-  -r <WxH>                    解像度（例: 1920x1080）
-  -d <dpi>                    DPI（例: 96, 144, 192）
-  -S <factor>                 実配信解像度の倍率（0.25-1.0）
-  -f <fps|min-max>            フレームレート（例: 30, 30-60）
-  --timezone <tz>             タイムゾーン（例: Asia/Tokyo）
-  --docker-mode <mode>        dind または dood
-  -a <arch>                   amd64 / arm64
-  -p <platform>               docker run --platform を明示指定
-  -s <ssl_dir>                SSL証明書ディレクトリ
+Encoder / GPU:
+  -e, --encoder <type>       software | nvidia | nvidia-wsl | intel | amd
+  -g, --gpu <value>          Docker --gpus value: all or device=0,1
+  --all                      Shortcut for --gpu all
+  --num <list>               Shortcut for --gpu device=<list>
+  --dri-node <path>          DRI render node for VA-API
+
+Display:
+  -r <WxH>                   Resolution (e.g. 1920x1080)
+  -d <dpi>                   DPI (e.g. 96, 144, 192)
+  -S, --stream-scale <f>     Encoding resolution scale (0.25–1.0)
+  -f <fps|min-max>           Framerate (e.g. 30, 30-60)
+
+Other:
+  --docker-mode <mode>       dind or dood
+  --timezone <tz>            Timezone (e.g. Asia/Tokyo)
+  -a <arch>                  amd64 / arm64
+  -p <platform>              Explicit --platform for docker run
+  -s <ssl_dir>               SSL certificate directory
+  -n <name>                  Container name
 ```
 
 ---
 
-## 付録: 設定
+## Appendix: Configuration
 
-### 表示設定
+### Display Settings
 
 ```bash
-# 解像度とDPI
-./start-container.sh -r 1920x1080 -d 96              # 標準
+./start-container.sh -r 1920x1080 -d 96              # Standard
 ./start-container.sh -r 2560x1440 -d 144             # WQHD HiDPI
 ./start-container.sh -r 3840x2160 -d 192             # 4K HiDPI
 
-# STREAM_SCALE（実際の配信解像度を縮小）
+# Stream scale — reduces actual encoding resolution
 ./start-container.sh --encoder software -r 1920x1080 -S 0.5
-# 1920x1080 のウィンドウを 960x540 でエンコードして配信
+# Encodes at 960x540, displayed in a 1920x1080 viewport
 ```
 
-### ビデオエンコード
+### Video Encoding
 
-**ハードウェアエンコード (Pixelflux):**
+| GPU | Encoder | Quality | CPU Load |
+|---|---|---|---|
+| NVIDIA | NVENC | High | Low |
+| Intel | VA-API (Quick Sync) | High | Low |
+| AMD | VA-API | High | Low |
+| None | Software (libx264) | Medium | High |
 
-| GPU | エンコーダー | 品質 | CPU負荷 |
-|-----|-------------|------|---------|
-| NVIDIA | NVENC | 高 | 低 |
-| Intel | VA-API (Quick Sync) | 高 | 低 |
-| AMD | VA-API | 高 | 低 |
-| なし | Software (libx264) | 中 | 高 |
+`-S/--stream-scale` reduces the resolution before encoding, cutting both bandwidth and encoder load.
 
-エンコーダーは `--encoder` に基づいて選択されます。`-S/--stream-scale` を指定すると、表示だけでなくエンコード前の実解像度自体を縮小するため、帯域だけでなく encoder 負荷の削減にも効きます。
+### Audio
 
-### オーディオ設定
+| Feature | Status | Technology |
+|---|---|---|
+| Speaker output | ✅ Built-in | WebRTC (browser native) |
+| Microphone input | ✅ Built-in | WebRTC (browser native) |
 
-**オーディオサポート:**
-
-| 機能 | サポート | 技術 |
-|------|---------|------|
-| スピーカー出力 | ✅ 内蔵 | WebRTC（ブラウザネイティブ） |
-| マイク入力 | ✅ 内蔵 | WebRTC（ブラウザネイティブ） |
-
-Selkiesは双方向オーディオをブラウザにWebRTC経由でストリーミングします。
+Selkies streams bidirectional audio to the browser via WebRTC.
 
 ---
 
-## 付録: HTTPS/SSL
+## Appendix: HTTPS/SSL
 
-### SSL証明書の設定
+### Certificate Setup
 
 ```bash
-# 1. ssl/ディレクトリを作成
 mkdir -p ssl
-
-# 2. 証明書を配置
-cp /path/to/your/cert.pem ssl/
-cp /path/to/your/key.pem ssl/cert.key
-
-# 3. コンテナ起動（ssl/フォルダを自動検出）
-./start-container.sh --encoder nvidia --all
+cp /path/to/cert.pem ssl/
+cp /path/to/key.pem ssl/cert.key
+./start-container.sh --encoder nvidia --all   # auto-detects ssl/
 ```
 
-### 自己署名証明書の生成
+### Self-Signed Certificate
 
 ```bash
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -keyout ssl/cert.key -out ssl/cert.pem \
-  -subj "/C=JP/ST=Tokyo/L=Tokyo/O=Dev/CN=localhost"
+  -subj "/C=US/ST=State/L=City/O=Dev/CN=localhost"
 ```
 
-### 証明書の優先順位
+### Certificate Priority
 
-`start-container.sh`スクリプトは以下の順序で証明書を自動検出：
-
-1. `ssl/cert.pem`と`ssl/cert.key`
-2. 環境変数`SSL_DIR`
-3. 証明書が見つからない場合はイメージのデフォルト証明書を使用
+1. `ssl/cert.pem` + `ssl/cert.key`
+2. `SSL_DIR` environment variable
+3. Image default certificate (fallback)
 
 ---
 
-## トラブルシューティング
+## Troubleshooting
 
-### コンテナが起動しない
+### Container Won't Start
 
 ```bash
-# ログを確認
 docker logs linuxserver-kde-$(whoami)
-
-# イメージが存在するか確認
 docker images | grep webtop-kde
-
-# ユーザーイメージを再ビルド
-./build-user-image.sh
-
-# ポートが使用中か確認
-sudo netstat -tulpn | grep -E "31000|41000"
+./build-user-image.sh                           # Rebuild user image
+sudo netstat -tulpn | grep -E "31000|41000"     # Check port conflicts
 ```
 
-### GPUが検出されない
+### GPU Not Detected
 
 ```bash
 # NVIDIA
 ./shell-container.sh
 nvidia-smi
 
-# Intel/AMD
+# Intel / AMD
 ./shell-container.sh
-ls -la /dev/dri/
-vainfo
+ls -la /dev/dri/ && vainfo
 
-# Docker GPUアクセス確認
+# Verify Docker GPU access
 docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi
 ```
 
-### 権限の問題
+### Permission Issues
 
 ```bash
-# UID一致確認
-id  # ホスト上
+id                    # On host
 ./shell-container.sh
-id  # コンテナ内
-
-# UID/GID不一致の場合、ユーザーイメージを再ビルド
-./build-user-image.sh
+id                    # Inside container — UIDs should match
+# If mismatched, rebuild: ./build-user-image.sh
 ```
 
-### 黒画面 / デスクトップが表示されない
+### Black Screen / Desktop Not Showing
 
 ```bash
-# ログ確認
 docker logs linuxserver-kde-$(whoami)
-
-# plasmashellの状態確認
 docker exec linuxserver-kde-$(whoami) pgrep -af plasmashell
-
-# ランタイムディレクトリ確認
 docker exec linuxserver-kde-$(whoami) ls -la /run/user/$(id -u)
 ```
 
-**原因と対処:**
-- `/run/user/<uid>`が存在しない/権限が不正 → コンテナ再起動
-- plasmashellがクラッシュ → コンテナ再起動
+Causes: `/run/user/<uid>` missing or wrong permissions, plasmashell crash → restart the container.
 
-### WebGL/Vulkanが動かない
+### WebGL/Vulkan Not Working
 
 ```bash
-# OpenGL情報
 docker exec linuxserver-kde-$(whoami) glxinfo | head -30
-
-# Vulkan情報
 docker exec linuxserver-kde-$(whoami) vulkaninfo | head -50
 ```
 
-**macOSの場合:** Docker VMの制限により、GPUアクセラレーションは不可。ソフトウェアレンダリングで動作。
+On macOS: GPU acceleration is unavailable due to Docker VM limitations. Software rendering is used.
 
-### 音声が出ない
+### No Audio
 
 ```bash
-# PulseAudioサーバー確認
 docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pactl info'
-
-# シンク一覧
 docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pactl list sinks short'
 ```
 
-**対処:**
-- ブラウザのオーディオ権限を確認
-- HTTPS接続を使用（一部ブラウザはHTTPでオーディオをブロック）
+Check browser audio permissions and use HTTPS (some browsers block audio over HTTP).
 
 ---
 
-## 既知の制限
+## Known Limitations
 
-### Vulkanの制限
+### Vulkan
+- Xvfb does not support DRI3, so Vulkan applications cannot present frames
+- VirtualGL-based OpenGL works normally
+- In some setups, vkcube detects the NVIDIA GPU under Xvfb, but presentation behavior is configuration-dependent
 
-- XvfbはDRI3をサポートしていないため、Vulkanアプリケーションはフレームをプレゼントできず動作しません
-- VirtualGLを使用したOpenGLアプリケーションは正常に動作します
-- 環境によってはXvfb上でもvkcubeが動作しNVIDIA GPUを認識します（ただし表示/presentの挙動は構成依存です）
+### macOS
+- Docker Desktop runs containers inside a Linux VM — no access to Apple GPU (Metal)
+- WebGL/Vulkan uses software rendering (llvmpipe)
+- Use native Linux or WSL2 for hardware acceleration
 
-### macOSの制限
-
-- Docker Desktop for MacはLinux VM内でコンテナを実行するため、Apple GPU（Metal）へのアクセス不可
-- WebGL/Vulkanはソフトウェアレンダリング（llvmpipe）で動作
-- ハードウェアアクセラレーションが必要な場合はLinux実機またはWSL2を使用
-
-### WSL2 GPUメモ
-
-- WSL2はNVIDIAのみ対応
-- WSL2ではレンダリングはソフトウェア（llvmpipe）になり、WebGL/Vulkanもソフトウェア動作
+### WSL2
+- Only NVIDIA GPUs are supported
+- Rendering is software (llvmpipe); WebGL/Vulkan are software-only
+- Hardware encoding (NVENC) works via `--encoder nvidia-wsl`
 
 ---
 
-## 付録: 高度なトピック
+## Appendix: Advanced Topics
 
-### 環境変数リファレンス
+### Environment Variables
 
 <details>
-<summary>クリックで環境変数一覧を展開</summary>
+<summary>Click to expand</summary>
 
-#### コンテナ設定
+#### Container
 
-| 変数 | 説明 | デフォルト |
-|------|------|----------|
-| `CONTAINER_NAME` | コンテナ名 | `linuxserver-kde-$(whoami)` |
-| `IMAGE_BASE` | イメージベース名 | `webtop-kde` |
-| `IMAGE_VERSION` | イメージバージョン | `1.1.0` |
+| Variable | Description | Default |
+|---|---|---|
+| `CONTAINER_NAME` | Container name | `linuxserver-kde-$(whoami)` |
+| `IMAGE_BASE` | Image base name | `webtop-kde` |
+| `IMAGE_VERSION` | Image version | `1.1.0` |
 
-#### 表示
+#### Display
 
-| 変数 | 説明 | デフォルト |
-|------|------|----------|
-| `RESOLUTION` | 解像度 | `1920x1080` |
-| `DPI` | DPI設定 | `96` |
-| `STREAM_SCALE` | 実配信解像度の倍率 | `1.0` |
-| `FRAMERATE` | Selkies フレームレート | `30-60` |
-| `TIMEZONE` | タイムゾーン | `UTC` |
+| Variable | Description | Default |
+|---|---|---|
+| `RESOLUTION` | Resolution | `1920x1080` |
+| `DPI` | DPI | `96` |
+| `STREAM_SCALE` | Encoding resolution scale | `1.0` |
+| `FRAMERATE` | Selkies framerate | `30-60` |
+| `TIMEZONE` | Timezone | `UTC` |
 
 #### GPU
 
-| 変数 | 説明 | デフォルト |
-|------|------|----------|
-| `ENCODER` | エンコーダー種別 | 未設定 |
-| `GPU_VENDOR` | GPUベンダー | `software` |
-| `DOCKER_MODE` | Docker モード | `dind` |
+| Variable | Description | Default |
+|---|---|---|
+| `ENCODER` | Encoder type | (unset) |
+| `GPU_VENDOR` | GPU vendor | `software` |
+| `DOCKER_MODE` | Docker mode | `dind` |
 
-#### ネットワーク
+#### Network
 
-| 変数 | 説明 | デフォルト |
-|------|------|----------|
-| `PORT_SSL_OVERRIDE` | HTTPSポート上書き | `UID+30000` |
-| `PORT_HTTP_OVERRIDE` | HTTPポート上書き | `UID+40000` |
+| Variable | Description | Default |
+|---|---|---|
+| `PORT_SSL_OVERRIDE` | HTTPS port override | `UID + 30000` |
+| `PORT_HTTP_OVERRIDE` | HTTP port override | `UID + 40000` |
 
 </details>
 
-### プロジェクト構造
+### Project Structure
 
 ```
-devcontainer-ubuntu-kde-selkies-for-mac/
-├── build-user-image.sh           # ユーザーイメージビルド
-├── start-container.sh            # コンテナ起動
-├── create-devcontainer-config.sh # Dev Container設定生成
-├── compose-env.sh                # compose/devcontainer 用 env 生成
-├── interactive-common.sh         # 対話設定の共通処理
-├── stop-container.sh             # コンテナ停止
-├── shell-container.sh            # シェルアクセス
-├── commit-container.sh           # 変更保存
-├── ssl/                          # SSL証明書（自動検出）
+kde-selkies-webtop-devcontainer/
+├── build-user-image.sh           # Build user image
+├── start-container.sh            # Start container
+├── create-devcontainer-config.sh # Generate Dev Container config
+├── compose-env.sh                # Generate env for compose/devcontainer
+├── interactive-common.sh         # Shared interactive settings
+├── stop-container.sh             # Stop container
+├── restart-container.sh          # Restart container
+├── shell-container.sh            # Shell access
+├── commit-container.sh           # Save changes
+├── logs-container.sh             # View logs
+├── delete-image.sh               # Delete user image
+├── generate-ssl-cert.sh          # Generate SSL certificate
+├── ssl/                          # SSL certificates (auto-detected)
 │   ├── cert.pem
 │   └── cert.key
-└── files/                        # システムファイル
-    ├── build-base-image.sh       # ベースイメージビルド
-    ├── push-base-image.sh        # ベースイメージをPush
-    ├── linuxserver-kde.base.dockerfile   # ベースイメージ定義
-    ├── linuxserver-kde.user.dockerfile   # ユーザーイメージ定義
-    ├── alpine-root/              # s6-overlay設定
-    ├── kde-root/                 # KDE設定
-    └── ubuntu-root/              # Ubuntu設定
+└── files/                        # System files
+    ├── build-base-image.sh       # Build base image
+    ├── push-base-image.sh        # Push base image to GHCR
+    ├── linuxserver-kde.base.dockerfile
+    ├── linuxserver-kde.user.dockerfile
+    ├── alpine-root/              # s6-overlay config
+    ├── kde-root/                 # KDE defaults
+    └── ubuntu-root/              # Ubuntu defaults
 ```
 
-### バージョン固定
+### Version Pinning
 
-再現可能なビルドのため、外部依存関係は特定バージョンに固定：
+External dependencies are pinned for reproducible builds:
 
-- **VirtualGL:** 3.1.4
-- **Selkies + Pixelflux:** Selkies WebRTCストリーミングとPixelfluxエンコーダー
+- **VirtualGL:** 3.1.4 (build argument in Dockerfile)
+- **Pixelflux:** 1.6.0 (local `.whl` files in `files/pixelflux/`)
+- **Selkies:** Pinned by git commit hash (`f1ade4dd`) in the Dockerfile
 
-**ハードウェアエンコード:**
-- **NVIDIA GPU:** Pixelflux経由でNVENC自動検出
-- **Intel GPU:** Pixelflux経由でVA-API (Quick Sync Video)
-- **AMD GPU:** Pixelflux経由でVA-API
+Hardware encoding:
+- **NVIDIA:** NVENC via Pixelflux
+- **Intel:** VA-API (Quick Sync Video) via Pixelflux
+- **AMD:** VA-API via Pixelflux
 
-これらは [files/linuxserver-kde.base.dockerfile](files/linuxserver-kde.base.dockerfile) でビルド引数として定義。
-
----
-
-## ライセンス
-
-**メインプロジェクト:**
-
-このプロジェクトは複数のオープンソースプロジェクトを基にしています：
-- [linuxserver/webtop](https://github.com/linuxserver/docker-webtop) - GPL-3.0
-- [selkies-project/selkies](https://github.com/selkies-project/selkies) - MPL-2.0
-- [VirtualGL](https://github.com/VirtualGL/virtualgl) - LGPL
-
-詳細は各プロジェクトのライセンスを参照してください。
+Versions are defined in [files/linuxserver-kde.base.dockerfile](files/linuxserver-kde.base.dockerfile).
 
 ---
 
-## 関連プロジェクト
+## License
 
-- [tatsuyai713/devcontainer-egl-desktop](https://github.com/tatsuyai713/devcontainer-egl-desktop) - EGLベース版（3つの表示モード対応）
-- [linuxserver/docker-webtop](https://github.com/linuxserver/docker-webtop) - 元プロジェクト
-- [selkies-project/selkies](https://github.com/selkies-project/selkies) - WebRTCストリーミング
+This project is based on multiple open source projects:
+- [linuxserver/webtop](https://github.com/linuxserver/docker-webtop) — GPL-3.0
+- [selkies-project/selkies](https://github.com/selkies-project/selkies) — MPL-2.0
+- [VirtualGL](https://github.com/VirtualGL/virtualgl) — LGPL
 
----
+See each project's license for details.
 
-## クレジット
+## Related Projects
 
-### 元プロジェクト
+- [tatsuyai713/devcontainer-egl-desktop](https://github.com/tatsuyai713/devcontainer-egl-desktop) — EGL-based version (3 display modes)
+- [linuxserver/docker-webtop](https://github.com/linuxserver/docker-webtop) — Original project
+- [selkies-project/selkies](https://github.com/selkies-project/selkies) — WebRTC streaming
 
+## Credits
+
+**Original projects:**
 - **Selkies Project:** [github.com/selkies-project](https://github.com/selkies-project)
 - **LinuxServer.io:** [github.com/linuxserver](https://github.com/linuxserver)
 
-### このフォーク
-
-- **強化:** 2段階ビルドシステム、非root実行、UID/GID一致、セキュアパスワード管理、管理スクリプト、バージョン固定、マルチGPU対応
-- **メンテナー:** [@tatsuyai713](https://github.com/tatsuyai713)
+**This project:**
+- **Enhancements:** Two-stage build, non-root execution, UID/GID matching, secure passwords, management scripts, version pinning, multi-GPU/encoder support, Dev Container integration
+- **Maintainer:** [@tatsuyai713](https://github.com/tatsuyai713)
