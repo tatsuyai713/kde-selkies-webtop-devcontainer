@@ -72,6 +72,8 @@ RUN set -eux; \
     install -d -m 755 "/home/${TARGET_USER}"; \
   fi; \
   usermod -aG adm,cdrom,dip,plugdev,lpadmin,lxd,sudo,docker,users,audio,video,render "${TARGET_USER}"; \
+  # Add www-data (nginx worker) to the user's group so nginx can serve files from host_home \
+  usermod -aG "${TARGET_USER}" www-data 2>/dev/null || true; \
   echo "${TARGET_USER}:${USER_PASSWORD}" | chpasswd; \
   # store auth secret/hash for web login \
   SECRET_SALT=$(openssl rand -hex 16); \
