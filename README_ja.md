@@ -561,7 +561,7 @@ docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pact
 | `RESOLUTION` | 解像度 | `1920x1080` |
 | `DPI` | DPI | `96` |
 | `STREAM_SCALE` | エンコード解像度の倍率 | `1.0` |
-| `FRAMERATE` | Selkies フレームレート | `30-60` |
+| `FRAMERATE` | Selkies フレームレート | `30` |
 | `TIMEZONE` | タイムゾーン | `UTC` |
 
 #### GPU

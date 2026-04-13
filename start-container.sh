@@ -39,7 +39,7 @@ ARCH_OVERRIDE=${ARCH_OVERRIDE:-}
 SSL_DIR=${SSL_DIR:-}
 ENCODER=${ENCODER:-}
 GPU_VENDOR=${GPU_VENDOR:-}            # Deprecated (kept for compatibility; uses ENCODER)
-FRAMERATE=${FRAMERATE:-30-60}
+FRAMERATE=${FRAMERATE:-30}
 
 GPU_ALL=false
 GPU_NUMS=""
@@ -90,7 +90,7 @@ Run without options to start an interactive configuration flow.
   -a  image arch for tag (amd64/arm64). Overrides auto-detect
   -s  host directory containing cert.pem and cert.key to mount at ssl (recommended for WSS)
   -e, --encoder <type>  Encoder: software|nvidia|nvidia-wsl|intel|amd (required)
-  -f, --framerate <fps> Framerate: single value (60) or range (30-60). Default: 30-60
+  -f, --framerate <fps> Framerate: single value (60) or range (30-60). Default: 30
   -g, --gpu <value>     Docker --gpus value (optional): all or device=0,1
       --all             shortcut for --gpu all
       --num <list>      shortcut for --gpu device=<list>

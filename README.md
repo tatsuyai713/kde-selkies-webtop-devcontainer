@@ -593,7 +593,7 @@ Check browser audio permissions and use HTTPS (some browsers block audio over HT
 | `RESOLUTION` | Resolution | `1920x1080` |
 | `DPI` | DPI | `96` |
 | `STREAM_SCALE` | Encoding resolution scale | `1.0` |
-| `FRAMERATE` | Selkies framerate | `30-60` |
+| `FRAMERATE` | Selkies framerate | `30` |
 | `TIMEZONE` | Timezone | `UTC` |
 
 #### GPU

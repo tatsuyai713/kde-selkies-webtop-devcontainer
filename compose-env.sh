@@ -19,7 +19,7 @@ Options (same as start-container.sh):
   -r, --resolution <res> Resolution in WIDTHxHEIGHT format (default: 1920x1080)
   -d, --dpi <dpi>        DPI setting (default: 96)
   -S, --stream-scale <f> Stream resolution scale (0.25-1.0, default: 1.0)
-  -f, --framerate <fps>  Framerate: single value (60) or range (30-60), default: 30-60
+  -f, --framerate <fps>  Framerate: single value (60) or range (30-60), default: 30
   -t, --timezone <tz>    Timezone (default: UTC, example: Asia/Tokyo)
   -s, --ssl <dir>        SSL directory path for HTTPS (optional)
   -a, --arch <arch>      Target architecture: amd64 or arm64 (default: host)
@@ -71,7 +71,7 @@ UBUNTU_VERSION="${UBUNTU_VERSION:-24.04}"
 RESOLUTION="${RESOLUTION:-1920x1080}"
 DPI="${DPI:-96}"
 STREAM_SCALE="${STREAM_SCALE:-1.0}"
-FRAMERATE="${FRAMERATE:-30-60}"
+FRAMERATE="${FRAMERATE:-30}"
 TIMEZONE="${TIMEZONE:-UTC}"
 SSL_DIR="${SSL_DIR:-}"
 OUTPUT_MODE="export"
