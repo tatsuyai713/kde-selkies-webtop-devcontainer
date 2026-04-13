@@ -430,26 +430,58 @@ Selkies streams bidirectional audio to the browser via WebRTC.
 
 ## Appendix: HTTPS/SSL
 
-### Certificate Setup
+### Quick Setup (Recommended)
+
+Generate a CA-signed certificate and trust it on your OS:
+
+```bash
+# 1. Generate CA + server certificate
+./generate-ssl-cert.sh
+
+# 2. Trust the CA on your OS (one-time setup)
+#    macOS:
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain ./ssl/ca.crt
+
+#    Linux (Ubuntu/Debian):
+sudo cp ./ssl/ca.crt /usr/local/share/ca-certificates/local-dev-ca.crt
+sudo update-ca-certificates
+
+#    Windows (PowerShell as Administrator):
+Import-Certificate -FilePath .\ssl\ca.crt -CertStoreLocation Cert:\LocalMachine\Root
+
+# 3. Start the container (ssl/ is auto-detected)
+./start-container.sh
+```
+
+After step 2, browsers will show a green lock icon with no warnings.
+
+> **Note:** If you regenerate certificates (`./generate-ssl-cert.sh -f`), you must repeat step 2 because the CA key changes.
+
+### Using Your Own Certificates
 
 ```bash
 mkdir -p ssl
 cp /path/to/cert.pem ssl/
 cp /path/to/key.pem ssl/cert.key
-./start-container.sh --encoder nvidia --all   # auto-detects ssl/
+./start-container.sh   # auto-detects ssl/
 ```
 
-### Self-Signed Certificate
+### generate-ssl-cert.sh Options
 
-```bash
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout ssl/cert.key -out ssl/cert.pem \
-  -subj "/C=US/ST=State/L=City/O=Dev/CN=localhost"
-```
+| Option | Description | Default |
+|---|---|---|
+| `-c <hostname>` | Common name / hostname | `localhost` |
+| `-d <dir>` | Output directory | `./ssl` |
+| `-n <days>` | Validity period | `365` |
+| `--no-ca` | Self-signed cert (no CA) | CA mode |
+| `-f` | Force overwrite existing certs | — |
+
+Output files: `ssl/ca.crt`, `ssl/ca.key`, `ssl/cert.pem`, `ssl/cert.key`
 
 ### Certificate Priority
 
-1. `ssl/cert.pem` + `ssl/cert.key`
+1. `ssl/cert.pem` + `ssl/cert.key` (project directory)
 2. `SSL_DIR` environment variable
 3. Image default certificate (fallback)
 
