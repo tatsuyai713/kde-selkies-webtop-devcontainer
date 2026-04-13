@@ -20,17 +20,59 @@ if [ "${DISABLE_DRI3}" != "false" ]; then
   VFBCOMMAND=""
 fi
 
-# Clamp virtual screen max size based on env
-DEFAULT_RES="7680x4320"
+# Calculate optimal Xvfb resolution based on user settings
+# Priority:
+#   1. MAX_RES (explicit override)
+#   2. SELKIES_MANUAL_WIDTH/HEIGHT (legacy manual mode)
+#   3. CUSTOM_RESOLUTION with calculated buffer space for dynamic resize
+#   4. Default fallback (1920x1080)
+DEFAULT_RES=""
+
 if [ ! -z ${MAX_RES+x} ]; then
+  # Explicit MAX_RES override (highest priority)
   DEFAULT_RES="${MAX_RES}"
-fi
-if [ -n "${SELKIES_MANUAL_HEIGHT}" ] || [ -n "${SELKIES_MANUAL_WIDTH}" ]; then
+  echo "[svc-xorg] Using explicit MAX_RES: ${DEFAULT_RES}"
+elif [ -n "${SELKIES_MANUAL_HEIGHT}" ] || [ -n "${SELKIES_MANUAL_WIDTH}" ]; then
+  # Legacy manual mode
   T_WIDTH="${SELKIES_MANUAL_WIDTH:-1024}"
   T_HEIGHT="${SELKIES_MANUAL_HEIGHT:-768}"
   if [ "${T_WIDTH}" = "0" ]; then T_WIDTH="1024"; fi
   if [ "${T_HEIGHT}" = "0" ]; then T_HEIGHT="768"; fi
   DEFAULT_RES="${T_WIDTH}x${T_HEIGHT}"
+  echo "[svc-xorg] Using manual dimensions: ${DEFAULT_RES}"
+elif [ -n "${CUSTOM_RESOLUTION}" ]; then
+  # Calculate optimal Xvfb resolution from CUSTOM_RESOLUTION
+  # Add buffer for dynamic resizing while keeping memory usage reasonable
+  # XVFB_BUFFER_MULTIPLIER can be set via env (default: 2.0)
+  # - 1.5x: Minimal overhead, supports up to 2880x1620 for 1920x1080 base
+  # - 2.0x: Balanced (default), supports up to 3840x2160 (4K) for 1920x1080 base
+  # - 3.0x: Maximum flexibility, supports up to 5760x3240 for 1920x1080 base
+  CUSTOM_WIDTH="${CUSTOM_RESOLUTION%x*}"
+  CUSTOM_HEIGHT="${CUSTOM_RESOLUTION#*x}"
+  
+  if [[ "${CUSTOM_WIDTH}" =~ ^[0-9]+$ ]] && [[ "${CUSTOM_HEIGHT}" =~ ^[0-9]+$ ]]; then
+    # Use XVFB_BUFFER_MULTIPLIER or default to 2.0
+    BUFFER_MULT="${XVFB_BUFFER_MULTIPLIER:-2.0}"
+    
+    # Validate buffer multiplier (1.0 - 4.0)
+    if ! awk "BEGIN { exit !(${BUFFER_MULT} >= 1.0 && ${BUFFER_MULT} <= 4.0) }" 2>/dev/null; then
+      echo "[svc-xorg] Warning: Invalid XVFB_BUFFER_MULTIPLIER ${BUFFER_MULT}, using default 2.0"
+      BUFFER_MULT="2.0"
+    fi
+    
+    # Calculate buffered resolution
+    BUFFERED_WIDTH=$(awk "BEGIN {print int(${CUSTOM_WIDTH} * ${BUFFER_MULT})}")
+    BUFFERED_HEIGHT=$(awk "BEGIN {print int(${CUSTOM_HEIGHT} * ${BUFFER_MULT})}")
+    DEFAULT_RES="${BUFFERED_WIDTH}x${BUFFERED_HEIGHT}"
+    echo "[svc-xorg] Calculated Xvfb resolution from CUSTOM_RESOLUTION ${CUSTOM_RESOLUTION}: ${DEFAULT_RES} (${BUFFER_MULT}x buffer)"
+  else
+    echo "[svc-xorg] Warning: Invalid CUSTOM_RESOLUTION format: ${CUSTOM_RESOLUTION}"
+    DEFAULT_RES="1920x1080"
+  fi
+else
+  # Fallback default (much more reasonable than 8K)
+  DEFAULT_RES="1920x1080"
+  echo "[svc-xorg] Using default resolution: ${DEFAULT_RES}"
 fi
 
 # Set DPI based on environment variable (default 96 for standard displays, use 144 or 192 for HiDPI)
