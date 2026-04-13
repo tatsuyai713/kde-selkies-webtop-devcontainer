@@ -253,12 +253,12 @@ if [ ! -z ${DEV_MODE+x} ]; then
   # Frontend setup
   if [[ "${DEV_MODE}" == "core" ]]; then
     # Core just runs from directory
-    cd $HOME/src/addons/gst-web-core
+    cd $HOME/src/addons/selkies-web-core
     s6-setuidgid "$TARGET_USER" npm install
     s6-setuidgid "$TARGET_USER" npm run serve &
   else
     # Build core
-    cd $HOME/src/addons/gst-web-core
+    cd $HOME/src/addons/selkies-web-core
     s6-setuidgid "$TARGET_USER" npm install
     s6-setuidgid "$TARGET_USER" npm run build
     s6-setuidgid "$TARGET_USER" cp dist/selkies-core.js ../${DEV_MODE}/src/

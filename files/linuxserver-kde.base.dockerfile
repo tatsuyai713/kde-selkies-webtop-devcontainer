@@ -267,34 +267,42 @@ COPY alpine-root/ /
 ###########################################
 FROM alpine-base-temp AS frontend
 
+ARG SELKIES_COMMIT=main
+
 RUN \
   echo "**** install build packages ****" && \
-  apk add cmake git nodejs npm
+  apk add cmake git nodejs npm python3
 
 RUN \
   echo "**** ingest code ****" && \
   git clone https://github.com/selkies-project/selkies.git /src && \
   cd /src && \
-  git checkout -f f1ade4dd700bf0157bb78a8a58eab42fbb8f02ee
+  git checkout -f ${SELKIES_COMMIT}
+
+COPY patch-selkies-stream-scale-ui-build.py /tmp/
+
+RUN \
+  echo "**** patch source for STREAM_SCALE UI ****" && \
+  python3 /tmp/patch-selkies-stream-scale-ui-build.py /src/addons/selkies-web-core
 
 RUN \
   echo "**** build shared core library ****" && \
-  cd /src/addons/gst-web-core && \
+  cd /src/addons/selkies-web-core && \
   npm install && \
   npm run build && \
   echo "**** build multiple dashboards ****" && \
-  DASHBOARDS="selkies-dashboard selkies-dashboard-zinc selkies-dashboard-wish" && \
+  DASHBOARDS="selkies-dashboard selkies-dashboard-wish" && \
   mkdir /buildout && \
   for DASH in $DASHBOARDS; do \
     cd /src/addons/$DASH && \
-    cp ../gst-web-core/dist/selkies-core.js src/ && \
+    cp ../selkies-web-core/dist/selkies-core.js src/ && \
     npm install && \
     npm run build && \
     mkdir -p dist/src dist/nginx && \
-    cp ../gst-web-core/dist/selkies-core.js dist/src/ && \
+    cp ../selkies-web-core/dist/selkies-core.js dist/src/ && \
     cp ../universal-touch-gamepad/universalTouchGamepad.js dist/src/ && \
-    cp ../gst-web-core/nginx/* dist/nginx/ && \
-    cp -r ../gst-web-core/dist/jsdb dist/ && \
+    cp ../selkies-web-core/nginx/* dist/nginx/ && \
+    cp -r ../selkies-web-core/dist/jsdb dist/ && \
     mkdir -p /buildout/$DASH && \
     cp -ar dist/* /buildout/$DASH/; \
   done
@@ -335,6 +343,7 @@ ARG LIBVA_LIBDIR="/usr/lib/x86_64-linux-gnu"
 ARG PROOT_ARCH="x86_64"
 ARG PROOT_APPS_VERSION="0.3.1"
 ARG VIRTUALGL_VERSION="3.1.4"
+ARG SELKIES_COMMIT=main
 
 # Step 1: Install base system packages and Docker
 RUN \
@@ -395,10 +404,8 @@ RUN \
 # Step 2: Install selkies and related components
 RUN \
   echo "**** install selkies ****" && \
-  SELKIES_RELEASE=$(curl -sX GET "https://api.github.com/repos/selkies-project/selkies/releases/latest" \
-    | awk '/tag_name/{print $4;exit}' FS='[""]') && \
   curl -o /tmp/selkies.tar.gz -L \
-    "https://github.com/selkies-project/selkies/archive/f1ade4dd700bf0157bb78a8a58eab42fbb8f02ee.tar.gz" && \
+    "https://github.com/selkies-project/selkies/archive/${SELKIES_COMMIT}.tar.gz" && \
   cd /tmp && \
   tar xf selkies.tar.gz && \
   cd selkies-* && \
