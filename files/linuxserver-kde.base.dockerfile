@@ -386,7 +386,7 @@ RUN \
     libglvnd0 libglx0 libglu1 libglvnd-dev \
     nginx openbox openssh-client \
     openssl pciutils procps psmisc pulseaudio pulseaudio-utils python3 python3-venv \
-    bash-completion software-properties-common ssl-cert stterm sudo tar util-linux vulkan-tools \
+    bash-completion software-properties-common socat ssl-cert stterm sudo tar util-linux vulkan-tools \
     wl-clipboard wtype x11-apps x11-common x11-utils x11-xkb-utils x11-xserver-utils \
     xauth xclip xcvt xdg-utils xdotool xfconf xfonts-base xkb-data xsel \
     xserver-common xserver-xorg-core xserver-xorg-video-amdgpu xserver-xorg-video-ati \
