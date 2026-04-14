@@ -694,8 +694,23 @@ if [[ "${DOCKER_MODE}" == "dood" ]]; then
     echo "Docker mode: dood (mounting /var/run/docker.sock)"
   fi
 else
+  # DinD mode: start dockerd inside container AND mount host socket for container management
   DOCKER_MODE_FLAGS+=(-e START_DOCKER=true)
-  echo "Docker mode: dind (starting dockerd inside container)"
+  
+  # Mount host docker socket as host-docker.sock for container stop/commit features
+  if [ -S /var/run/docker.sock ]; then
+    DOCKER_MODE_FLAGS+=(-v /var/run/docker.sock:/var/run/host-docker.sock:ro)
+    DOCKER_SOCK_GID=$(get_socket_gid /var/run/docker.sock 2>/dev/null || true)
+    if [ -n "${DOCKER_SOCK_GID}" ] && [ "${DOCKER_SOCK_GID}" != "0" ]; then
+      DOCKER_MODE_FLAGS+=(--group-add="${DOCKER_SOCK_GID}")
+      echo "Docker mode: dind (starting dockerd inside container, host socket mounted for management, gid: ${DOCKER_SOCK_GID})"
+    else
+      echo "Docker mode: dind (starting dockerd inside container, host socket mounted for management)"
+    fi
+  else
+    echo "Docker mode: dind (starting dockerd inside container, host socket not available)"
+    echo "Warning: Container stop/commit buttons will not work without host docker socket."
+  fi
 fi
 
 SSL_FLAGS=()

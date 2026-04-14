@@ -445,6 +445,7 @@ USER_NAME="${HOST_USER}"
 
 # Docker mode configuration
 DOCKER_SOCK_GID=""
+HOST_DOCKER_SOCK_MOUNT=""
 if [[ "${DOCKER_MODE}" == "dood" ]]; then
     if [ ! -S /var/run/docker.sock ]; then
         echo "Error: /var/run/docker.sock not found on host. Cannot use dood mode." >&2
@@ -458,8 +459,23 @@ if [[ "${DOCKER_MODE}" == "dood" ]]; then
         echo "Docker mode: dood (host Docker socket) - GID: ${DOCKER_SOCK_GID}" >&2
     fi
 else
+    # DinD mode: start dockerd inside container AND mount host socket for management
     START_DOCKER="true"
     DOCKER_SOCK_MOUNT=""
+    
+    # Mount host docker socket as host-docker.sock for container stop/commit features
+    if [ -S /var/run/docker.sock ]; then
+        HOST_DOCKER_SOCK_MOUNT="/var/run/docker.sock:/var/run/host-docker.sock:ro"
+        DOCKER_SOCK_GID=$(get_socket_gid /var/run/docker.sock 2>/dev/null || true)
+        if [ -n "${DOCKER_SOCK_GID}" ] && [ "${DOCKER_SOCK_GID}" != "0" ]; then
+            echo "Docker mode: dind (starting dockerd, host socket mounted for management) - GID: ${DOCKER_SOCK_GID}" >&2
+        else
+            echo "Docker mode: dind (starting dockerd, host socket mounted for management)" >&2
+        fi
+    else
+        echo "Docker mode: dind (starting dockerd, host socket not available)" >&2
+        echo "Warning: Container stop/commit buttons will not work without host docker socket." >&2
+    fi
 fi
 
 # SSL configuration
@@ -486,7 +502,7 @@ ENV_VARS=(
     SSL_DIR SSL_CERT_PATH SSL_KEY_PATH
     HOST_HOME_MOUNT HOST_MNT_MOUNT
     USER_UID USER_GID USER_NAME
-    DOCKER_MODE START_DOCKER DOCKER_SOCK_MOUNT DOCKER_SOCK_GID
+    DOCKER_MODE START_DOCKER DOCKER_SOCK_MOUNT HOST_DOCKER_SOCK_MOUNT DOCKER_SOCK_GID
 )
 
 if [ -n "${DISABLE_ZINK}" ]; then
