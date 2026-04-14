@@ -6,7 +6,12 @@ CONTAINER_NAME="${CONTAINER_NAME:-${HOSTNAME}}"
 HOST_DOCKER="${HOST_DOCKER_SOCK:-}"
 
 # Detect host docker socket
-if [ -S "/var/run/host-docker.sock" ]; then
+# Prefer the socat proxy socket (user-accessible) over the raw host socket
+if [ -S "/var/run/host-docker-proxy.sock" ]; then
+    HOST_DOCKER="/var/run/host-docker-proxy.sock"
+elif [ -S "/var/run/docker-proxy.sock" ]; then
+    HOST_DOCKER="/var/run/docker-proxy.sock"
+elif [ -S "/var/run/host-docker.sock" ]; then
     HOST_DOCKER="/var/run/host-docker.sock"
 elif [ -S "/var/run/docker.sock" ] && [ "${START_DOCKER:-true}" = "false" ]; then
     HOST_DOCKER="/var/run/docker.sock"
@@ -36,5 +41,7 @@ if ! kdialog --yesno "Stop and remove container '${REAL_CONTAINER_NAME}'?\n\nWAR
     exit 0
 fi
 
-docker -H "unix://${HOST_DOCKER}" stop "${REAL_CONTAINER_NAME}" >/dev/null 2>&1
-docker -H "unix://${HOST_DOCKER}" rm "${REAL_CONTAINER_NAME}" >/dev/null 2>&1
+# Force-remove the container (stops + removes in a single API call).
+# This avoids the issue where stopping the container kills the socat proxy
+# before we can send the rm command.
+docker -H "unix://${HOST_DOCKER}" rm -f "${REAL_CONTAINER_NAME}" >/dev/null 2>&1

@@ -1,0 +1,42 @@
+#!/usr/bin/with-contenv bash
+
+# Proxy host Docker socket to a user-accessible socket via socat.
+# On macOS (Docker Desktop), the mounted host socket becomes root:root 660
+# inside the container, making it inaccessible to non-root users.
+# This service creates a proxy socket owned by the target user.
+#
+# Supports both modes:
+#   DinD: /var/run/host-docker.sock → /var/run/host-docker-proxy.sock
+#   DooD: /var/run/docker.sock     → /var/run/docker-proxy.sock
+
+TARGET_USER="${CUSTOM_USER:-${USER_NAME:-root}}"
+TARGET_UID=$(id -u "${TARGET_USER}")
+TARGET_GID=$(id -g "${TARGET_USER}")
+
+if [ -S "/var/run/host-docker.sock" ]; then
+  # DinD mode: host socket mounted as host-docker.sock
+  SOURCE_SOCK="/var/run/host-docker.sock"
+  PROXY_SOCK="/var/run/host-docker-proxy.sock"
+elif [ -S "/var/run/docker.sock" ] && [ "${START_DOCKER:-true}" = "false" ]; then
+  # DooD mode: docker.sock IS the host socket
+  SOURCE_SOCK="/var/run/docker.sock"
+  PROXY_SOCK="/var/run/docker-proxy.sock"
+else
+  # No host socket available
+  sleep infinity
+fi
+
+# Check if user can already access the socket directly
+if su -s /bin/sh "${TARGET_USER}" -c "test -r '${SOURCE_SOCK}' -a -w '${SOURCE_SOCK}'" 2>/dev/null; then
+  # User already has access (e.g. Linux with correct GID), no proxy needed
+  # Create a symlink so scripts can find the proxy path
+  ln -sf "${SOURCE_SOCK}" "${PROXY_SOCK}"
+  sleep infinity
+fi
+
+# Clean up stale proxy socket
+rm -f "${PROXY_SOCK}"
+
+# Start socat proxy: listens on proxy socket, forwards to source socket
+exec socat "UNIX-LISTEN:${PROXY_SOCK},fork,mode=660,user=${TARGET_UID},group=${TARGET_GID}" \
+           "UNIX-CONNECT:${SOURCE_SOCK}"

@@ -7,7 +7,12 @@ CONTAINER_NAME="${CONTAINER_NAME:-${HOSTNAME}}"
 HOST_DOCKER="${HOST_DOCKER_SOCK:-}"
 
 # Detect host docker socket
-if [ -S "/var/run/host-docker.sock" ]; then
+# Prefer the socat proxy socket (user-accessible) over the raw host socket
+if [ -S "/var/run/host-docker-proxy.sock" ]; then
+    HOST_DOCKER="/var/run/host-docker-proxy.sock"
+elif [ -S "/var/run/docker-proxy.sock" ]; then
+    HOST_DOCKER="/var/run/docker-proxy.sock"
+elif [ -S "/var/run/host-docker.sock" ]; then
     HOST_DOCKER="/var/run/host-docker.sock"
 elif [ -S "/var/run/docker.sock" ] && [ "${START_DOCKER:-true}" = "false" ]; then
     # DooD mode: the socket IS the host socket
