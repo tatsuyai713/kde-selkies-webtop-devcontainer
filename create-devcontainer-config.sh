@@ -446,6 +446,10 @@ fi
 if [ -n "${DOCKER_SOCK_MOUNT}" ]; then
     VOLUME_ENTRIES+=("\${DOCKER_SOCK_MOUNT}")
 fi
+# DinD mode: mount host docker socket for container management (stop/commit buttons)
+if [ -n "${HOST_DOCKER_SOCK_MOUNT}" ]; then
+    VOLUME_ENTRIES+=("\${HOST_DOCKER_SOCK_MOUNT}")
+fi
 
 # Add /mnt mount on non-mac hosts (Docker Desktop for Mac does not share /mnt by default)
 if [ "${IS_MAC}" != "true" ] && [ -d "/mnt" ]; then
