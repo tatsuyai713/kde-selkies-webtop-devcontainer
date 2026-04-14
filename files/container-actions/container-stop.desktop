@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Stop Container
+Comment=Stop or stop and remove the current container
+Exec=/usr/local/bin/container-stop.sh
+Icon=system-shutdown
+Terminal=false
+Type=Application
+Categories=System;

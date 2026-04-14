@@ -302,6 +302,46 @@ RUN set -eux; \
     > "/home/${USER_NAME}/Desktop/trash.desktop"; \
   chown "${USER_UID}:${USER_GID}" /home/${USER_NAME}/Desktop/home.desktop /home/${USER_NAME}/Desktop/trash.desktop
 
+# KDE Plasma defaults: Kubuntu look-and-feel, double-click to open
+COPY container-actions/kubuntu-kdeglobals /tmp/kubuntu-kdeglobals
+RUN set -eux; \
+  apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+    kubuntu-settings-desktop 2>/dev/null || true; \
+  apt-get clean && rm -rf /var/lib/apt/lists/*; \
+  install -d -m 755 "/home/${USER_NAME}/.config"; \
+  cp /tmp/kubuntu-kdeglobals "/home/${USER_NAME}/.config/kdeglobals"; \
+  cp /tmp/kubuntu-kdeglobals /defaults/kdeglobals; \
+  rm -f /tmp/kubuntu-kdeglobals; \
+  printf '%s\n' \
+    '[LookAndFeel]' \
+    'LookAndFeelPackage=org.kubuntu.desktop' \
+    > "/home/${USER_NAME}/.config/lookandfeelrc"; \
+  printf '%s\n' \
+    '[Theme]' \
+    'name=org.kubuntu.desktop' \
+    > "/home/${USER_NAME}/.config/ksplashrc"; \
+  chown -R "${USER_UID}:${USER_GID}" \
+    "/home/${USER_NAME}/.config/kdeglobals" \
+    "/home/${USER_NAME}/.config/lookandfeelrc" \
+    "/home/${USER_NAME}/.config/ksplashrc"
+
+# Install container management desktop shortcuts (commit / stop)
+COPY container-actions/container-commit.sh /usr/local/bin/container-commit.sh
+COPY container-actions/container-stop.sh /usr/local/bin/container-stop.sh
+COPY container-actions/container-commit.desktop /tmp/container-commit.desktop
+COPY container-actions/container-stop.desktop /tmp/container-stop.desktop
+RUN set -eux; \
+  chmod 755 /usr/local/bin/container-commit.sh /usr/local/bin/container-stop.sh; \
+  cp /tmp/container-commit.desktop "/home/${USER_NAME}/Desktop/container-commit.desktop"; \
+  cp /tmp/container-stop.desktop "/home/${USER_NAME}/Desktop/container-stop.desktop"; \
+  chmod 755 \
+    "/home/${USER_NAME}/Desktop/container-commit.desktop" \
+    "/home/${USER_NAME}/Desktop/container-stop.desktop"; \
+  chown "${USER_UID}:${USER_GID}" \
+    "/home/${USER_NAME}/Desktop/container-commit.desktop" \
+    "/home/${USER_NAME}/Desktop/container-stop.desktop"; \
+  rm -f /tmp/container-commit.desktop /tmp/container-stop.desktop
+  
 # browser wrappers (Chromium on arm64, Chrome on amd64) to enforce flags even after package updates
 RUN <<'EOF'
 set -eux

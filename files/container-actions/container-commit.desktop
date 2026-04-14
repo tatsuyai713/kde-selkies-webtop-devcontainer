@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Commit Container
+Comment=Commit the current container state as a Docker image
+Exec=/usr/local/bin/container-commit.sh
+Icon=document-save
+Terminal=false
+Type=Application
+Categories=System;
