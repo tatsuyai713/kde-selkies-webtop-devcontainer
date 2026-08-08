@@ -3,10 +3,11 @@ set -euo pipefail
 
 DOCKER_SOCKET=""
 KEEP_HISTORY=false
+REMOVE_CONTAINER=false
 
 usage() {
   cat <<'EOF'
-Usage: flatten-container-image.sh [--docker-socket path] [--keep-history] CONTAINER TARGET_IMAGE
+Usage: flatten-container-image.sh [--docker-socket path] [--keep-history] [--remove-container] CONTAINER TARGET_IMAGE
 
 Create a flattened image from a container while preserving its image metadata.
 EOF
@@ -21,6 +22,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --keep-history)
       KEEP_HISTORY=true
+      shift
+      ;;
+    --remove-container)
+      REMOVE_CONTAINER=true
       shift
       ;;
     -h|--help)
@@ -65,6 +70,8 @@ TEMP_RESULT="${IMAGE_REPOSITORY}:flatten-result-${STAMP}-$$"
 TEMP_CONTAINER="flatten-export-${STAMP}-$$"
 PREVIOUS_IMAGE_ID=$("${DOCKER[@]}" image inspect --format '{{.Id}}' \
   "${TARGET_IMAGE}" 2>/dev/null || true)
+SOURCE_IMAGE_ID=$("${DOCKER[@]}" container inspect --format '{{.Image}}' \
+  "${CONTAINER_NAME}")
 
 cleanup() {
   "${DOCKER[@]}" container rm -f -v "${TEMP_CONTAINER}" >/dev/null 2>&1 || true
@@ -178,12 +185,33 @@ fi
 "${DOCKER[@]}" image tag "${TEMP_RESULT}" "${TARGET_IMAGE}"
 "${DOCKER[@]}" image rm "${TEMP_RESULT}" >/dev/null
 
-if [[ "${KEEP_HISTORY}" != "true" && -n "${PREVIOUS_IMAGE_ID}" && \
-      "${PREVIOUS_IMAGE_ID}" != "${NEW_IMAGE_ID}" ]]; then
-  if "${DOCKER[@]}" image rm "${PREVIOUS_IMAGE_ID}" >/dev/null 2>&1; then
-    echo "Removed the previous image."
-  else
-    echo "Previous layers are still used by a running container; cleanup is deferred." >&2
+if [[ "${REMOVE_CONTAINER}" == "true" ]]; then
+  cleanup
+  trap - EXIT
+  "${DOCKER[@]}" container rm -f "${CONTAINER_NAME}" >/dev/null
+  echo "Removed source container ${CONTAINER_NAME}."
+fi
+
+if [[ "${KEEP_HISTORY}" != "true" ]]; then
+  if [[ -n "${PREVIOUS_IMAGE_ID}" && "${PREVIOUS_IMAGE_ID}" != "${NEW_IMAGE_ID}" ]]; then
+    if "${DOCKER[@]}" image rm "${PREVIOUS_IMAGE_ID}" >/dev/null 2>&1; then
+      echo "Removed the previous target image."
+    elif [[ "${REMOVE_CONTAINER}" != "true" ]]; then
+      echo "Previous layers are still used by the source container; cleanup is deferred." >&2
+    fi
+  fi
+  if [[ -n "${SOURCE_IMAGE_ID}" && "${SOURCE_IMAGE_ID}" != "${PREVIOUS_IMAGE_ID}" && \
+        "${SOURCE_IMAGE_ID}" != "${NEW_IMAGE_ID}" ]]; then
+    SOURCE_REPO_TAGS=$("${DOCKER[@]}" image inspect --format '{{json .RepoTags}}' \
+      "${SOURCE_IMAGE_ID}" 2>/dev/null || true)
+    if [[ "${SOURCE_REPO_TAGS}" != "null" && "${SOURCE_REPO_TAGS}" != "[]" && \
+          -n "${SOURCE_REPO_TAGS}" ]]; then
+      echo "Source image still has another tag; it was retained."
+    elif "${DOCKER[@]}" image rm "${SOURCE_IMAGE_ID}" >/dev/null 2>&1; then
+      echo "Removed the source container image."
+    elif [[ "${REMOVE_CONTAINER}" != "true" ]]; then
+      echo "Source image cleanup is deferred until its container is removed." >&2
+    fi
   fi
 fi
 

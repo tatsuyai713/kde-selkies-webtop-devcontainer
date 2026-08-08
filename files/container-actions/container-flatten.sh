@@ -38,9 +38,11 @@ fi
 
 TARGET_IMAGE=$(docker -H "unix://${HOST_DOCKER}" container inspect \
   --format '{{.Config.Image}}' "${REAL_CONTAINER_NAME}")
+SOURCE_IMAGE_ID=$(docker -H "unix://${HOST_DOCKER}" container inspect \
+  --format '{{.Image}}' "${REAL_CONTAINER_NAME}")
 
 if ! kdialog --yesno \
-  "Flatten '${REAL_CONTAINER_NAME}' as:\n${TARGET_IMAGE}\n\nThis creates a temporary full image and can take several minutes. The previous image will not be retained after it is no longer used. Continue?" \
+  "Flatten '${REAL_CONTAINER_NAME}' as:\n${TARGET_IMAGE}\n\nThis creates a temporary full image and can take several minutes. After success, this container and its old image will be removed. Mounted volumes will be retained. Continue?" \
   --title "Flatten Container" 2>/dev/null; then
   exit 0
 fi
@@ -50,8 +52,25 @@ if output=$(/usr/local/libexec/flatten-container-image.sh \
   --docker-socket "${HOST_DOCKER}" \
   "${REAL_CONTAINER_NAME}" "${TARGET_IMAGE}" 2>&1); then
   [[ -z "${progress}" ]] || qdbus ${progress} close 2>/dev/null || true
-  kdialog --msgbox "Container flattened successfully.\n\n${output}\n\nRecreate the running container from this image to release all old layers." \
+  kdialog --msgbox "Container flattened successfully.\n\n${output}\n\nAfter closing this message, the old container and image will be removed. Start the container again to use the flattened image." \
     --title "Flatten Container" 2>/dev/null
+  CLEANUP_NAME="flatten-cleanup-$(date +%Y%m%d-%H%M%S)-$$"
+  if ! docker -H "unix://${HOST_DOCKER}" run -d --rm \
+      --name "${CLEANUP_NAME}" \
+      --entrypoint /bin/sh \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      "${TARGET_IMAGE}" -c '
+        sleep 2
+        docker -H unix:///var/run/docker.sock container rm -f "$1"
+        tags=$(docker -H unix:///var/run/docker.sock image inspect --format "{{json .RepoTags}}" "$2" 2>/dev/null || true)
+        if [ "$tags" = "null" ] || [ "$tags" = "[]" ] || [ -z "$tags" ]; then
+          docker -H unix:///var/run/docker.sock image rm "$2" >/dev/null 2>&1 || true
+        fi
+      ' cleanup "${REAL_CONTAINER_NAME}" "${SOURCE_IMAGE_ID}" >/dev/null; then
+    kdialog --error "The image was flattened, but automatic old-container cleanup could not be scheduled." \
+      --title "Flatten Container" 2>/dev/null
+    exit 1
+  fi
 else
   [[ -z "${progress}" ]] || qdbus ${progress} close 2>/dev/null || true
   kdialog --error "Failed to flatten container.\n\n${output}" \

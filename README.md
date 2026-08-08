@@ -323,8 +323,10 @@ container name, Ubuntu version, architecture, docker mode (`dind`/`dood`), encod
   can take several minutes.
 - Mounted volume and bind-mount contents are not included, matching normal
   `docker commit` behavior.
-- Recreate the running container from the flattened image before pruning to
-  release layers still referenced by the old container.
+- By default, the CLI and desktop action remove the source container and its old
+  untagged image after a successful flatten. Start the container again to use the
+  flattened image. Use `--keep-container` with the CLI to defer removal; its old
+  layers remain in use until that container is removed.
 - The in-container **Flatten Container** desktop icon provides the same operation
   and uses the Breeze `archive-insert` action icon.
 
