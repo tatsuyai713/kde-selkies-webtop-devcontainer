@@ -8,38 +8,45 @@ TARGET_ARCH=${TARGET_ARCH:-}
 TARGET_VERSION=${TARGET_VERSION:-1.1.0}
 UBUNTU_VERSION=${UBUNTU_VERSION:-}
 RESTART=${RESTART:-false}
+KEEP_HISTORY=${KEEP_HISTORY:-false}
 
 usage() {
   cat <<EOF
-Usage: $0 [-n container_name] [-t target_image_base] [-v version] [-u ubuntu_version] [-r]
+Usage: $0 [-n container_name] [-t target_image_base] [-v version] [-u ubuntu_version] [-r] [-k|--keep-history]
   -n  container name to commit (default: ${NAME})
   -t  target image base (no arch/tag), e.g. webtop-kde (default: ${TARGET_IMAGE})
   -v  version tag to use (default: ${TARGET_VERSION})
   -u, --ubuntu  Ubuntu version (22.04 or 24.04). Auto-detected if not specified
   -r  restart container after commit
+  -k, --keep-history
+      keep the previously tagged image with a timestamped history tag
 
 Environment variables:
   RESTART  set to 'true' to restart container after commit
+  KEEP_HISTORY  set to 'true' to retain the previous image
 
 Examples:
   $0                    # Commit container (auto-detect Ubuntu version)
   $0 -r                 # Commit and restart container
   $0 -v 2.0.0           # Commit with specific version tag
   $0 -u 22.04           # Commit with specific Ubuntu version
+  $0 --keep-history     # Commit and retain the previous image
 EOF
 }
 
-while getopts ":n:t:v:u:rh-:" opt; do
+while getopts ":n:t:v:u:rkh-:" opt; do
   case "$opt" in
     n) NAME=$OPTARG ;;
     t) TARGET_IMAGE=$OPTARG ;;
     v) TARGET_VERSION=$OPTARG ;;
     u) UBUNTU_VERSION=$OPTARG ;;
     r) RESTART=true ;;
+    k) KEEP_HISTORY=true ;;
     h) usage; exit 0 ;;
     -)
       case "${OPTARG}" in
         ubuntu) UBUNTU_VERSION="${!OPTIND}"; OPTIND=$((OPTIND + 1)) ;;
+        keep-history) KEEP_HISTORY=true ;;
         *) echo "Unknown option: --${OPTARG}" >&2; usage; exit 1 ;;
       esac
       ;;
@@ -107,9 +114,23 @@ fi
 
 # Final naming: <base>-<user>-<arch>-u<ubuntu_ver>:<version>
 FINAL_IMAGE="${TARGET_IMAGE}-${HOST_USER}-${TARGET_ARCH}-u${UBUNTU_VERSION}:${TARGET_VERSION}"
+PREVIOUS_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${FINAL_IMAGE}" 2>/dev/null || true)
 
 echo "Committing container ${NAME} -> ${FINAL_IMAGE}"
-docker commit "$NAME" "$FINAL_IMAGE"
+NEW_IMAGE_ID=$(docker commit --quiet "$NAME" "$FINAL_IMAGE")
+
+if [[ -n "${PREVIOUS_IMAGE_ID}" && "${PREVIOUS_IMAGE_ID}" != "${NEW_IMAGE_ID}" ]]; then
+  if [[ "${KEEP_HISTORY}" == "true" ]]; then
+    HISTORY_TAG="${FINAL_IMAGE%:*}:${TARGET_VERSION}-history-$(date +%Y%m%d-%H%M%S)"
+    docker image tag "${PREVIOUS_IMAGE_ID}" "${HISTORY_TAG}"
+    echo "Previous image retained as ${HISTORY_TAG}"
+  elif docker image rm "${PREVIOUS_IMAGE_ID}" >/dev/null 2>&1; then
+    echo "Removed previous image ${PREVIOUS_IMAGE_ID#sha256:}."
+  else
+    echo "Previous image is still referenced by an existing container; cleanup is deferred." >&2
+    echo "It can be removed after that container is recreated or deleted." >&2
+  fi
+fi
 
 if [[ "${RESTART}" == "true" ]]; then
   echo "Restarting container ${NAME}..."

@@ -73,6 +73,8 @@
 
 # 4. 変更を保存（重要！コンテナ削除前に必ず実行）
 ./commit-container.sh
+# ロールバック用に直前のイメージを残す場合のみ:
+./commit-container.sh --keep-history
 
 # 5. 停止
 ./stop-container.sh            # 停止（コンテナ保持、再起動可能）
@@ -302,6 +304,10 @@ USER_PASSWORD=yourpass ./build-user-image.sh
 - イメージ名形式: `webtop-kde-{username}-{arch}-u{ubuntu_version}:{version}`
 - commit したイメージはコンテナ削除後も残る
 - 次回起動時は自動的に commit したイメージを使用
+- 以前にcommitしたイメージはデフォルトで削除される。`--keep-history` を指定した場合のみ、
+  直前のイメージを日時付きの `history` タグで保持する
+- コンテナ内の **Commit Container** アイコンから実行した場合は、commit前に直前の
+  イメージ履歴を保持するかGUIで選択できる
 
 **典型的なワークフロー:**
 ```bash

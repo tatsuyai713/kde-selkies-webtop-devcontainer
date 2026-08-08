@@ -73,6 +73,8 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 
 # 4. Save changes (IMPORTANT — do this before removing the container)
 ./commit-container.sh
+# Keep the previous image only when rollback is explicitly needed:
+./commit-container.sh --keep-history
 
 # 5. Stop
 ./stop-container.sh            # Stop (container persists, can restart)
@@ -302,6 +304,10 @@ container name, Ubuntu version, architecture, docker mode (`dind`/`dood`), encod
 - Image format: `webtop-kde-{username}-{arch}-u{ubuntu_version}:{version}`
 - Committed images persist after container deletion
 - Next startup automatically uses the committed image
+- Previous committed images are removed by default. `--keep-history` retains the
+  previous image with a timestamped `history` tag.
+- The in-container **Commit Container** desktop icon asks whether to retain the
+  previous image before committing.
 
 **Typical workflow:**
 ```bash
