@@ -304,10 +304,29 @@ container name, Ubuntu version, architecture, docker mode (`dind`/`dood`), encod
 - Image format: `webtop-kde-{username}-{arch}-u{ubuntu_version}:{version}`
 - Committed images persist after container deletion
 - Next startup automatically uses the committed image
-- Previous committed images are removed by default. `--keep-history` retains the
-  previous image with a timestamped `history` tag.
+- The previous image tag is removed by default when it is no longer referenced.
+  `--keep-history` retains it with a timestamped `history` tag. Commit layers are
+  not compacted; use `flatten-container.sh` to reduce accumulated layers.
 - The in-container **Commit Container** desktop icon asks whether to retain the
   previous image before committing.
+
+### Flattening the Image
+
+```bash
+./flatten-container.sh
+```
+
+- Creates a single-layer image from the current container filesystem while
+  preserving runtime image metadata such as environment variables, entrypoint,
+  command, labels, ports, and declared volumes.
+- Uses temporary disk space approximately equal to the container filesystem and
+  can take several minutes.
+- Mounted volume and bind-mount contents are not included, matching normal
+  `docker commit` behavior.
+- Recreate the running container from the flattened image before pruning to
+  release layers still referenced by the old container.
+- The in-container **Flatten Container** desktop icon provides the same operation
+  and uses a compression-file icon.
 
 **Typical workflow:**
 ```bash
@@ -368,6 +387,7 @@ IMAGE_NAME=ghcr.io/you/your-base ./files/push-base-image.sh
 |---|---|---|
 | `shell-container.sh` | Open a shell inside the container | `./shell-container.sh` |
 | `commit-container.sh` | Save container state to image | `./commit-container.sh` |
+| `flatten-container.sh` | Compact container into a single-layer image | `./flatten-container.sh` |
 | `logs-container.sh` | View container logs | `./logs-container.sh` |
 | `restart-container.sh` | Restart the container | `./restart-container.sh` |
 | `delete-image.sh` | Delete the user image | `./delete-image.sh` |
@@ -639,6 +659,7 @@ kde-selkies-webtop-devcontainer/
 ├── restart-container.sh          # Restart container
 ├── shell-container.sh            # Shell access
 ├── commit-container.sh           # Save changes
+├── flatten-container.sh          # Compact image layers
 ├── logs-container.sh             # View logs
 ├── delete-image.sh               # Delete user image
 ├── generate-ssl-cert.sh          # Generate SSL certificate

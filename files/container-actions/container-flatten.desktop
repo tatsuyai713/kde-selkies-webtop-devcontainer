@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Flatten Container
+Comment=Compact the current container into a single-layer Docker image
+Exec=/usr/local/bin/container-flatten.sh
+Icon=application-x-compressed-tar
+Terminal=false
+Type=Application
+Categories=System;

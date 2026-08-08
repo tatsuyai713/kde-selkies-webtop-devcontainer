@@ -304,10 +304,26 @@ USER_PASSWORD=yourpass ./build-user-image.sh
 - イメージ名形式: `webtop-kde-{username}-{arch}-u{ubuntu_version}:{version}`
 - commit したイメージはコンテナ削除後も残る
 - 次回起動時は自動的に commit したイメージを使用
-- 以前にcommitしたイメージはデフォルトで削除される。`--keep-history` を指定した場合のみ、
-  直前のイメージを日時付きの `history` タグで保持する
+- 以前のイメージタグは、他から参照されていなければデフォルトで削除される。
+  `--keep-history` を指定した場合は日時付きの `history` タグで保持する。commitの
+  レイヤー自体は圧縮されないため、容量削減には `flatten-container.sh` を使用する
 - コンテナ内の **Commit Container** アイコンから実行した場合は、commit前に直前の
   イメージ履歴を保持するかGUIで選択できる
+
+### イメージのフラット化
+
+```bash
+./flatten-container.sh
+```
+
+- 現在のコンテナファイルシステムを単一レイヤーのイメージに変換する。環境変数、
+  ENTRYPOINT、CMD、ラベル、ポート、宣言済みボリュームなどのメタデータは維持される
+- コンテナのファイルシステムと同程度の一時容量が必要で、数分かかる場合がある
+- 通常の `docker commit` と同様、マウントされたボリュームとbind mountの内容は含まれない
+- 旧コンテナが参照中のレイヤーを解放するには、フラット化後のイメージからコンテナを
+  作り直してから不要イメージを削除する
+- コンテナ内の **Flatten Container** デスクトップアイコンからも同じ処理を実行でき、
+  圧縮ファイルのアイコンで表示される
 
 **典型的なワークフロー:**
 ```bash
@@ -368,6 +384,7 @@ IMAGE_NAME=ghcr.io/you/your-base ./files/push-base-image.sh
 |---|---|---|
 | `shell-container.sh` | コンテナ内シェルを開く | `./shell-container.sh` |
 | `commit-container.sh` | コンテナ状態をイメージに保存 | `./commit-container.sh` |
+| `flatten-container.sh` | コンテナを単一レイヤーのイメージに圧縮 | `./flatten-container.sh` |
 | `logs-container.sh` | コンテナログを表示 | `./logs-container.sh` |
 | `restart-container.sh` | コンテナを再起動 | `./restart-container.sh` |
 | `delete-image.sh` | ユーザーイメージを削除 | `./delete-image.sh` |
@@ -607,6 +624,7 @@ kde-selkies-webtop-devcontainer/
 ├── restart-container.sh          # コンテナ再起動
 ├── shell-container.sh            # シェルアクセス
 ├── commit-container.sh           # 変更保存
+├── flatten-container.sh          # イメージレイヤーを圧縮
 ├── logs-container.sh             # ログ表示
 ├── delete-image.sh               # ユーザーイメージ削除
 ├── generate-ssl-cert.sh          # SSL 証明書生成
