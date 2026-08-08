@@ -18,7 +18,7 @@
 | **パスワード** | コマンドに平文 | 環境変数で安全に |
 | **シェル** | 汎用 bash | Ubuntu Desktop bash（カラープロンプト、Git ブランチ、エイリアス） |
 | **GPU 選択** | 自動検出 | 明示的な `--encoder` / `--gpu` フラグ |
-| **依存バージョン** | 変動 | 固定（VirtualGL 3.1.4、Pixelflux 1.6.0、Selkies は最新 main / `SELKIES_COMMIT` で固定可能） |
+| **依存バージョン** | 変動 | 固定（VirtualGL 3.1.4、プラットフォーム互換の Pixelflux wheel、Selkies は最新 main / `SELKIES_COMMIT` で固定可能） |
 | **Docker-in-Docker** | — | `--docker-mode dind\|dood` |
 | **配信チューニング** | — | `-S` ストリームスケール、`-f` フレームレート制御 |
 | **Dev Container** | — | `create-devcontainer-config.sh`（CLI と同じ設定項目） |
@@ -36,7 +36,7 @@
 - **ブラウザのみでアクセス** — 起動後 `https://localhost:<30000+UID>` にアクセス。SSH/RDP の配布不要。
 - **安全なパスワード** — 環境変数で設定。コマンドやログに表示されない。
 - **多言語対応** — ビルド時に `-l ja` で日本語入力（Mozc）、タイムゾーン、ロケールを設定。
-- **バージョン固定** — VirtualGL 3.1.4、Pixelflux 1.6.0、Selkies（デフォルトで最新 `main`、`SELKIES_COMMIT` ビルド引数で固定可能）により再現可能なビルドを保証。
+- **バージョン固定** — VirtualGL 3.1.4、プラットフォーム互換の Pixelflux wheel、Selkies（デフォルトで最新 `main`、`SELKIES_COMMIT` ビルド引数で固定可能）により再現可能なビルドを保証。
 
 ## 対応環境
 
@@ -647,7 +647,7 @@ kde-selkies-webtop-devcontainer/
 再現可能なビルドのため、外部依存関係を固定:
 
 - **VirtualGL:** 3.1.4（Dockerfile のビルド引数）
-- **Pixelflux:** 1.6.0（`files/pixelflux/` 内のローカル `.whl` ファイル）
+- **Pixelflux:** amd64 は 1.6.0。Ubuntu 22.04 arm64 は、Jammy の libva に新しい arm64 wheel が必要とする `vaMapBuffer2` シンボルがないため 1.4.7。arm64 wheel はベースイメージのビルド時に PyPI から取得し、SHA-256 を検証
 - **Selkies:** デフォルトで最新 `main` ブランチを追跡。`--build-arg SELKIES_COMMIT=<hash>` で特定コミットに固定可能
 
 ハードウェアエンコード:

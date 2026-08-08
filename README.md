@@ -18,7 +18,7 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 | **Password handling** | Plaintext in command | Environment variable |
 | **Shell** | Generic bash | Ubuntu Desktop bash (color prompt, Git branch, aliases) |
 | **GPU selection** | Auto-detect | Explicit `--encoder` / `--gpu` flags |
-| **Dependency versions** | Floating | Pinned (VirtualGL 3.1.4, Pixelflux 1.6.0, Selkies latest main / pinnable via `SELKIES_COMMIT`) |
+| **Dependency versions** | Floating | Pinned (VirtualGL 3.1.4, compatible Pixelflux wheel per platform, Selkies latest main / pinnable via `SELKIES_COMMIT`) |
 | **Docker-in-Docker** | — | `--docker-mode dind\|dood` |
 | **Stream tuning** | — | `-S` stream scale, `-f` framerate control |
 | **Dev Container** | — | `create-devcontainer-config.sh` (same settings as CLI) |
@@ -36,7 +36,7 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 - **Browser-only access** — `https://localhost:<30000+UID>` after startup. No SSH/RDP distribution needed.
 - **Secure passwords** — Set via environment variable; never exposed in commands or logs.
 - **Multi-language** — `-l ja` at build time installs Japanese input (Mozc), timezone, and locale.
-- **Version-pinned** — Reproducible builds with pinned VirtualGL 3.1.4, Pixelflux 1.6.0, and Selkies (latest `main` by default; pinnable via `SELKIES_COMMIT` build arg).
+- **Version-pinned** — Reproducible builds with pinned VirtualGL 3.1.4, a platform-compatible Pixelflux wheel, and Selkies (latest `main` by default; pinnable via `SELKIES_COMMIT` build arg).
 
 ## Platform Support
 
@@ -683,7 +683,7 @@ kde-selkies-webtop-devcontainer/
 External dependencies are pinned for reproducible builds:
 
 - **VirtualGL:** 3.1.4 (build argument in Dockerfile)
-- **Pixelflux:** 1.6.0 (local `.whl` files in `files/pixelflux/`)
+- **Pixelflux:** 1.6.0 on amd64; 1.4.7 on Ubuntu 22.04 arm64 because Jammy's libva does not provide the `vaMapBuffer2` symbol required by newer arm64 wheels. The arm64 wheel is downloaded from PyPI and SHA-256 verified during the base-image build.
 - **Selkies:** Tracks latest `main` branch by default. Pin to a specific commit via `--build-arg SELKIES_COMMIT=<hash>`
 
 Hardware encoding:
