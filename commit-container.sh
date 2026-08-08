@@ -117,7 +117,7 @@ FINAL_IMAGE="${TARGET_IMAGE}-${HOST_USER}-${TARGET_ARCH}-u${UBUNTU_VERSION}:${TA
 PREVIOUS_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${FINAL_IMAGE}" 2>/dev/null || true)
 
 echo "Committing container ${NAME} -> ${FINAL_IMAGE}"
-NEW_IMAGE_ID=$(docker commit --quiet "$NAME" "$FINAL_IMAGE")
+NEW_IMAGE_ID=$(docker commit "$NAME" "$FINAL_IMAGE")
 
 if [[ -n "${PREVIOUS_IMAGE_ID}" && "${PREVIOUS_IMAGE_ID}" != "${NEW_IMAGE_ID}" ]]; then
   if [[ "${KEEP_HISTORY}" == "true" ]]; then

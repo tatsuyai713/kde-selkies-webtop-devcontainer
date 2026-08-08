@@ -95,8 +95,9 @@ fi
 kdialog_progress=$(kdialog --progressbar "Committing container..." 0 2>/dev/null || true)
 
 # Execute commit
-if NEW_IMAGE_ID=$(docker -H "unix://${HOST_DOCKER}" commit --quiet \
-    "${REAL_CONTAINER_NAME}" "${DEFAULT_IMAGE}" 2>/dev/null); then
+if COMMIT_OUTPUT=$(docker -H "unix://${HOST_DOCKER}" commit \
+    "${REAL_CONTAINER_NAME}" "${DEFAULT_IMAGE}" 2>&1); then
+    NEW_IMAGE_ID=$(printf '%s\n' "${COMMIT_OUTPUT}" | tail -n 1)
     CLEANUP_MESSAGE=""
     if [ -n "${PREVIOUS_IMAGE_ID}" ] && [ "${PREVIOUS_IMAGE_ID}" != "${NEW_IMAGE_ID}" ]; then
         if [ "${KEEP_HISTORY}" = "true" ]; then
@@ -125,6 +126,7 @@ else
     if [ -n "${kdialog_progress}" ]; then
         qdbus ${kdialog_progress} close 2>/dev/null || true
     fi
-    kdialog --error "Failed to commit container." --title "Container Commit" 2>/dev/null
+    kdialog --error "Failed to commit container.\n\n${COMMIT_OUTPUT}" \
+        --title "Container Commit" 2>/dev/null
     exit 1
 fi
