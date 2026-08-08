@@ -326,7 +326,7 @@ container name, Ubuntu version, architecture, docker mode (`dind`/`dood`), encod
 - Recreate the running container from the flattened image before pruning to
   release layers still referenced by the old container.
 - The in-container **Flatten Container** desktop icon provides the same operation
-  and uses a compression-file icon.
+  and uses the Breeze `archive-insert` action icon.
 
 **Typical workflow:**
 ```bash

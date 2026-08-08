@@ -323,7 +323,7 @@ USER_PASSWORD=yourpass ./build-user-image.sh
 - 旧コンテナが参照中のレイヤーを解放するには、フラット化後のイメージからコンテナを
   作り直してから不要イメージを削除する
 - コンテナ内の **Flatten Container** デスクトップアイコンからも同じ処理を実行でき、
-  圧縮ファイルのアイコンで表示される
+  Breezeの `archive-insert` アクションアイコンで表示される
 
 **典型的なワークフロー:**
 ```bash
