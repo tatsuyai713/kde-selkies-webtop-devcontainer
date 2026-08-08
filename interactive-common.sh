@@ -142,7 +142,15 @@ shared_collect_interactive_settings() {
     local gpu_choice=""
     local arch_choice=""
     local lang_choice=""
+    local framerate_choice=""
+    local stream_scale_choice=""
     local default_mac_choice="no"
+    local existing_dri_node="${DRI_NODE:-}"
+    local existing_gpu_nums="${GPU_NUMS:-}"
+
+    if [[ -z "${existing_gpu_nums}" && "${DOCKER_GPUS:-}" == device=* ]]; then
+        existing_gpu_nums="${DOCKER_GPUS#device=}"
+    fi
 
     case "$(shared_to_lower "${ENCODER:-software}")" in
         nvidia) default_encoder_choice="2" ;;
@@ -181,7 +189,7 @@ shared_collect_interactive_settings() {
     echo "1. Container Settings"
     echo "---------------------"
     shared_prompt_text_default CONTAINER_NAME "Container name" "${CONTAINER_NAME}"
-    shared_prompt_text_default UBUNTU_VERSION "Ubuntu version (22.04 or 24.04)" "${UBUNTU_VERSION}"
+    shared_prompt_choice_default UBUNTU_VERSION "Ubuntu version (22.04 or 24.04)" "${UBUNTU_VERSION}" '^(22\.04|24\.04)$'
     shared_prompt_text_default arch_choice "Target architecture (amd64 or arm64)" "${TARGET_ARCH}"
     TARGET_ARCH="$(shared_normalize_arch_or_die "${arch_choice}")"
     shared_prompt_choice_default docker_mode_choice "Docker mode [1=dind, 2=dood]" "${default_docker_mode_choice}" '^[1-2]$'
@@ -215,8 +223,8 @@ shared_collect_interactive_settings() {
             echo "DRI Node Configuration"
             echo "----------------------"
             echo "Leave empty to auto-detect the render node."
-            if [[ -n "${DRI_NODE}" ]]; then
-                shared_prompt_text_default DRI_NODE "Specify DRI node (e.g. /dev/dri/renderD129)" "${DRI_NODE}"
+            if [[ -n "${existing_dri_node}" ]]; then
+                shared_prompt_text_default DRI_NODE "Specify DRI node (e.g. /dev/dri/renderD129)" "${existing_dri_node}"
             else
                 shared_prompt_optional_text DRI_NODE "Specify DRI node (e.g. /dev/dri/renderD129, leave empty to auto-detect)"
             fi
@@ -227,8 +235,8 @@ shared_collect_interactive_settings() {
             echo "DRI Node Configuration"
             echo "----------------------"
             echo "Leave empty to auto-detect the render node."
-            if [[ -n "${DRI_NODE}" ]]; then
-                shared_prompt_text_default DRI_NODE "Specify DRI node (e.g. /dev/dri/renderD129)" "${DRI_NODE}"
+            if [[ -n "${existing_dri_node}" ]]; then
+                shared_prompt_text_default DRI_NODE "Specify DRI node (e.g. /dev/dri/renderD129)" "${existing_dri_node}"
             else
                 shared_prompt_optional_text DRI_NODE "Specify DRI node (e.g. /dev/dri/renderD129, leave empty to auto-detect)"
             fi
@@ -256,7 +264,11 @@ shared_collect_interactive_settings() {
             DOCKER_GPUS="all"
             ;;
         3)
-            shared_prompt_required_text GPU_NUMS "Enter GPU device numbers (comma-separated, e.g. 0,1)"
+            if [[ -n "${existing_gpu_nums}" ]]; then
+                shared_prompt_text_default GPU_NUMS "Enter GPU device numbers (comma-separated, e.g. 0,1)" "${existing_gpu_nums}"
+            else
+                shared_prompt_required_text GPU_NUMS "Enter GPU device numbers (comma-separated, e.g. 0,1)"
+            fi
             DOCKER_GPUS="device=${GPU_NUMS}"
             ;;
         *)
@@ -266,10 +278,26 @@ shared_collect_interactive_settings() {
 
     echo "3. Display Settings"
     echo "-------------------"
-    shared_prompt_text_default RESOLUTION "Display resolution" "${RESOLUTION}"
-    shared_prompt_text_default DPI "DPI" "${DPI}"
-    shared_prompt_text_default STREAM_SCALE "Stream resolution scale (0.25-1.0)" "${STREAM_SCALE}"
-    shared_prompt_text_default FRAMERATE "Framerate (single value or range)" "${FRAMERATE}"
+    shared_prompt_choice_default RESOLUTION "Display resolution" "${RESOLUTION}" '^[1-9][0-9]*x[1-9][0-9]*$'
+    shared_prompt_choice_default DPI "DPI" "${DPI}" '^[1-9][0-9]*$'
+    while true; do
+        shared_prompt_text_default stream_scale_choice "Stream resolution scale (0.25-1.0)" "${STREAM_SCALE}"
+        if awk -v value="${stream_scale_choice}" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value >= 0.25 && value <= 1.0) }'; then
+            STREAM_SCALE="${stream_scale_choice}"
+            break
+        fi
+        echo "Stream resolution scale must be between 0.25 and 1.0."
+    done
+    while true; do
+        shared_prompt_text_default framerate_choice "Framerate (single value or range)" "${FRAMERATE}"
+        if [[ "${framerate_choice}" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
+            if [[ "${framerate_choice}" != *-* ]] || awk -F- -v value="${framerate_choice}" 'BEGIN { split(value, part, "-"); exit !(part[1] <= part[2]) }'; then
+                FRAMERATE="${framerate_choice}"
+                break
+            fi
+        fi
+        echo "Framerate must be a value such as 30 or an ascending range such as 30-60."
+    done
     echo ""
 
     echo "4. Language/Timezone Settings"

@@ -51,6 +51,15 @@ if [[ -z ${LSIO_READ_ONLY_FS} ]] && [[ -z ${LSIO_NON_ROOT_USER} ]]; then
     lsiown "${TARGET_USER}:${TARGET_USER}" /app /config /defaults /opt/selkies-env "${USER_HOME}"
 fi
 
+# Use a dedicated runtime directory for PulseAudio. /defaults contains image
+# configuration and may be restored to root ownership after service startup.
+PULSE_DIR="/run/pulse"
+TARGET_GROUP="$(id -gn "${TARGET_USER}" 2>/dev/null || printf '%s' "${PGID}")"
+install -d -m 700 "${PULSE_DIR}"
+chown "${TARGET_USER}:${TARGET_GROUP}" "${PULSE_DIR}" 2>/dev/null || true
+printf '%s' "${PULSE_DIR}" > /run/s6/container_environment/PULSE_RUNTIME_PATH
+printf 'unix:%s/native' "${PULSE_DIR}" > /run/s6/container_environment/PULSE_SERVER
+
 cat /run/branding 2>/dev/null || true
 echo '
 ───────────────────────────────────────

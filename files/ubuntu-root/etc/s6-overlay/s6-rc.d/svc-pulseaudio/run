@@ -1,7 +1,9 @@
 #!/usr/bin/with-contenv bash
 TARGET_USER="${CUSTOM_USER:-${USER_NAME:-root}}"
-PULSE_DIR="${PULSE_RUNTIME_PATH:-/defaults}"
+PULSE_DIR="/run/pulse"
 TARGET_GROUP="$(id -gn "${TARGET_USER}" 2>/dev/null || printf '%s' "${TARGET_USER}")"
+export PULSE_RUNTIME_PATH="${PULSE_DIR}"
+export PULSE_SERVER="unix:${PULSE_DIR}/native"
 
 # Pulseaudio requires a user-owned secure runtime dir. If a root shell ever
 # autospawned a daemon here, stale socket/pid files can block the real service.
