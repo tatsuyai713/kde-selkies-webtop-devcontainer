@@ -35,7 +35,7 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 - **Docker mode switching** — `--docker-mode dood` (host socket) or `dind` (container-internal dockerd).
 - **Browser-only access** — `https://localhost:<30000+UID>` after startup. No SSH/RDP distribution needed.
 - **Secure passwords** — Set via environment variable; never exposed in commands or logs.
-- **Multi-language** — `-l ja` at build time installs Japanese input (Mozc), timezone, and locale.
+- **Multi-language** — `-l jp` at build time installs Linux-side Japanese input (Fcitx/Anthy), timezone, and locale.
 - **Version-pinned** — Reproducible builds with pinned VirtualGL 3.1.4, a platform-compatible Pixelflux wheel, and Selkies (latest `main` by default; pinnable via `SELKIES_COMMIT` build arg).
 
 ## Platform Support
@@ -55,7 +55,7 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 ```bash
 # 1. Build user image (1-2 min; base image pulled from GHCR automatically)
 ./build-user-image.sh                    # English (default)
-./build-user-image.sh -l ja              # Japanese environment
+./build-user-image.sh -l jp              # Japanese environment
 ./build-user-image.sh -u 22.04           # Ubuntu 22.04
 
 # 2. Start the container
@@ -227,7 +227,7 @@ The base image is pulled from GHCR automatically — no manual base build needed
 ./build-user-image.sh
 
 # Japanese
-./build-user-image.sh -l ja
+./build-user-image.sh -l jp
 
 # Skip password prompt
 USER_PASSWORD=yourpass ./build-user-image.sh
@@ -377,7 +377,7 @@ IMAGE_NAME=ghcr.io/you/your-base ./files/push-base-image.sh
 
 | Script | Description | Usage |
 |---|---|---|
-| `build-user-image.sh` | Build user-specific image | `./build-user-image.sh [-l ja] [-u 22.04]` |
+| `build-user-image.sh` | Build user-specific image | `./build-user-image.sh [-l jp] [-u 22.04]` |
 | `start-container.sh` | Start or resume the container | `./start-container.sh [--encoder <type>]` |
 | `configure-container.sh` | Create or edit saved startup settings | `./configure-container.sh [--config <file>]` |
 | `create-devcontainer-config.sh` | Generate Dev Container config | `./create-devcontainer-config.sh` |

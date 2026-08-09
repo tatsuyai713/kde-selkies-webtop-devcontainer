@@ -35,7 +35,7 @@
 - **Docker モード切替** — `--docker-mode dood`（ホスト socket）または `dind`（コンテナ内 dockerd）。
 - **ブラウザのみでアクセス** — 起動後 `https://localhost:<30000+UID>` にアクセス。SSH/RDP の配布不要。
 - **安全なパスワード** — 環境変数で設定。コマンドやログに表示されない。
-- **多言語対応** — ビルド時に `-l ja` で日本語入力（Mozc）、タイムゾーン、ロケールを設定。
+- **多言語対応** — ビルド時に `-l jp` でLinux側の日本語入力（Fcitx/Anthy）、タイムゾーン、ロケールを設定。
 - **バージョン固定** — VirtualGL 3.1.4、プラットフォーム互換の Pixelflux wheel、Selkies（デフォルトで最新 `main`、`SELKIES_COMMIT` ビルド引数で固定可能）により再現可能なビルドを保証。
 
 ## 対応環境
@@ -55,7 +55,7 @@
 ```bash
 # 1. ユーザーイメージをビルド（1-2分、ベースイメージは GHCR から自動取得）
 ./build-user-image.sh                    # 英語（デフォルト）
-./build-user-image.sh -l ja              # 日本語環境
+./build-user-image.sh -l jp              # 日本語環境
 ./build-user-image.sh -u 22.04           # Ubuntu 22.04
 
 # 2. コンテナを起動
@@ -227,7 +227,7 @@ vainfo  # VAProfileH264Main : VAEntrypointEncSlice が表示されること
 ./build-user-image.sh
 
 # 日本語
-./build-user-image.sh -l ja
+./build-user-image.sh -l jp
 
 # パスワードプロンプトをスキップ
 USER_PASSWORD=yourpass ./build-user-image.sh
@@ -373,7 +373,7 @@ IMAGE_NAME=ghcr.io/you/your-base ./files/push-base-image.sh
 
 | スクリプト | 説明 | 使い方 |
 |---|---|---|
-| `build-user-image.sh` | ユーザー固有イメージをビルド | `./build-user-image.sh [-l ja] [-u 22.04]` |
+| `build-user-image.sh` | ユーザー固有イメージをビルド | `./build-user-image.sh [-l jp] [-u 22.04]` |
 | `start-container.sh` | コンテナを起動/再開 | `./start-container.sh [--encoder <type>]` |
 | `configure-container.sh` | 保存済みの起動設定を作成・編集 | `./configure-container.sh [--config <file>]` |
 | `create-devcontainer-config.sh` | Dev Container 設定を生成 | `./create-devcontainer-config.sh` |

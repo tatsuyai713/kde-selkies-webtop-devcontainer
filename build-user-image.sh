@@ -35,7 +35,7 @@ Usage: $0 [-b base_image] [-i base_image_name] [-a arch] [-p platform] [-l langu
   -u, --ubuntu     Ubuntu version (22.04 or 24.04). Default: ${UBUNTU_VERSION}
   -a, --arch       Arch hint (amd64/arm64) to pick base tag
   -p, --platform   Platform override for buildx (e.g. linux/arm64)
-  -l, --language   Language pack to install (en or ja). Default: ${USER_LANGUAGE}
+  -l, --language   Language pack to install (en or jp). Default: ${USER_LANGUAGE}
   -v, --version    Version tag to use (default: ${VERSION})
   -n, --no-cache   Build without cache (passes --no-cache to buildx)
   (env) USER_PASSWORD  Password to set for the user (will prompt if empty)
@@ -157,7 +157,7 @@ if ! "${DOCKER_CMD[@]}" images --format '{{.Repository}}:{{.Tag}}' | grep -q "^$
   exit 1
 fi
 
-if [[ "${USER_LANGUAGE}" == "ja" ]]; then
+if [[ "${USER_LANGUAGE}" == "jp" ]]; then
   LANG_ARG="ja_JP.UTF-8"
   LANGUAGE_ARG="ja_JP:ja"
 fi

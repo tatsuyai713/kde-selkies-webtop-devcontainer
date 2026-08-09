@@ -579,7 +579,7 @@ if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${USER_IMAGE}
     # Determine language argument
     case "${TIMEZONE}" in
         Asia/Tokyo)
-            BUILD_ARGS+=(--language "ja")
+            BUILD_ARGS+=(--language "jp")
             ;;
         *)
             BUILD_ARGS+=(--language "en")

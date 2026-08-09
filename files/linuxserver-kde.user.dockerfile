@@ -175,16 +175,16 @@ RUN set -eux; \
   mkdir -p /defaults /app /opt/selkies-env && \
   chown -R "${TARGET_UID}:${TARGET_GID}" /defaults /app /opt/selkies-env
 
-# optional Japanese locale and input (toggle via USER_LANGUAGE=ja)
+# optional Japanese locale and input (toggle via USER_LANGUAGE=jp)
 RUN set -eux; \
   LANG_SEL="$(echo "${USER_LANGUAGE}" | tr '[:upper:]' '[:lower:]')" ; \
-  if [ "${LANG_SEL}" = "ja" ] || [ "${LANG_SEL}" = "ja_jp" ] || [ "${LANG_SEL}" = "ja-jp" ]; then \
+  if [ "${LANG_SEL}" = "jp" ]; then \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
       language-pack-ja-base language-pack-ja im-config \
       fonts-noto-cjk fonts-noto-color-emoji \
       fcitx fcitx-bin fcitx-data fcitx-table-all \
-      fcitx-mozc fcitx-config-gtk \
+      fcitx-anthy fcitx-config-gtk \
       fcitx-frontend-gtk2 fcitx-frontend-gtk3 fcitx-frontend-qt5 \
       fcitx-module-dbus fcitx-module-kimpanel fcitx-module-x11 fcitx-module-lua fcitx-ui-classic \
       kde-config-fcitx && \
@@ -217,7 +217,7 @@ RUN set -eux; \
       'EndSection' \
       > /etc/X11/xorg.conf.d/00-keyboard.conf; \
     im-config -n fcitx; \
-    install -d -m 755 /etc/xdg/autostart "/home/${USER_NAME}/.config/autostart"; \
+    install -d -m 755 /etc/xdg/autostart "/home/${USER_NAME}/.config/autostart" "/home/${USER_NAME}/.config/fcitx"; \
     printf '%s\n' \
       '[Desktop Entry]' \
       'Type=Application' \
@@ -229,6 +229,21 @@ RUN set -eux; \
       > /etc/xdg/autostart/fcitx-autostart.desktop; \
     cp /etc/xdg/autostart/fcitx-autostart.desktop "/home/${USER_NAME}/.config/autostart/fcitx-autostart.desktop"; \
     chown "${USER_UID}:${USER_GID}" "/home/${USER_NAME}/.config/autostart/fcitx-autostart.desktop"; \
+    printf '%s\n' \
+      '[Hotkey]' \
+      'TriggerKey=CTRL_SPACE' \
+      '' \
+      '[Program]' \
+      'ShareStateAmongWindow=All' \
+      'DefaultInputMethodState=Active' \
+      > "/home/${USER_NAME}/.config/fcitx/config"; \
+    chown "${USER_UID}:${USER_GID}" "/home/${USER_NAME}/.config/fcitx/config"; \
+    printf '%s\n' \
+      '[Profile]' \
+      'IMName=anthy' \
+      'EnabledIMList=fcitx-keyboard-jp:True,anthy:True' \
+      > "/home/${USER_NAME}/.config/fcitx/profile"; \
+    chown "${USER_UID}:${USER_GID}" "/home/${USER_NAME}/.config/fcitx/profile"; \
     printf '%s\n' \
       '[Layout]' \
       'DisplayNames=' \
@@ -244,7 +259,7 @@ RUN set -eux; \
 # Set fcitx environment variables globally when Japanese locale is selected
 ARG USER_LANGUAGE
 RUN LANG_SEL="$(echo "${USER_LANGUAGE}" | tr '[:upper:]' '[:lower:]')" ; \
-  if [ "${LANG_SEL}" = "ja" ] || [ "${LANG_SEL}" = "ja_jp" ] || [ "${LANG_SEL}" = "ja-jp" ]; then \
+  if [ "${LANG_SEL}" = "jp" ]; then \
     mkdir -p /etc/profile.d && \
     printf '%s\n' \
       'export GTK_IM_MODULE=fcitx' \
@@ -257,7 +272,7 @@ RUN LANG_SEL="$(echo "${USER_LANGUAGE}" | tr '[:upper:]' '[:lower:]')" ; \
     chmod 644 /etc/profile.d/99-fcitx-env.sh; \
   fi
 
-# Apply fcitx ENV globally when USER_LANGUAGE is ja
+# Apply fcitx ENV globally when USER_LANGUAGE is jp
 ENV GTK_IM_MODULE=fcitx \
     QT_IM_MODULE=fcitx \
     XMODIFIERS="@im=fcitx" \

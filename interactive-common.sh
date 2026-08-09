@@ -114,7 +114,7 @@ shared_apply_locale_from_timezone() {
 
     case "${timezone}" in
         Asia/Tokyo)
-            BUILD_LANGUAGE="ja"
+            BUILD_LANGUAGE="jp"
             TIMEZONE="Asia/Tokyo"
             RUNTIME_TZ="Asia/Tokyo"
             RUNTIME_LANG="ja_JP.UTF-8"
@@ -166,7 +166,7 @@ shared_collect_interactive_settings() {
     esac
 
     case "${TIMEZONE:-UTC}" in
-        Asia/Tokyo) default_lang_choice="ja" ;;
+        Asia/Tokyo) default_lang_choice="jp" ;;
         *) default_lang_choice="en" ;;
     esac
 
@@ -303,11 +303,11 @@ shared_collect_interactive_settings() {
     echo "4. Language/Timezone Settings"
     echo "-----------------------------"
     echo "Select language (affects timezone):"
-    echo "  ja) Japanese (Asia/Tokyo)"
+    echo "  jp) Japanese (Asia/Tokyo)"
     echo "  en) English (UTC)"
-    shared_prompt_text_default lang_choice "Select language [ja/en]" "${default_lang_choice}"
+    shared_prompt_text_default lang_choice "Select language [jp/en]" "${default_lang_choice}"
     case "$(shared_to_lower "${lang_choice}")" in
-        ja|jp)
+        jp)
             shared_apply_locale_from_timezone "Asia/Tokyo"
             echo "Japanese selected. Timezone: ${TIMEZONE}"
             ;;
