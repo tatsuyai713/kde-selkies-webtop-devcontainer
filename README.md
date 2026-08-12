@@ -465,33 +465,183 @@ Selkies streams bidirectional audio to the browser via WebRTC.
 
 ## Appendix: HTTPS/SSL
 
-### Quick Setup (Recommended)
+Selkies uses a secure WebSocket (`wss://`) for the desktop stream. Merely bypassing
+the HTTPS warning is not sufficient: some browsers still reject WSS before the
+request reaches nginx. Install the local CA on every device that runs a browser.
 
-Generate a CA-signed certificate and trust it on your OS:
+### 1. Generate a local CA and server certificate
 
 ```bash
-# 1. Generate CA + server certificate
-./generate-ssl-cert.sh
+# Accessing the container as https://localhost:PORT
+./generate-ssl-cert.sh -c localhost
 
-# 2. Trust the CA on your OS (one-time setup)
-#    macOS:
-sudo security add-trusted-cert -d -r trustRoot \
-  -k /Library/Keychains/System.keychain ./ssl/ca.crt
+# Accessing a remote Docker host by DNS name
+./generate-ssl-cert.sh -f -c webtop.example.lan
 
-#    Linux (Ubuntu/Debian):
-sudo cp ./ssl/ca.crt /usr/local/share/ca-certificates/local-dev-ca.crt
-sudo update-ca-certificates
-
-#    Windows (PowerShell as Administrator):
-Import-Certificate -FilePath .\ssl\ca.crt -CertStoreLocation Cert:\LocalMachine\Root
-
-# 3. Start the container (ssl/ is auto-detected)
+# ssl/ is auto-detected
 ./start-container.sh
 ```
 
-After step 2, browsers will show a green lock icon with no warnings.
+If the container already existed before `ssl/` was created, Docker cannot add the
+certificate bind mount to that existing container. Save any work that exists only
+inside the container, then recreate it:
 
-> **Note:** If you regenerate certificates (`./generate-ssl-cert.sh -f`), you must repeat step 2 because the CA key changes.
+```bash
+docker stop linuxserver-kde-$(whoami)
+docker rm linuxserver-kde-$(whoami)
+./start-container.sh
+```
+
+When only the files in an already-mounted `ssl/` directory are replaced, restart
+the container so nginx loads the new certificate.
+
+Use the same DNS name in the browser that you passed to `-c`. The generator adds
+`localhost`, `127.0.0.1`, and `::1` automatically, but does not add an arbitrary
+remote IP address as an IP SAN. For access by remote IP, use your own certificate
+with that IP in `subjectAltName`, or assign the host a local DNS name.
+
+The generated files are:
+
+| File | Purpose | Distribute? |
+|---|---|---|
+| `ssl/ca.crt` | Local CA public certificate | Yes, to browser devices |
+| `ssl/ca.key` | Local CA private key | **No — keep secret** |
+| `ssl/cert.pem` | Server certificate | Mounted into the container |
+| `ssl/cert.key` | Server private key | **No — keep secret** |
+
+### 2. Trust `ssl/ca.crt` on browser devices
+
+Install the CA on the device where the browser runs. This may be different from
+the Docker host.
+
+#### macOS
+
+For the current user (recommended for a development machine):
+
+```bash
+security add-trusted-cert -r trustRoot \
+  -k "$HOME/Library/Keychains/login.keychain-db" ./ssl/ca.crt
+```
+
+For all users (requires an administrator):
+
+```bash
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain ./ssl/ca.crt
+```
+
+Alternatively, import `ca.crt` into Keychain Access, open the certificate, expand
+**Trust**, and select **Always Trust**. See Apple's
+[certificate trust documentation](https://support.apple.com/guide/keychain-access/kyca11871/mac).
+Quit the browser completely (`Cmd+Q`) and reopen it after changing trust.
+
+#### Windows 10/11
+
+Copy `ca.crt` to Windows, then run PowerShell. Current-user installation does not
+require administrator privileges:
+
+```powershell
+Import-Certificate -FilePath .\ca.crt `
+  -CertStoreLocation Cert:\CurrentUser\Root
+```
+
+To trust it for every user, open PowerShell as Administrator:
+
+```powershell
+Import-Certificate -FilePath .\ca.crt `
+  -CertStoreLocation Cert:\LocalMachine\Root
+```
+
+See Microsoft's [`Import-Certificate` documentation](https://learn.microsoft.com/powershell/module/pki/import-certificate).
+Fully quit and restart Chrome, Edge, or Firefox.
+
+#### WSL2
+
+The usual browser runs on Windows, so install the CA in the **Windows** certificate
+store using the preceding Windows steps. For example, first copy it from WSL:
+
+```bash
+cp ./ssl/ca.crt /mnt/c/Users/<WindowsUser>/Downloads/kde-webtop-ca.crt
+```
+
+If command-line programs inside WSL (`curl`, `git`, SDKs) must also trust the CA,
+install it separately inside the WSL distribution using the Ubuntu/Debian steps below.
+
+#### Ubuntu / Debian
+
+```bash
+sudo apt-get install -y ca-certificates
+sudo cp ./ssl/ca.crt /usr/local/share/ca-certificates/kde-webtop-ca.crt
+sudo update-ca-certificates
+```
+
+The `.crt` extension is required. See Ubuntu's
+[root CA installation guide](https://ubuntu.com/server/docs/how-to/security/install-a-root-ca-certificate-in-the-trust-store/).
+
+#### Fedora / RHEL / Rocky Linux / AlmaLinux
+
+```bash
+sudo cp ./ssl/ca.crt /etc/pki/ca-trust/source/anchors/kde-webtop-ca.crt
+sudo update-ca-trust
+```
+
+See Red Hat's
+[shared system certificates documentation](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/7/html/security_guide/sec-shared-system-certificates).
+
+#### iOS / iPadOS / visionOS
+
+Transfer only `ca.crt` to the device and install the downloaded certificate
+profile. Then open **Settings > General > About > Certificate Trust Settings**
+and enable full trust for **Local Development CA**. A manually installed root is
+not trusted for TLS until this switch is enabled. See
+[Apple's instructions](https://support.apple.com/102390).
+
+#### Android
+
+Transfer only `ca.crt`, then open **Settings > Security & privacy > More security
+settings > Encryption & credentials > Install a certificate > CA certificate**.
+Menu names vary by Android vendor and release. Install a private CA only on a
+device you control. See Google's
+[certificate installation instructions](https://support.google.com/pixelphone/answer/2844832).
+
+#### ChromeOS
+
+Open `chrome://settings/certificates`, select **Authorities > Import**, and import
+`ca.crt`. Enable trust for websites when prompted. On a managed Chromebook, the
+administrator may need to deploy the CA from **Google Admin console > Devices >
+Networks > Certificates**. See Google's
+[ChromeOS certificate instructions](https://support.google.com/chromebook/answer/1282338)
+and [managed-device instructions](https://support.google.com/chrome/a/answer/6342302).
+
+### Browser-specific notes
+
+- Chrome, Chromium, Edge, and Safari use locally managed trust settings from the
+  operating system. Fully restart the browser after installing or replacing a CA.
+- Firefox uses third-party roots from the OS by default on Windows, macOS, and
+  Android. If disabled, enable **Allow Firefox to automatically trust third-party
+  root certificates you install** under **Settings > Privacy & Security >
+  Certificates**. On Linux, import `ca.crt` under **View Certificates >
+  Authorities** if the system CA is not detected. See Mozilla's
+  [CA setup documentation](https://support.mozilla.org/kb/setting-certificate-authorities-firefox).
+- Do not use `--no-ca` for routine browser access. It creates a standalone
+  self-signed server certificate and does not remove browser trust warnings.
+
+### 3. Verify HTTPS and WSS
+
+Use the HTTPS URL printed by `start-container.sh`:
+
+```bash
+# Do not use -k: this must pass normal certificate verification
+curl -I https://localhost:<HTTPS-port>/
+```
+
+A `200` or redirect to `/auth/login` means TLS validation succeeded. In browser
+Developer Tools, **Network > WS**, `/websockets` should show status `101`. If the
+page reloads every few seconds and nginx never logs `/websockets`, fully restart
+the browser and verify that the CA was installed on the browser device.
+
+If you regenerate certificates with `./generate-ssl-cert.sh -f`, reinstall the
+new `ssl/ca.crt` on every browser device because a new CA key is generated.
 
 ### Using Your Own Certificates
 
@@ -512,12 +662,12 @@ cp /path/to/key.pem ssl/cert.key
 | `--no-ca` | Self-signed cert (no CA) | CA mode |
 | `-f` | Force overwrite existing certs | — |
 
-Output files: `ssl/ca.crt`, `ssl/ca.key`, `ssl/cert.pem`, `ssl/cert.key`
+Output files: `ssl/ca.crt`, `ssl/ca.key`, `ssl/cert.pem`, `ssl/cert.key`.
 
 ### Certificate Priority
 
-1. `ssl/cert.pem` + `ssl/cert.key` (project directory)
-2. `SSL_DIR` environment variable
+1. Explicit `-s <dir>`, saved `ssl_dir`, or `SSL_DIR`
+2. `ssl/cert.pem` + `ssl/cert.key` in the project directory when no SSL directory was specified
 3. Image default certificate (fallback)
 
 ---

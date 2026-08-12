@@ -461,27 +461,211 @@ Selkies はブラウザへ WebRTC 経由で双方向オーディオをストリ�
 
 ## 付録: HTTPS/SSL
 
-### 証明書の設定
+Selkies はデスクトップ配信にセキュアWebSocket（`wss://`）を使用します。
+HTTPSの警告画面を一度許可するだけでは不十分で、ブラウザによってはWSSだけを
+拒否し、要求がnginxまで届きません。ブラウザを実行するすべての端末へローカルCAを
+登録してください。
+
+### 1. ローカルCAとサーバー証明書の生成
+
+```bash
+# https://localhost:PORT でアクセスする場合
+./generate-ssl-cert.sh -c localhost
+
+# リモートDockerホストへDNS名でアクセスする場合
+./generate-ssl-cert.sh -f -c webtop.example.lan
+
+# ssl/ は自動検出される
+./start-container.sh
+```
+
+`ssl/` の作成前からコンテナが存在していた場合、Dockerは既存コンテナへ後から
+証明書のバインドマウントを追加できません。コンテナ内だけにある作業を保存してから
+再作成してください。
+
+```bash
+docker stop linuxserver-kde-$(whoami)
+docker rm linuxserver-kde-$(whoami)
+./start-container.sh
+```
+
+すでにマウント済みの `ssl/` 内の証明書だけを交換した場合は、nginxが新しい証明書を
+読み込むようコンテナを再起動します。
+
+ブラウザでは `-c` に指定したものと同じDNS名を使用してください。生成スクリプトは
+`localhost`、`127.0.0.1`、`::1` を自動的にSANへ追加しますが、任意のリモートIPは
+IP SANとして追加しません。リモートIPでアクセスする場合は、そのIPを
+`subjectAltName` に含む独自証明書を使用するか、ホストへローカルDNS名を割り当てます。
+
+生成されるファイル：
+
+| ファイル | 用途 | 配布可否 |
+|---|---|---|
+| `ssl/ca.crt` | ローカルCAの公開証明書 | ブラウザ端末へ配布可 |
+| `ssl/ca.key` | ローカルCAの秘密鍵 | **配布禁止・要厳重保管** |
+| `ssl/cert.pem` | サーバー証明書 | コンテナへマウント |
+| `ssl/cert.key` | サーバー秘密鍵 | **配布禁止・要厳重保管** |
+
+### 2. ブラウザ端末へ `ssl/ca.crt` を信頼登録
+
+登録先はDockerホストではなく、実際にブラウザを実行する端末です。両者が別の
+コンピューターの場合は、ブラウザ側へ `ca.crt` だけを安全に転送してください。
+
+#### macOS
+
+現在のユーザーだけで信頼する場合（開発端末で推奨）：
+
+```bash
+security add-trusted-cert -r trustRoot \
+  -k "$HOME/Library/Keychains/login.keychain-db" ./ssl/ca.crt
+```
+
+全ユーザーで信頼する場合（管理者権限が必要）：
+
+```bash
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain ./ssl/ca.crt
+```
+
+GUIでは `ca.crt` をキーチェーンアクセスへ読み込み、証明書を開いて「信頼」から
+「常に信頼」を選択します。詳細はAppleの
+[証明書の信頼設定](https://support.apple.com/ja-jp/guide/keychain-access/kyca11871/mac)を参照してください。
+変更後はタブを閉じるだけでなく、ブラウザを `Cmd+Q` で完全終了して再起動します。
+
+#### Windows 10/11
+
+`ca.crt` をWindowsへコピーしてPowerShellを実行します。現在のユーザーだけへの
+登録には管理者権限は不要です。
+
+```powershell
+Import-Certificate -FilePath .\ca.crt `
+  -CertStoreLocation Cert:\CurrentUser\Root
+```
+
+全ユーザーで信頼する場合は、PowerShellを「管理者として実行」します。
+
+```powershell
+Import-Certificate -FilePath .\ca.crt `
+  -CertStoreLocation Cert:\LocalMachine\Root
+```
+
+詳細はMicrosoftの
+[`Import-Certificate` ドキュメント](https://learn.microsoft.com/powershell/module/pki/import-certificate)を
+参照してください。登録後はChrome、Edge、Firefoxを完全終了して再起動します。
+
+#### WSL2
+
+通常、ブラウザはWindows側で動作するため、上記のWindows証明書ストアへ登録します。
+WSLからWindowsへコピーする例：
+
+```bash
+cp ./ssl/ca.crt /mnt/c/Users/<WindowsUser>/Downloads/kde-webtop-ca.crt
+```
+
+WSL内の `curl`、`git`、SDKなどにも信頼させる場合は、Windowsとは別にWSL
+ディストリビューション内でも次のUbuntu/Debian手順を実行します。
+
+#### Ubuntu / Debian
+
+```bash
+sudo apt-get install -y ca-certificates
+sudo cp ./ssl/ca.crt /usr/local/share/ca-certificates/kde-webtop-ca.crt
+sudo update-ca-certificates
+```
+
+ファイルの拡張子は `.crt` が必須です。詳細はUbuntuの
+[ルートCA登録ガイド](https://ubuntu.com/server/docs/how-to/security/install-a-root-ca-certificate-in-the-trust-store/)を
+参照してください。
+
+#### Fedora / RHEL / Rocky Linux / AlmaLinux
+
+```bash
+sudo cp ./ssl/ca.crt /etc/pki/ca-trust/source/anchors/kde-webtop-ca.crt
+sudo update-ca-trust
+```
+
+詳細はRed Hatの
+[共有システム証明書のドキュメント](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/7/html/security_guide/sec-shared-system-certificates)を
+参照してください。
+
+#### iOS / iPadOS / visionOS
+
+`ca.crt` だけを端末へ転送し、ダウンロードした証明書プロファイルをインストールします。
+続いて「設定 > 一般 > 情報 > 証明書信頼設定」を開き、「Local Development CA」の
+完全な信頼を有効にします。手動インストールしたルート証明書は、この操作を行うまで
+TLSでは信頼されません。詳細は
+[Appleの手順](https://support.apple.com/ja-jp/102390)を参照してください。
+
+#### Android
+
+`ca.crt` だけを端末へ転送し、「設定 > セキュリティとプライバシー > その他の
+セキュリティ設定 > 暗号化と認証情報 > 証明書のインストール > CA証明書」から
+登録します。メニュー名は端末メーカーとAndroidバージョンによって異なります。
+プライベートCAは自分が管理する端末だけへ登録してください。詳細はGoogleの
+[証明書登録手順](https://support.google.com/pixelphone/answer/2844832?hl=ja)を参照してください。
+
+#### ChromeOS
+
+`chrome://settings/certificates` を開き、「認証局 > インポート」から `ca.crt` を
+読み込み、確認画面でWebサイトの信頼を有効にします。管理対象Chromebookでは、管理者が
+「Google管理コンソール > デバイス > ネットワーク > 証明書」からCAを配布する必要が
+あります。詳細はGoogleの
+[ChromeOS証明書登録手順](https://support.google.com/chromebook/answer/1282338?hl=ja)と
+[管理対象端末へのCA設定](https://support.google.com/chrome/a/answer/6342302?hl=ja)を参照してください。
+
+### ブラウザ別の注意
+
+- Chrome、Chromium、Edge、SafariはOSのローカル信頼設定を使用します。CAを登録・
+  交換した後はブラウザを完全終了して再起動してください。
+- FirefoxはWindows、macOS、AndroidではデフォルトでOSへ追加されたサードパーティCAを
+  使用します。無効になっている場合は「設定 > プライバシーとセキュリティ > 証明書」の
+  「インストールしたサードパーティのルート証明書をFirefoxが自動的に信頼する」を
+  有効にします。LinuxでシステムCAが検出されない場合は「証明書を表示 > 認証局」から
+  `ca.crt` を読み込みます。詳細はMozillaの
+  [CA設定ガイド](https://support.mozilla.org/ja/kb/setting-certificate-authorities-firefox)を参照してください。
+- 通常のブラウザ利用では `--no-ca` を使用しないでください。単独の自己署名サーバー
+  証明書を作るだけで、ブラウザの信頼警告は解消されません。
+
+### 3. HTTPSとWSSの確認
+
+`start-container.sh` が表示したHTTPS URLで確認します。
+
+```bash
+# -k は付けない。通常の証明書検証に成功する必要がある
+curl -I https://localhost:<HTTPS-port>/
+```
+
+`200` または `/auth/login` へのリダイレクトになればTLS検証は成功です。ブラウザの
+開発者ツールでは「Network > WS」の `/websockets` がステータス `101` になることを
+確認します。ページが数秒ごとに再読込され、nginxに `/websockets` が記録されない場合は、
+ブラウザを完全再起動し、ブラウザ端末側へCAが登録されているか確認してください。
+
+`./generate-ssl-cert.sh -f` で証明書を再生成すると新しいCA鍵になります。すべての
+ブラウザ端末で、新しい `ssl/ca.crt` を再登録してください。
+
+### 独自証明書の使用
 
 ```bash
 mkdir -p ssl
 cp /path/to/cert.pem ssl/
 cp /path/to/key.pem ssl/cert.key
-./start-container.sh --encoder nvidia --all   # ssl/ を自動検出
+./start-container.sh   # ssl/ を自動検出
 ```
 
-### 自己署名証明書の生成
+### `generate-ssl-cert.sh` のオプション
 
-```bash
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout ssl/cert.key -out ssl/cert.pem \
-  -subj "/C=JP/ST=Tokyo/L=Tokyo/O=Dev/CN=localhost"
-```
+| オプション | 説明 | デフォルト |
+|---|---|---|
+| `-c <hostname>` | Common Name / DNSホスト名 | `localhost` |
+| `-d <dir>` | 出力ディレクトリ | `./ssl` |
+| `-n <days>` | 有効期間 | `365` |
+| `--no-ca` | CAなしの自己署名証明書 | CAモード |
+| `-f` | 既存証明書を上書き | — |
 
 ### 証明書の優先順位
 
-1. `ssl/cert.pem` + `ssl/cert.key`
-2. `SSL_DIR` 環境変数
+1. 明示した `-s <dir>`、保存済みの `ssl_dir`、または `SSL_DIR`
+2. SSLディレクトリが未指定の場合、プロジェクト内の `ssl/cert.pem` + `ssl/cert.key`
 3. イメージのデフォルト証明書（フォールバック）
 
 ---
