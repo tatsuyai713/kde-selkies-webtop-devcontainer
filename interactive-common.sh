@@ -279,7 +279,7 @@ shared_collect_interactive_settings() {
     echo "3. Display Settings"
     echo "-------------------"
     shared_prompt_choice_default RESOLUTION "Display resolution" "${RESOLUTION}" '^[1-9][0-9]*x[1-9][0-9]*$'
-    shared_prompt_choice_default DPI "DPI" "${DPI}" '^[1-9][0-9]*$'
+    shared_prompt_choice_default DPI "DPI (choose from 96/120/144/168/192/216/240/264/288)" "${DPI}" '^(96|120|144|168|192|216|240|264|288)$'
     while true; do
         shared_prompt_text_default stream_scale_choice "Stream resolution scale (0.25-1.0)" "${STREAM_SCALE}"
         if awk -v value="${stream_scale_choice}" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value >= 0.25 && value <= 1.0) }'; then
