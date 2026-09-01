@@ -369,7 +369,16 @@ RUN \
   sed -i '/locale/d' /etc/dpkg/dpkg.cfg.d/excludes && \
   echo "**** install docker ****" && \
   unset VERSION && \
-  curl https://get.docker.com | sh && \
+  (curl -fsSL https://get.docker.com | sh || true) && \
+  if ! command -v docker >/dev/null 2>&1; then \
+    echo "**** get.docker.com does not support this release; using noble packages ****" && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
+    chmod a+r /etc/apt/keyrings/docker.asc && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; \
+  fi && \
   echo "**** install deps ****" && \
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
   apt-get update && \
@@ -456,10 +465,12 @@ RUN \
   python3 -m venv --system-site-packages /opt/selkies-env && \
   export PKG_CONFIG_PATH="/usr/local/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig:/usr/lib/pkgconfig" && \
   if [ "${UBUNTU_VERSION}" = "22.04" ] || [ "${UBUNTU_VERSION}" = "24.04" ]; then \
-    echo "av==14.4.0" > /tmp/selkies-constraints.txt; \
+    printf '%s\n' "av==14.4.0" "pcmflux==1.0.8" "pixelflux==1.6.0" > /tmp/selkies-constraints.txt; \
     /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt .; \
   else \
-    /opt/selkies-env/bin/pip install .; \
+    # The pinned SELKIES_COMMIT predates pcmflux/pixelflux 2.x API changes
+    printf '%s\n' "pcmflux==1.0.8" "pixelflux==1.6.0" > /tmp/selkies-constraints.txt; \
+    /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt .; \
   fi && \
   /opt/selkies-env/bin/pip install setuptools && \
   if [ "$(dpkg --print-architecture)" = "amd64" ] && [ "${UBUNTU_VERSION}" = "22.04" ]; then \
