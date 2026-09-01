@@ -6,6 +6,12 @@ set -euo pipefail
 CONTAINER_NAME="${CONTAINER_NAME:-${HOSTNAME}}"
 HOST_DOCKER="${HOST_DOCKER_SOCK:-}"
 
+if ! command -v docker >/dev/null 2>&1; then
+    kdialog --error "docker CLI is not installed in this container." --title "Container Action" 2>/dev/null || \
+        echo "ERROR: docker CLI is not installed in this container." >&2
+    exit 1
+fi
+
 # Detect host docker socket
 # Prefer the socat proxy socket (user-accessible) over the raw host socket
 if [ -S "/var/run/host-docker-proxy.sock" ]; then
