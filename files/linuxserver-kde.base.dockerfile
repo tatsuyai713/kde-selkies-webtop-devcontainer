@@ -371,14 +371,20 @@ RUN \
   unset VERSION && \
   (curl -fsSL https://get.docker.com | sh || true) && \
   if ! command -v docker >/dev/null 2>&1; then \
-    echo "**** get.docker.com does not support this release; using noble packages ****" && \
-    install -m 0755 -d /etc/apt/keyrings && \
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
-    chmod a+r /etc/apt/keyrings/docker.asc && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list && \
-    apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; \
+    echo "**** get.docker.com unavailable; trying download.docker.com noble packages ****" && \
+    { install -m 0755 -d /etc/apt/keyrings && \
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
+      chmod a+r /etc/apt/keyrings/docker.asc && \
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list && \
+      apt-get update && \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; } \
+      || { rm -f /etc/apt/sources.list.d/docker.list; apt-get update; false; } || true; \
   fi && \
+  if ! command -v docker >/dev/null 2>&1; then \
+    echo "**** docker.com is unreachable (blocked network?); installing docker.io from the Ubuntu archive ****" && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-buildx docker-compose-v2; \
+  fi && \
+  command -v docker >/dev/null 2>&1 && \
   echo "**** install deps ****" && \
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
   apt-get update && \
