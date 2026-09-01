@@ -186,7 +186,7 @@ RUN set -eux; \
       DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
         language-pack-ja-base language-pack-ja im-config \
         fonts-noto-cjk fonts-noto-color-emoji \
-        fcitx5 fcitx5-mozc fcitx5-config-qt kde-config-fcitx5 \
+        fcitx5 fcitx5-anthy fcitx5-config-qt kde-config-fcitx5 \
         fcitx5-frontend-gtk3 fcitx5-frontend-gtk4 fcitx5-frontend-qt5 fcitx5-frontend-qt6 && \
       locale-gen ja_JP.UTF-8 && \
       update-locale LANG=ja_JP.UTF-8 LANGUAGE=ja_JP:ja LC_ALL=ja_JP.UTF-8 && \
@@ -208,7 +208,7 @@ RUN set -eux; \
         language-pack-ja-base language-pack-ja im-config \
         fonts-noto-cjk fonts-noto-color-emoji \
         fcitx fcitx-bin fcitx-data fcitx-table-all \
-        fcitx-mozc fcitx-config-gtk \
+        fcitx-anthy fcitx-config-gtk \
         fcitx-frontend-gtk2 fcitx-frontend-gtk3 fcitx-frontend-qt5 \
         fcitx-module-dbus fcitx-module-kimpanel fcitx-module-x11 fcitx-module-lua fcitx-ui-classic \
         kde-config-fcitx && \
@@ -269,7 +269,7 @@ RUN set -eux; \
         'Layout=jp' \
         '' \
         '[Groups/0/Items/1]' \
-        'Name=mozc' \
+        'Name=anthy' \
         'Layout=jp' \
         '' \
         '[GroupOrder]' \
@@ -290,6 +290,24 @@ RUN set -eux; \
         > /etc/xdg/autostart/fcitx-autostart.desktop; \
       cp /etc/xdg/autostart/fcitx-autostart.desktop "/home/${USER_NAME}/.config/autostart/fcitx-autostart.desktop"; \
       chown "${USER_UID}:${USER_GID}" "/home/${USER_NAME}/.config/autostart/fcitx-autostart.desktop"; \
+    fi; \
+    if ! dpkg --compare-versions "$UBUNTU_VERSION" ge "26.04"; then \
+      # fcitx4 (Ubuntu 24.04 and earlier) legacy per-user configuration
+      install -d -m 755 "/home/${USER_NAME}/.config/fcitx"; \
+      printf '%s\n' \
+        '[Hotkey]' \
+        'TriggerKey=CTRL_SPACE' \
+        '' \
+        '[Program]' \
+        'ShareStateAmongWindow=All' \
+        'DefaultInputMethodState=Active' \
+        > "/home/${USER_NAME}/.config/fcitx/config"; \
+      printf '%s\n' \
+        '[Profile]' \
+        'IMName=anthy' \
+        'EnabledIMList=fcitx-keyboard-jp:True,anthy:True' \
+        > "/home/${USER_NAME}/.config/fcitx/profile"; \
+      chown -R "${USER_UID}:${USER_GID}" "/home/${USER_NAME}/.config/fcitx"; \
     fi; \
     printf '%s\n' \
       '[Layout]' \
