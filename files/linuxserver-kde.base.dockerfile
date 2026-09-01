@@ -278,7 +278,9 @@ COPY alpine-root/ /
 ###########################################
 FROM alpine-base-temp AS frontend
 
-ARG SELKIES_COMMIT=main
+# Pinned to selkies main as of 2026-06-02 (when the STREAM_SCALE and wl-paste
+# patch scripts were last verified); later upstream commits break the patches.
+ARG SELKIES_COMMIT=874b0ca0c31fbebc9f49a02e4729c312b0102e57
 
 RUN \
   echo "**** install build packages ****" && \
@@ -355,7 +357,8 @@ ARG LIBVA_LIBDIR="/usr/lib/x86_64-linux-gnu"
 ARG PROOT_ARCH="x86_64"
 ARG PROOT_APPS_VERSION="0.3.1"
 ARG VIRTUALGL_VERSION="3.1.4"
-ARG SELKIES_COMMIT=main
+# Keep in sync with the frontend stage pin above (selkies main as of 2026-06-02).
+ARG SELKIES_COMMIT=874b0ca0c31fbebc9f49a02e4729c312b0102e57
 
 # Step 1: Install base system packages and Docker
 RUN \
