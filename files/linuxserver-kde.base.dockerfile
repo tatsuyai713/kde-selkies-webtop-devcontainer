@@ -470,12 +470,16 @@ RUN \
   fi && \
   python3 -m venv --system-site-packages /opt/selkies-env && \
   export PKG_CONFIG_PATH="/usr/local/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig:/usr/lib/pkgconfig" && \
-  if [ "${UBUNTU_VERSION}" = "22.04" ] || [ "${UBUNTU_VERSION}" = "24.04" ]; then \
+  if [ "${UBUNTU_VERSION}" = "22.04" ]; then \
     printf '%s\n' "av==14.4.0" "pcmflux==1.0.8" "pixelflux==1.6.0" > /tmp/selkies-constraints.txt; \
+  elif [ "${UBUNTU_VERSION}" = "24.04" ]; then \
+    # pixelflux 2.0 (NVENC on X11 and Wayland) via patch-selkies-pixelflux2.py
+    printf '%s\n' "av==14.4.0" "pcmflux==1.0.8" "pixelflux==2.0.0" > /tmp/selkies-constraints.txt; \
     /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt .; \
   else \
-    # The pinned SELKIES_COMMIT predates pcmflux/pixelflux 2.x API changes
-    printf '%s\n' "pcmflux==1.0.8" "pixelflux==1.6.0" > /tmp/selkies-constraints.txt; \
+    # pcmflux 2.x predates the pinned selkies; pixelflux 2.0 is used via the
+    # patch-selkies-pixelflux2.py compatibility layer to get NVENC on Wayland.
+    printf '%s\n' "pcmflux==1.0.8" "pixelflux==2.0.0" > /tmp/selkies-constraints.txt; \
     /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt .; \
   fi && \
   /opt/selkies-env/bin/pip install setuptools && \
@@ -483,11 +487,6 @@ RUN \
     PIXELFLUX_WHL="/tmp/pixelflux/pixelflux-1.6.0-cp310-cp310-linux_x86_64.whl" && \
     test -f "${PIXELFLUX_WHL}" && \
     echo "Installing pixelflux from local wheel for Ubuntu 22.04: ${PIXELFLUX_WHL}" && \
-    /opt/selkies-env/bin/pip install --force-reinstall "${PIXELFLUX_WHL}"; \
-  elif [ "$(dpkg --print-architecture)" = "amd64" ] && [ "${UBUNTU_VERSION}" = "24.04" ]; then \
-    PIXELFLUX_WHL="/tmp/pixelflux/pixelflux-1.6.0-cp312-cp312-linux_x86_64.whl" && \
-    test -f "${PIXELFLUX_WHL}" && \
-    echo "Installing pixelflux from local wheel for Ubuntu 24.04: ${PIXELFLUX_WHL}" && \
     /opt/selkies-env/bin/pip install --force-reinstall "${PIXELFLUX_WHL}"; \
   elif [ "$(dpkg --print-architecture)" = "amd64" ]; then \
     echo "Warning: Unknown Ubuntu version ${UBUNTU_VERSION}; skipping local pixelflux wheel install"; \
@@ -710,6 +709,13 @@ RUN if [ -f /usr/local/bin/patch-selkies-vram-leak.py ]; then \
 RUN if [ -f /usr/local/bin/patch-selkies-stream-scale.py ]; then \
       chmod +x /usr/local/bin/patch-selkies-stream-scale.py && \
       /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-stream-scale.py; \
+    fi
+
+# Adapt the pinned selkies to the pixelflux 2.x API (enables NVENC on Wayland).
+# No-op when pixelflux 1.x is installed (22.04/24.04).
+RUN if [ -f /usr/local/bin/patch-selkies-pixelflux2.py ]; then \
+      chmod +x /usr/local/bin/patch-selkies-pixelflux2.py && \
+      /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-pixelflux2.py; \
     fi
 
 # ports and volumes
