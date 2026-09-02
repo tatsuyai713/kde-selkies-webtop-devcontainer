@@ -11,23 +11,36 @@ export KDE_FULL_SESSION=true
 export KDE_SESSION_VERSION=6
 export QT_QPA_PLATFORM=wayland
 export QT_QPA_PLATFORMTHEME=kde
+# kwin_wayland_wrapper puts Xwayland on :0. The container-level DISPLAY=:1
+# points at the fallback Xvfb, which is invisible in the Wayland session, so
+# X11 apps (e.g. Chrome with --ozone-platform=x11) must target :0 here.
+export DISPLAY=:0
+
+# kwin generates a private Xauthority for its Xwayland, but session children
+# (plasmashell and everything launched from the desktop) do not inherit
+# XAUTHORITY, so X11 apps get rejected by :0 and silently exit. Merge kwin's
+# cookie into ~/.Xauthority, the default X client fallback, once it appears.
+(
+  for _i in $(seq 1 60); do
+    XAUTH_FILE=$(pgrep -a -f xwayland-xauthority 2>/dev/null | grep -o "/[^ ]*xauth_[^ ]*" | head -1)
+    if [ -n "$XAUTH_FILE" ] && [ -r "$XAUTH_FILE" ]; then
+      if xauth -f "$XAUTH_FILE" extract - "$DISPLAY" 2>/dev/null | xauth merge - 2>/dev/null; then
+        break
+      fi
+    fi
+    sleep 1
+  done
+) &
 export PULSE_SERVER="${PULSE_SERVER:-unix:/run/user/$(id -u)/pulse/native}"
 unset PULSE_RUNTIME_PATH
 
-# Apply the same DPI-derived application scaling as the X11 session.
+# On Wayland the compositor output scale (set from DPI by the capture
+# backend) already scales every client. Forcing QT_SCALE_FACTOR/GDK_SCALE
+# on top double-scales Plasma itself and pushes the panel contents past
+# the screen edge, so no per-application scale variables are exported.
 DPI=${DPI:-96}
 SCALE_FACTOR=${SCALE_FACTOR:-$(awk "BEGIN { printf \"%.2f\", ${DPI} / 96 }")}
-export QT_AUTO_SCREEN_SCALE_FACTOR=0
-export QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough
-export QT_SCALE_FACTOR="${SCALE_FACTOR}"
-export QT_FONT_DPI=96
-if [ "${DPI}" -ge 120 ]; then
-  export GDK_SCALE=2
-  export GDK_DPI_SCALE=$(awk "BEGIN { printf \"%.3f\", ${SCALE_FACTOR} / 2 }")
-else
-  export GDK_SCALE=1
-  export GDK_DPI_SCALE="${SCALE_FACTOR}"
-fi
+unset QT_AUTO_SCREEN_SCALE_FACTOR QT_SCALE_FACTOR_ROUNDING_POLICY QT_SCALE_FACTOR QT_FONT_DPI GDK_SCALE GDK_DPI_SCALE
 
 # Avoid multiplying the requested session scale by a persisted KDE scale.
 KWRITECONFIG=""
@@ -81,11 +94,10 @@ fi
 
 if command -v dbus-update-activation-environment >/dev/null 2>&1; then
   dbus-update-activation-environment \
-    WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP DESKTOP_SESSION \
+    DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP DESKTOP_SESSION \
     KDE_FULL_SESSION KDE_SESSION_VERSION QT_QPA_PLATFORM QT_QPA_PLATFORMTHEME \
     XDG_RUNTIME_DIR HOME LANG LANGUAGE LC_ALL \
-    DPI SCALE_FACTOR QT_AUTO_SCREEN_SCALE_FACTOR QT_SCALE_FACTOR_ROUNDING_POLICY \
-    QT_SCALE_FACTOR QT_FONT_DPI GDK_SCALE GDK_DPI_SCALE \
+    DPI SCALE_FACTOR \
     GTK_IM_MODULE QT_IM_MODULE SDL_IM_MODULE GLFW_IM_MODULE \
     XMODIFIERS INPUT_METHOD DBUS_SESSION_BUS_ADDRESS \
     PULSE_SERVER \
