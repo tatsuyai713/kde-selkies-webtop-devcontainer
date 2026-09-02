@@ -453,22 +453,33 @@ RUN set -eux; \
   chown -R "${USER_UID}:${USER_GID}" \
     "/home/${USER_NAME}/.config/kdeglobals"
 
-# Install container management desktop shortcuts (commit / stop)
+# Install container management desktop shortcuts (commit / flatten / stop)
 COPY container-actions/container-commit.sh /usr/local/bin/container-commit.sh
+COPY container-actions/container-flatten.sh /usr/local/bin/container-flatten.sh
+COPY container-actions/docker-flatten-lib.sh /usr/local/lib/docker-flatten-lib.sh
+COPY container-actions/patch-docker-squash-oci.py /tmp/patch-docker-squash-oci.py
 COPY container-actions/container-stop.sh /usr/local/bin/container-stop.sh
 COPY container-actions/container-commit.desktop /tmp/container-commit.desktop
+COPY container-actions/container-flatten.desktop /tmp/container-flatten.desktop
 COPY container-actions/container-stop.desktop /tmp/container-stop.desktop
 RUN set -eux; \
-  chmod 755 /usr/local/bin/container-commit.sh /usr/local/bin/container-stop.sh; \
+  python3 -m venv /opt/container-tools; \
+  /opt/container-tools/bin/pip install --no-cache-dir docker-squash==1.2.2; \
+  /opt/container-tools/bin/python3 /tmp/patch-docker-squash-oci.py; \
+  rm -f /tmp/patch-docker-squash-oci.py; \
+  chmod 755 /usr/local/bin/container-commit.sh /usr/local/bin/container-flatten.sh /usr/local/lib/docker-flatten-lib.sh /usr/local/bin/container-stop.sh; \
   cp /tmp/container-commit.desktop "/home/${USER_NAME}/Desktop/container-commit.desktop"; \
+  cp /tmp/container-flatten.desktop "/home/${USER_NAME}/Desktop/container-flatten.desktop"; \
   cp /tmp/container-stop.desktop "/home/${USER_NAME}/Desktop/container-stop.desktop"; \
   chmod 755 \
     "/home/${USER_NAME}/Desktop/container-commit.desktop" \
+    "/home/${USER_NAME}/Desktop/container-flatten.desktop" \
     "/home/${USER_NAME}/Desktop/container-stop.desktop"; \
   chown "${USER_UID}:${USER_GID}" \
     "/home/${USER_NAME}/Desktop/container-commit.desktop" \
+    "/home/${USER_NAME}/Desktop/container-flatten.desktop" \
     "/home/${USER_NAME}/Desktop/container-stop.desktop"; \
-  rm -f /tmp/container-commit.desktop /tmp/container-stop.desktop
+  rm -f /tmp/container-commit.desktop /tmp/container-flatten.desktop /tmp/container-stop.desktop
   
 # browser wrappers (Chromium on arm64, Chrome on amd64) to enforce flags even after package updates
 RUN <<'EOF'

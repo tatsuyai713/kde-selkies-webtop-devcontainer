@@ -870,6 +870,7 @@ docker run -d \
   -e USER_UID="${HOST_UID}" \
   -e USER_GID="${HOST_GID}" \
   -e USER_NAME="${HOST_USER}" \
+  -e CONTAINER_NAME="${NAME}" \
   -e PUID="${HOST_UID}" \
   -e PGID="${HOST_GID}" \
   -e ENCODER="${ENCODER}" \

@@ -305,6 +305,24 @@ container name, Ubuntu version, architecture, docker mode (`dind`/`dood`), encod
 - Committed images persist after container deletion
 - Next startup automatically uses the committed image
 
+The desktop shortcut **Commit Container** displays a Yes / No / Cancel dialog:
+
+- **Yes — Keep History:** perform a normal `docker commit` and add another layer.
+- **No — Merge Previous:** merge only the immediately previous container commit and the current changes into one layer. Older base-image history remains intact.
+- **Cancel:** make no changes.
+
+The separate **Flatten Container** desktop shortcut is the only action that merges the complete image history into one filesystem layer. It runs only after an English OK / Cancel warning. Its compressed-archive icon distinguishes it from the normal commit action. The equivalent host command is:
+
+```bash
+./flatten-container.sh
+```
+
+Flattening preserves the runtime image configuration, including the entrypoint,
+environment, ports, volumes, labels, user and working directory. As with
+`docker commit`, contents supplied by volumes or bind mounts are not included.
+The running container continues to reference its previous layers; after safely
+removing that container, run `docker image prune` to reclaim dangling layers.
+
 **Typical workflow:**
 ```bash
 ./shell-container.sh          # Work inside the container
@@ -365,6 +383,7 @@ IMAGE_NAME=ghcr.io/you/your-base ./files/push-base-image.sh
 |---|---|---|
 | `shell-container.sh` | Open a shell inside the container | `./shell-container.sh` |
 | `commit-container.sh` | Save container state to image | `./commit-container.sh` |
+| `flatten-container.sh` | Replace accumulated image history with one filesystem layer | `./flatten-container.sh` |
 | `logs-container.sh` | View container logs | `./logs-container.sh` |
 | `restart-container.sh` | Restart the container | `./restart-container.sh` |
 | `delete-image.sh` | Delete the user image | `./delete-image.sh` |
@@ -445,7 +464,8 @@ Selkies streams bidirectional audio to the browser via WebRTC.
 Generate a CA-signed certificate and trust it on your OS:
 
 ```bash
-# 1. Generate CA + server certificate
+# 1. Generate CA + server certificate. The current hostname and host IPs are
+#    added to Subject Alternative Names automatically.
 ./generate-ssl-cert.sh
 
 # 2. Trust the CA on your OS (one-time setup)
@@ -457,6 +477,9 @@ sudo security add-trusted-cert -d -r trustRoot \
 sudo cp ./ssl/ca.crt /usr/local/share/ca-certificates/local-dev-ca.crt
 sudo update-ca-certificates
 
+#    Google Chrome/Chromium on Linux (Chrome has a separate NSS trust DB):
+./trust-local-ca-chrome.sh
+
 #    Windows (PowerShell as Administrator):
 Import-Certificate -FilePath .\ssl\ca.crt -CertStoreLocation Cert:\LocalMachine\Root
 
@@ -464,9 +487,14 @@ Import-Certificate -FilePath .\ssl\ca.crt -CertStoreLocation Cert:\LocalMachine\
 ./start-container.sh
 ```
 
-After step 2, browsers will show a green lock icon with no warnings.
+Fully quit and restart Chrome after importing the CA. Then use a hostname or IP listed by the generator (for example,
+`https://localhost:31000` or `https://<host-ip>:31000`). Browsers will then
+accept the certificate without a name-mismatch warning.
 
-> **Note:** If you regenerate certificates (`./generate-ssl-cert.sh -f`), you must repeat step 2 because the CA key changes.
+> **Note:** `./generate-ssl-cert.sh -f` keeps the existing CA and only reissues
+> the server certificate, so the registered trust remains valid. Use
+> `--new-ca` only when you intentionally want to replace the CA; after that you
+> must register the new `ca.crt` again.
 
 ### Using Your Own Certificates
 
@@ -484,8 +512,10 @@ cp /path/to/key.pem ssl/cert.key
 | `-c <hostname>` | Common name / hostname | `localhost` |
 | `-d <dir>` | Output directory | `./ssl` |
 | `-n <days>` | Validity period | `365` |
+| `--san <name-or-ip>` | Additional DNS name or IP (repeatable) | — |
 | `--no-ca` | Self-signed cert (no CA) | CA mode |
-| `-f` | Force overwrite existing certs | — |
+| `-f` | Reissue the server certificate, keeping an existing CA | — |
+| `--new-ca` | Replace the existing CA too | — |
 
 Output files: `ssl/ca.crt`, `ssl/ca.key`, `ssl/cert.pem`, `ssl/cert.key`
 
@@ -637,6 +667,7 @@ kde-selkies-webtop-devcontainer/
 ├── restart-container.sh          # Restart container
 ├── shell-container.sh            # Shell access
 ├── commit-container.sh           # Save changes
+├── flatten-container.sh          # Flatten image history into one layer
 ├── logs-container.sh             # View logs
 ├── delete-image.sh               # Delete user image
 ├── generate-ssl-cert.sh          # Generate SSL certificate
@@ -726,4 +757,3 @@ independent of the server-side NVENC encoding.
 > usually preinstalled) and launch the browser with only
 > `--enable-features=AcceleratedVideoDecodeLinuxGL` (no `LIBVA_DRIVER_NAME`,
 > `NVD_BACKEND`, or `VaapiOnNvidiaGPUs`).
-

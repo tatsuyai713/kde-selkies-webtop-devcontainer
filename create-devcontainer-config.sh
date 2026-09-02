@@ -351,6 +351,7 @@ services:
       - USER_UID=\${USER_UID}
       - USER_GID=\${USER_GID}
       - USER_NAME=\${USER_NAME}
+      - CONTAINER_NAME=\${CONTAINER_NAME}
       - PUID=\${HOST_UID}
       - PGID=\${HOST_GID}
       - GPU_VENDOR=\${GPU_VENDOR}

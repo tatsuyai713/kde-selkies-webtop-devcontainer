@@ -305,6 +305,22 @@ USER_PASSWORD=yourpass ./build-user-image.sh
 - commit したイメージはコンテナ削除後も残る
 - 次回起動時は自動的に commit したイメージを使用
 
+デスクトップの **Commit Container** をダブルクリックすると、Yes / No / Cancel ダイアログが表示されます。
+
+- **Yes — Keep History:** 通常の `docker commit` を実行し、過去の履歴の上へ新しいレイヤーを追加
+- **No — Merge Previous:** 直前のコンテナコミット1回分と現在の変更だけを1レイヤーへ統合して保存。それ以前のベースイメージ履歴は保持
+- **Cancel:** 何も変更せず終了
+
+専用の **Flatten Container** アイコンだけが、積み重なった全イメージ履歴を1レイヤーへ統合します。英語の警告メッセージで OK を押した場合だけ実行します。通常コミットと見分けやすい圧縮アーカイブのアイコンを使用しています。ホスト側からは次のコマンドでも実行できます。
+
+```bash
+./flatten-container.sh
+```
+
+Flatten後も、ENTRYPOINT、環境変数、公開ポート、ボリューム定義、ラベル、ユーザー、作業ディレクトリなどの実行設定は維持されます。通常の `docker commit` と同様、ボリュームやバインドマウントから提供される内容はイメージに含まれません。
+
+実行中コンテナは削除されるまで古いレイヤーを参照します。安全にコンテナを削除した後、`docker image prune` を実行すると、タグの外れた古いレイヤーの容量を回収できます。
+
 **典型的なワークフロー:**
 ```bash
 ./shell-container.sh          # コンテナ内で作業
@@ -365,6 +381,7 @@ IMAGE_NAME=ghcr.io/you/your-base ./files/push-base-image.sh
 |---|---|---|
 | `shell-container.sh` | コンテナ内シェルを開く | `./shell-container.sh` |
 | `commit-container.sh` | コンテナ状態をイメージに保存 | `./commit-container.sh` |
+| `flatten-container.sh` | 積み重なったイメージ履歴を1レイヤーへ統合 | `./flatten-container.sh` |
 | `logs-container.sh` | コンテナログを表示 | `./logs-container.sh` |
 | `restart-container.sh` | コンテナを再起動 | `./restart-container.sh` |
 | `delete-image.sh` | ユーザーイメージを削除 | `./delete-image.sh` |
@@ -440,22 +457,26 @@ Selkies はブラウザへ WebRTC 経由で双方向オーディオをストリ�
 
 ## 付録: HTTPS/SSL
 
-### 証明書の設定
+### 証明書の設定（推奨）
 
 ```bash
-mkdir -p ssl
-cp /path/to/cert.pem ssl/
-cp /path/to/key.pem ssl/cert.key
+# 現在のホスト名とIPアドレスをSANへ自動追加
+./generate-ssl-cert.sh
+
+# Linuxクライアントの例: CAを信頼済みルートとして登録
+sudo cp ./ssl/ca.crt /usr/local/share/ca-certificates/local-dev-ca.crt
+sudo update-ca-certificates
+
+# Google Chrome/ChromiumはOSとは別のNSS信頼DBを使用するため、こちらも実行
+./trust-local-ca-chrome.sh
+
 ./start-container.sh --encoder nvidia --all   # ssl/ を自動検出
 ```
 
-### 自己署名証明書の生成
+Chromeを完全に終了して再起動した後、`https://localhost:31000` または生成時に表示されたホスト名/IPでアクセスしてください。
+別名や固定IPを追加する場合は `--san desktop.local --san 192.168.1.10` のように指定できます。
 
-```bash
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout ssl/cert.key -out ssl/cert.pem \
-  -subj "/C=JP/ST=Tokyo/L=Tokyo/O=Dev/CN=localhost"
-```
+既存CAを登録済みの場合、`./generate-ssl-cert.sh -f` はCAを維持したままサーバー証明書だけを再発行します。CA自体を交換する場合だけ `--new-ca` を併用し、新しい `ca.crt` を再登録してください。
 
 ### 証明書の優先順位
 
@@ -605,6 +626,7 @@ kde-selkies-webtop-devcontainer/
 ├── restart-container.sh          # コンテナ再起動
 ├── shell-container.sh            # シェルアクセス
 ├── commit-container.sh           # 変更保存
+├── flatten-container.sh          # イメージ履歴を1レイヤーへ統合
 ├── logs-container.sh             # ログ表示
 ├── delete-image.sh               # ユーザーイメージ削除
 ├── generate-ssl-cert.sh          # SSL 証明書生成
@@ -693,4 +715,3 @@ LIBVA_DRIVER_NAME=nvidia NVD_BACKEND=direct google-chrome \
 > `intel-media-va-driver`（Intel）または Mesa の VA ドライバ（AMD、通常は導入済み）
 > を入れ、ブラウザは `--enable-features=AcceleratedVideoDecodeLinuxGL` のみで
 > 起動してください（`LIBVA_DRIVER_NAME` / `NVD_BACKEND` / `VaapiOnNvidiaGPUs` は不要）。
-
