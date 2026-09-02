@@ -694,3 +694,36 @@ See each project's license for details.
 **This project:**
 - **Enhancements:** Two-stage build, non-root execution, UID/GID matching, secure passwords, management scripts, version pinning, multi-GPU/encoder support, Dev Container integration
 - **Maintainer:** [@tatsuyai713](https://github.com/tatsuyai713)
+
+## Enabling NVDEC (hardware decode) on the host
+
+The stream is decoded by the viewer's browser. Chrome / Edge on Linux ship
+with NVIDIA hardware video decode disabled, so NVDEC stays idle (CPU decode)
+unless the host is configured:
+
+```bash
+# Install nvidia-vaapi-driver (the Ubuntu archive version 0.0.8 is old; use the PPA)
+sudo add-apt-repository ppa:ubuntuhandbook1/nvidia-vaapi
+sudo apt update && sudo apt install nvidia-vaapi-driver
+```
+
+Launch the browser with:
+
+```bash
+LIBVA_DRIVER_NAME=nvidia NVD_BACKEND=direct google-chrome \
+  --enable-features=AcceleratedVideoDecodeLinuxGL,VaapiOnNvidiaGPUs \
+  --ignore-gpu-blocklist --use-gl=angle --use-angle=gl
+# On a Wayland desktop also add --ozone-platform=wayland
+# For Edge, replace google-chrome with microsoft-edge
+```
+
+Verify via chrome://gpu (Video Acceleration Information) and by watching
+`nvidia-smi` `utilization.decoder` while viewing the stream. This is
+independent of the server-side NVENC encoding.
+
+> **Intel / AMD hosts**: nvidia-vaapi-driver is not needed. Install
+> `intel-media-va-driver` (Intel) or rely on the Mesa VA drivers (AMD,
+> usually preinstalled) and launch the browser with only
+> `--enable-features=AcceleratedVideoDecodeLinuxGL` (no `LIBVA_DRIVER_NAME`,
+> `NVD_BACKEND`, or `VaapiOnNvidiaGPUs`).
+
