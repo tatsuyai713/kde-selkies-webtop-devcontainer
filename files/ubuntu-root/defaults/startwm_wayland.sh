@@ -105,7 +105,10 @@ if command -v dbus-update-activation-environment >/dev/null 2>&1; then
 fi
 
 if [ -x /usr/bin/startplasma-wayland ]; then
-  /usr/bin/startplasma-wayland >"/tmp/startplasma-wayland-${LOG_SUFFIX}.log" 2>&1 &
+  # Logs go to tmpfs, NOT the overlayfs /tmp: apps inherit these fds, and a
+  # child forwarding its output via splice(2) into an overlay file holds the
+  # inode lock while waiting on its pipe, deadlocking every other writer.
+  /usr/bin/startplasma-wayland >"/dev/shm/startplasma-wayland-${LOG_SUFFIX}.log" 2>&1 &
   SESSION_PID=$!
 
   for _ in $(seq 1 120); do
@@ -120,7 +123,7 @@ if [ -x /usr/bin/startplasma-wayland ]; then
     fi
 
     if ! pgrep -u "$(id -u)" -x plasmashell >/dev/null 2>&1; then
-      WAYLAND_DISPLAY=wayland-0 DISPLAY="${DISPLAY:-:1}" /usr/bin/plasmashell >"/tmp/plasmashell-${LOG_SUFFIX}.log" 2>&1 &
+      WAYLAND_DISPLAY=wayland-0 DISPLAY="${DISPLAY:-:1}" /usr/bin/plasmashell >"/dev/shm/plasmashell-${LOG_SUFFIX}.log" 2>&1 &
     fi
 
     if pgrep -u "$(id -u)" -x plasmashell >/dev/null 2>&1; then
