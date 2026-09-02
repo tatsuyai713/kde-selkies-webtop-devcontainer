@@ -662,3 +662,35 @@ kde-selkies-webtop-devcontainer/
 **このプロジェクト:**
 - **改善点:** 2段階ビルド、非root実行、UID/GID マッチング、安全なパスワード管理、管理スクリプト、バージョン固定、マルチGPU/エンコーダー対応、Dev Container 統合
 - **メンテナー:** [@tatsuyai713](https://github.com/tatsuyai713)
+
+## ホスト側で NVDEC（ハードウェアデコード）を有効にする
+
+配信映像のデコードは視聴側ブラウザで行われます。Linux の Chrome / Edge は
+NVIDIA GPU でのハードウェアデコードがデフォルト無効のため、そのままでは
+NVDEC が使われません（CPU デコード）。以下でホスト側を設定してください。
+
+```bash
+# nvidia-vaapi-driver のインストール（Ubuntu 標準の 0.0.8 は古いため PPA 推奨）
+sudo add-apt-repository ppa:ubuntuhandbook1/nvidia-vaapi
+sudo apt update && sudo apt install nvidia-vaapi-driver
+```
+
+ブラウザは次のフラグ付きで起動します:
+
+```bash
+LIBVA_DRIVER_NAME=nvidia NVD_BACKEND=direct google-chrome \
+  --enable-features=AcceleratedVideoDecodeLinuxGL,VaapiOnNvidiaGPUs \
+  --ignore-gpu-blocklist --use-gl=angle --use-angle=gl
+# Wayland デスクトップの場合は --ozone-platform=wayland も追加
+# Edge の場合は google-chrome を microsoft-edge に置き換え
+```
+
+確認方法: `chrome://gpu` の Video Acceleration Information にデコード対応が
+表示され、ストリーム視聴中に `nvidia-smi` の `utilization.decoder` が上がれば
+有効です。サーバ側の NVENC エンコードとは独立した設定です。
+
+> **Intel / AMD のホストの場合**: nvidia-vaapi-driver は不要です。代わりに
+> `intel-media-va-driver`（Intel）または Mesa の VA ドライバ（AMD、通常は導入済み）
+> を入れ、ブラウザは `--enable-features=AcceleratedVideoDecodeLinuxGL` のみで
+> 起動してください（`LIBVA_DRIVER_NAME` / `NVD_BACKEND` / `VaapiOnNvidiaGPUs` は不要）。
+
