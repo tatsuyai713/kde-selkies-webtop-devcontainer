@@ -79,7 +79,7 @@ Run without options to load settings from configs/<name>.yml (runs configure-con
   -n  container name (default: ${NAME})
   -i  image base name; final image becomes <base>-<user>-<arch>-u<ubuntu_ver>:<version> (default base: ${IMAGE_BASE})
   -t  image version tag (default: ${IMAGE_VERSION_DEFAULT})
-  -u, --ubuntu  Ubuntu version (22.04 or 24.04). Default: ${UBUNTU_VERSION}
+  -u, --ubuntu  Ubuntu version (22.04, 24.04, or 26.04). Default: ${UBUNTU_VERSION}
   -r  resolution (e.g. 1920x1080, default: ${RESOLUTION})
   -d  DPI (default: ${DPI})
   -S, --stream-scale <factor>  Stream resolution scale (0.25-1.0). Default: ${STREAM_SCALE}
@@ -284,114 +284,6 @@ load_yaml_config() {
   val=$(yaml_get "${file}" "shm_noexec");     [[ -n "${val}" ]] && SHM_NOEXEC="${val}"
 }
 
-print_access_info() {
-  local https_binding=""
-  local http_binding=""
-  local https_port=""
-  local http_port=""
-
-  https_binding=$(docker port "${NAME}" 3001/tcp 2>/dev/null | head -n1 || true)
-  http_binding=$(docker port "${NAME}" 3000/tcp 2>/dev/null | head -n1 || true)
-  [[ -n "${https_binding}" ]] && https_port="${https_binding##*:}"
-  [[ -n "${http_binding}" ]] && http_port="${http_binding##*:}"
-
-  echo
-  echo "Container access information"
-  echo "----------------------------"
-  echo "  Container: ${NAME}"
-  if [[ -n "${https_port}" ]]; then
-    echo "  Web desktop (HTTPS): https://localhost:${https_port}"
-  fi
-  if [[ -n "${http_port}" ]]; then
-    echo "  Web desktop (HTTP):  http://localhost:${http_port}"
-  fi
-  echo "  Logs: docker logs -f ${NAME}"
-  echo "  Stop: docker stop ${NAME}"
-  echo
-  echo "It may take several seconds for the desktop to become ready."
-  echo "When accessing from another computer, replace localhost with the Docker host name or IP address."
-  echo "A browser warning may appear when the container uses a self-signed HTTPS certificate."
-}
-
-selkies_websocket_ready() {
-  docker exec "${NAME}" /opt/selkies-env/bin/python3 -c '
-import asyncio
-import websockets
-
-async def probe():
-    async with websockets.connect(
-        "ws://127.0.0.1:8082/websockets",
-        open_timeout=3,
-        close_timeout=1,
-    ) as websocket:
-        message = await asyncio.wait_for(websocket.recv(), timeout=3)
-        if message != "MODE websockets":
-            raise RuntimeError("unexpected Selkies WebSocket response")
-
-asyncio.run(probe())
-' >/dev/null 2>&1
-}
-
-wait_for_selkies_websocket() {
-  local timeout_seconds="$1"
-  local elapsed=0
-
-  while (( elapsed < timeout_seconds )); do
-    if selkies_websocket_ready; then
-      return 0
-    fi
-    sleep 2
-    elapsed=$((elapsed + 2))
-  done
-  return 1
-}
-
-recover_selkies_websocket() {
-  local old_pid=""
-  local current_pid=""
-  local elapsed=0
-
-  old_pid=$(docker exec "${NAME}" pgrep -o -f '^/opt/selkies-env/bin/python3 -m selkies ' 2>/dev/null || true)
-  echo "Warning: Selkies is not responding to a WebSocket handshake; restarting only the Selkies service." >&2
-  docker exec "${NAME}" s6-svc -t /run/service/svc-selkies >/dev/null
-
-  # A hung process may retain port 8082 after s6 sends TERM. Give it a short
-  # grace period, then kill only that exact stale PID so s6 can restart it.
-  while (( elapsed < 8 )); do
-    current_pid=$(docker exec "${NAME}" pgrep -o -f '^/opt/selkies-env/bin/python3 -m selkies ' 2>/dev/null || true)
-    if [[ -z "${old_pid}" || -z "${current_pid}" || "${current_pid}" != "${old_pid}" ]]; then
-      break
-    fi
-    sleep 1
-    elapsed=$((elapsed + 1))
-  done
-
-  current_pid=$(docker exec "${NAME}" pgrep -o -f '^/opt/selkies-env/bin/python3 -m selkies ' 2>/dev/null || true)
-  if [[ -n "${old_pid}" && "${current_pid}" == "${old_pid}" ]]; then
-    echo "Warning: Selkies did not stop after TERM; terminating stale PID ${old_pid}." >&2
-    docker exec "${NAME}" kill -KILL "${old_pid}" >/dev/null 2>&1 || true
-  fi
-
-  if wait_for_selkies_websocket 30; then
-    echo "Selkies WebSocket service recovered."
-    return 0
-  fi
-
-  echo "Error: Selkies WebSocket service did not recover. Check: docker logs ${NAME}" >&2
-  return 1
-}
-
-ensure_selkies_websocket() {
-  local startup_timeout="${1:-10}"
-
-  echo "Checking Selkies WebSocket readiness..."
-  if wait_for_selkies_websocket "${startup_timeout}"; then
-    echo "Selkies WebSocket is ready."
-    return 0
-  fi
-  recover_selkies_websocket
-}
-
 handle_existing_container() {
   if ! docker ps -a --format '{{.Names}}' | grep -qx "${NAME}"; then
     return 0
@@ -409,14 +301,10 @@ handle_existing_container() {
       echo "Container ${NAME} exists in status: ${status}. Starting with the previous configuration..."
       docker start "${NAME}" >/dev/null
       echo "Container ${NAME} started."
-      ensure_selkies_websocket 60
-      print_access_info
       exit 0
       ;;
     running)
       echo "Container ${NAME} is already running."
-      ensure_selkies_websocket 6
-      print_access_info
       exit 0
       ;;
     *)
@@ -515,9 +403,9 @@ if [[ ! $RESOLUTION =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]]; then
 fi
 
 case "${UBUNTU_VERSION}" in
-  22.04|24.04) ;;
+  22.04|24.04|26.04) ;;
   *)
-    echo "Unsupported Ubuntu version: ${UBUNTU_VERSION}. Use 22.04 or 24.04." >&2
+    echo "Unsupported Ubuntu version: ${UBUNTU_VERSION}. Use 22.04, 24.04, or 26.04." >&2
     exit 1
     ;;
 esac
@@ -832,13 +720,15 @@ case "${GPU_VENDOR}" in
     else
       echo "Warning: /dev/dxg not found. Are you running on WSL2?" >&2
     fi
-    if [ -d "/usr/lib/wsl/lib" ]; then
-      GPU_FLAGS+=(-v /usr/lib/wsl/lib:/usr/lib/wsl/lib:ro)
+    if [ -d "/dev/dri" ]; then
+      GPU_FLAGS+=(--device=/dev/dri:/dev/dri:rwm)
+    fi
+    if [ -d "/usr/lib/wsl" ]; then
+      GPU_FLAGS+=(-v /usr/lib/wsl:/usr/lib/wsl:ro)
     fi
     if [ -d "/mnt/wslg" ]; then
       GPU_FLAGS+=(-v /mnt/wslg:/mnt/wslg:rw)
       GPU_FLAGS+=(-v /mnt/wslg/.X11-unix:/tmp/.X11-unix:rw)
-      GPU_FLAGS+=(-v /usr/lib/wsl/drivers:/usr/lib/wsl/drivers:ro)
     fi
     GPU_ENV_VARS+=(
       -e ENABLE_NVIDIA=true
@@ -846,6 +736,13 @@ case "${GPU_VENDOR}" in
       -e DISABLE_ZINK=true
       -e XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir
       -e LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}
+      -e GALLIUM_DRIVER=d3d12
+      -e MESA_LOADER_DRIVER_OVERRIDE=d3d12
+      -e MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-NVIDIA}"
+      -e LIBGL_ALWAYS_SOFTWARE=0
+      -e LIBVA_DRIVER_NAME=d3d12
+      -e __GLX_VENDOR_LIBRARY_NAME=mesa
+      -e __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
     )
     ;;
   *)
@@ -870,6 +767,15 @@ fi
 PLATFORM_FLAGS=()
 if [[ -n "$PLATFORM" ]]; then
   PLATFORM_FLAGS=(--platform "$PLATFORM")
+fi
+
+WAYLAND_ENV_VARS=()
+if [[ "${UBUNTU_VERSION}" == "26.04" ]]; then
+  WAYLAND_ENV_VARS+=(
+    -e PIXELFLUX_WAYLAND=true
+    -e WAYLAND_DISPLAY=wayland-1
+    -e SELKIES_WAYLAND_SOCKET_INDEX=0
+  )
 fi
 
 DOCKER_MODE_FLAGS=()
@@ -973,11 +879,13 @@ docker run -d \
   -e USER_UID="${HOST_UID}" \
   -e USER_GID="${HOST_GID}" \
   -e USER_NAME="${HOST_USER}" \
+  -e CONTAINER_NAME="${NAME}" \
   -e PUID="${HOST_UID}" \
   -e PGID="${HOST_GID}" \
   -e ENCODER="${ENCODER}" \
   -e GPU_VENDOR="${GPU_VENDOR}" \
   -e SELKIES_FRAMERATE="${FRAMERATE}" \
+  ${WAYLAND_ENV_VARS[@]+"${WAYLAND_ENV_VARS[@]}"} \
   --tmpfs "/dev/shm:${SHM_TMPFS_OPTS}" \
   --privileged \
   -v "${HOME}":"${HOST_HOME_MOUNT}":rw \
@@ -987,6 +895,3 @@ docker run -d \
   ${SSL_FLAGS[@]+"${SSL_FLAGS[@]}"} \
   ${DOCKER_MODE_FLAGS[@]+"${DOCKER_MODE_FLAGS[@]}"} \
   "$IMAGE"
-
-ensure_selkies_websocket 60
-print_access_info

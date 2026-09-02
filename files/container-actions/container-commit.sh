@@ -5,26 +5,27 @@ set -euo pipefail
 
 CONTAINER_NAME="${CONTAINER_NAME:-${HOSTNAME}}"
 HOST_DOCKER="${HOST_DOCKER_SOCK:-}"
-KEEP_HISTORY=false
-KEEP_HISTORY_EXPLICIT=false
+FLATTEN_LIB=/usr/local/lib/docker-flatten-lib.sh
 
-usage() {
-    cat <<'EOF'
-Usage: container-commit.sh [-k|--keep-history]
+close_progress_dialog() {
+    local handle="$1"
+    local service object_path dbus_command
 
-By default, the previously tagged image is removed after a successful commit.
-Use --keep-history to retain it with a timestamped history tag.
-EOF
+    read -r service object_path <<< "${handle}"
+    [[ -n "${service}" && -n "${object_path}" ]] || return 0
+    for dbus_command in qdbus6 qdbus-qt6 qdbus qdbus-qt5; do
+        if command -v "${dbus_command}" >/dev/null 2>&1; then
+            "${dbus_command}" "${service}" "${object_path}" close >/dev/null 2>&1 || true
+            return 0
+        fi
+    done
 }
 
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        -k|--keep-history) KEEP_HISTORY=true; KEEP_HISTORY_EXPLICIT=true ;;
-        -h|--help) usage; exit 0 ;;
-        *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
-    esac
-    shift
-done
+if ! command -v docker >/dev/null 2>&1; then
+    kdialog --error "docker CLI is not installed in this container." --title "Container Action" 2>/dev/null || \
+        echo "ERROR: docker CLI is not installed in this container." >&2
+    exit 1
+fi
 
 # Detect host docker socket
 # Prefer the socat proxy socket (user-accessible) over the raw host socket
@@ -46,11 +47,18 @@ if [ -z "${HOST_DOCKER}" ]; then
     exit 1
 fi
 
-# Detect container name from host docker
-REAL_CONTAINER_NAME=$(docker -H "unix://${HOST_DOCKER}" ps --format '{{.Names}}' | head -1)
-if [ -z "${REAL_CONTAINER_NAME}" ]; then
-    # Fallback: search by hostname
-    REAL_CONTAINER_NAME=$(docker -H "unix://${HOST_DOCKER}" ps --filter "name=${CONTAINER_NAME}" --format '{{.Names}}' | head -1)
+# Detect this container by exact name first, then by its configured hostname.
+DOCKER_CMD=(docker -H "unix://${HOST_DOCKER}")
+REAL_CONTAINER_NAME=$("${DOCKER_CMD[@]}" ps --filter "name=^/${CONTAINER_NAME}$" --format '{{.Names}}' | head -1)
+if [[ -z "${REAL_CONTAINER_NAME}" ]]; then
+    while IFS= read -r candidate; do
+        candidate_hostname=$("${DOCKER_CMD[@]}" inspect --format '{{.Config.Hostname}}' "${candidate}" 2>/dev/null || true)
+        if [[ "${candidate_hostname}" == "${HOSTNAME}" ]]; then
+            REAL_CONTAINER_NAME=$("${DOCKER_CMD[@]}" inspect --format '{{.Name}}' "${candidate}")
+            REAL_CONTAINER_NAME=${REAL_CONTAINER_NAME#/}
+            break
+        fi
+    done < <("${DOCKER_CMD[@]}" ps -q)
 fi
 
 if [ -z "${REAL_CONTAINER_NAME}" ]; then
@@ -66,67 +74,64 @@ else
     DEFAULT_IMAGE="webtop-kde-${USER_NAME:-user}:latest"
 fi
 
-PREVIOUS_IMAGE_ID=$(docker -H "unix://${HOST_DOCKER}" image inspect \
-    --format '{{.Id}}' "${DEFAULT_IMAGE}" 2>/dev/null || true)
+# Yes preserves the current image history. No merges only the immediately
+# previous container commit with the current changes. Cancel changes nothing.
+set +e
+kdialog --warningyesnocancel \
+    "Keep the previous Docker commit as a separate layer?\n\nContainer: ${REAL_CONTAINER_NAME}\nImage: ${DEFAULT_IMAGE}\n\nYes: Keep history and add a normal commit layer.\nNo: Merge only the previous commit and the current changes into one layer. Older base-image history is retained.\nCancel: Do nothing." \
+    --yes-label "Yes - Keep History" \
+    --no-label "No - Merge Previous" \
+    --cancel-label "Cancel" \
+    --title "Container Commit" 2>/dev/null
+dialog_result=$?
+set -e
 
-# Confirmation dialog
-if ! kdialog --yesno "Commit container '${REAL_CONTAINER_NAME}' as:\n${DEFAULT_IMAGE}\n\nProceed?" \
-    --title "Container Commit" 2>/dev/null; then
-    exit 0
-fi
-
-# The desktop icon starts this script without arguments. Let the user decide
-# whether the previous image should remain available for rollback.
-if [ "${KEEP_HISTORY_EXPLICIT}" = "false" ]; then
-    if kdialog --yesnocancel \
-        "Keep the previous image for rollback?\n\nYes: keep it with a timestamped history tag\nNo: remove it after this commit\nCancel: do not commit" \
-        --title "Container Commit History" 2>/dev/null; then
-        KEEP_HISTORY=true
-    else
-        history_choice=$?
-        case "${history_choice}" in
-            1) KEEP_HISTORY=false ;;
-            *) exit 0 ;;
-        esac
-    fi
-fi
+case "${dialog_result}" in
+    0) commit_mode=history ;;
+    1) commit_mode=merge_previous ;;
+    *) exit 0 ;;
+esac
 
 # Show progress
-kdialog_progress=$(kdialog --progressbar "Committing container..." 0 2>/dev/null || true)
+kdialog_progress=$(kdialog --progressbar "Saving container image..." 0 2>/dev/null || true)
 
-# Execute commit
-if COMMIT_OUTPUT=$(docker -H "unix://${HOST_DOCKER}" commit \
-    "${REAL_CONTAINER_NAME}" "${DEFAULT_IMAGE}" 2>&1); then
-    NEW_IMAGE_ID=$(printf '%s\n' "${COMMIT_OUTPUT}" | tail -n 1)
-    CLEANUP_MESSAGE=""
-    if [ -n "${PREVIOUS_IMAGE_ID}" ] && [ "${PREVIOUS_IMAGE_ID}" != "${NEW_IMAGE_ID}" ]; then
-        if [ "${KEEP_HISTORY}" = "true" ]; then
-            IMAGE_REPOSITORY="${DEFAULT_IMAGE%:*}"
-            IMAGE_TAG="${DEFAULT_IMAGE##*:}"
-            if [ "${IMAGE_REPOSITORY}" = "${DEFAULT_IMAGE}" ]; then
-                IMAGE_TAG="latest"
-            fi
-            HISTORY_TAG="${IMAGE_REPOSITORY}:${IMAGE_TAG}-history-$(date +%Y%m%d-%H%M%S)"
-            docker -H "unix://${HOST_DOCKER}" image tag \
-                "${PREVIOUS_IMAGE_ID}" "${HISTORY_TAG}"
-            CLEANUP_MESSAGE="\nPrevious image retained as:\n${HISTORY_TAG}"
-        elif docker -H "unix://${HOST_DOCKER}" image rm \
-            "${PREVIOUS_IMAGE_ID}" >/dev/null 2>&1; then
-            CLEANUP_MESSAGE="\nPrevious image removed."
-        else
-            CLEANUP_MESSAGE="\nPrevious image is still used by a container; cleanup is deferred."
-        fi
+# Execute a normal layered commit or merge only the newest two commit layers.
+if [[ "${commit_mode}" == "history" ]]; then
+    set +e
+    save_output=$("${DOCKER_CMD[@]}" commit "${REAL_CONTAINER_NAME}" "${DEFAULT_IMAGE}" 2>&1)
+    save_status=$?
+    set -e
+else
+    if [[ ! -r "${FLATTEN_LIB}" ]]; then
+        save_output="Container image helper is missing: ${FLATTEN_LIB}"
+        save_status=1
+    else
+        # shellcheck source=/dev/null
+        source "${FLATTEN_LIB}"
+        set +e
+        export DOCKER_HOST="unix://${HOST_DOCKER}"
+        save_output=$(docker_merge_previous_commit "${REAL_CONTAINER_NAME}" "${DEFAULT_IMAGE}" 2>&1)
+        save_status=$?
+        set -e
     fi
+fi
+
+if [[ "${save_status}" -eq 0 ]]; then
     if [ -n "${kdialog_progress}" ]; then
-        qdbus ${kdialog_progress} close 2>/dev/null || true
+        close_progress_dialog "${kdialog_progress}"
     fi
-    kdialog --msgbox "Container committed successfully.\n\nImage: ${DEFAULT_IMAGE}${CLEANUP_MESSAGE}" \
+    if [[ "${commit_mode}" == "merge_previous" ]]; then
+        success_message="Container committed successfully.\n\nImage: ${DEFAULT_IMAGE}\nOnly the previous container commit and the current changes were merged. Older base-image history was retained.\n\nThe running container still references the old image. Remove it when finished, then prune dangling images to reclaim disk space."
+    else
+        success_message="Container committed successfully.\n\nImage: ${DEFAULT_IMAGE}\nPrevious image history was preserved."
+    fi
+    kdialog --msgbox "${success_message}" \
         --title "Container Commit" 2>/dev/null
 else
     if [ -n "${kdialog_progress}" ]; then
-        qdbus ${kdialog_progress} close 2>/dev/null || true
+        close_progress_dialog "${kdialog_progress}"
     fi
-    kdialog --error "Failed to commit container.\n\n${COMMIT_OUTPUT}" \
+    kdialog --detailederror "Failed to save the container image." "${save_output}" \
         --title "Container Commit" 2>/dev/null
     exit 1
 fi

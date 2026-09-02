@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Exec=fcitx5 -d
+Hidden=true
+X-GNOME-Autostart-enabled=true
+Name=fcitx5
+Comment=Start Fcitx5 input method daemon

@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Flatten Container
-Comment=Compact the current container into a single-layer Docker image
+Comment=Replace accumulated Docker image history with one filesystem layer
 Exec=/usr/local/bin/container-flatten.sh
 Icon=archive-insert
 Terminal=false

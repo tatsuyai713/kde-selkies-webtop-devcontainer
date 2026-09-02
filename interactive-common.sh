@@ -114,7 +114,7 @@ shared_apply_locale_from_timezone() {
 
     case "${timezone}" in
         Asia/Tokyo)
-            BUILD_LANGUAGE="jp"
+            BUILD_LANGUAGE="ja"
             TIMEZONE="Asia/Tokyo"
             RUNTIME_TZ="Asia/Tokyo"
             RUNTIME_LANG="ja_JP.UTF-8"
@@ -166,7 +166,7 @@ shared_collect_interactive_settings() {
     esac
 
     case "${TIMEZONE:-UTC}" in
-        Asia/Tokyo) default_lang_choice="jp" ;;
+        Asia/Tokyo) default_lang_choice="ja" ;;
         *) default_lang_choice="en" ;;
     esac
 
@@ -189,7 +189,7 @@ shared_collect_interactive_settings() {
     echo "1. Container Settings"
     echo "---------------------"
     shared_prompt_text_default CONTAINER_NAME "Container name" "${CONTAINER_NAME}"
-    shared_prompt_choice_default UBUNTU_VERSION "Ubuntu version (22.04 or 24.04)" "${UBUNTU_VERSION}" '^(22\.04|24\.04)$'
+    shared_prompt_choice_default UBUNTU_VERSION "Ubuntu version (22.04, 24.04, or 26.04)" "${UBUNTU_VERSION}" '^(22\.04|24\.04|26\.04)$'
     shared_prompt_text_default arch_choice "Target architecture (amd64 or arm64)" "${TARGET_ARCH}"
     TARGET_ARCH="$(shared_normalize_arch_or_die "${arch_choice}")"
     shared_prompt_choice_default docker_mode_choice "Docker mode [1=dind, 2=dood]" "${default_docker_mode_choice}" '^[1-2]$'
@@ -279,7 +279,7 @@ shared_collect_interactive_settings() {
     echo "3. Display Settings"
     echo "-------------------"
     shared_prompt_choice_default RESOLUTION "Display resolution" "${RESOLUTION}" '^[1-9][0-9]*x[1-9][0-9]*$'
-    shared_prompt_choice_default DPI "DPI" "${DPI}" '^[1-9][0-9]*$'
+    shared_prompt_choice_default DPI "DPI (choose from 96/120/144/168/192/216/240/264/288)" "${DPI}" '^(96|120|144|168|192|216|240|264|288)$'
     while true; do
         shared_prompt_text_default stream_scale_choice "Stream resolution scale (0.25-1.0)" "${STREAM_SCALE}"
         if awk -v value="${stream_scale_choice}" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value >= 0.25 && value <= 1.0) }'; then
@@ -303,11 +303,11 @@ shared_collect_interactive_settings() {
     echo "4. Language/Timezone Settings"
     echo "-----------------------------"
     echo "Select language (affects timezone):"
-    echo "  jp) Japanese (Asia/Tokyo)"
+    echo "  ja) Japanese (Asia/Tokyo)"
     echo "  en) English (UTC)"
-    shared_prompt_text_default lang_choice "Select language [jp/en]" "${default_lang_choice}"
+    shared_prompt_text_default lang_choice "Select language [ja/en]" "${default_lang_choice}"
     case "$(shared_to_lower "${lang_choice}")" in
-        jp)
+        ja|jp)
             shared_apply_locale_from_timezone "Asia/Tokyo"
             echo "Japanese selected. Timezone: ${TIMEZONE}"
             ;;

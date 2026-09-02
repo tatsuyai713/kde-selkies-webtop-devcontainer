@@ -15,7 +15,7 @@ Options (same as start-container.sh):
             --all              Shortcut for --gpu all
             --num <list>       Shortcut for --gpu device=<list>
         --dri-node <path>  DRI render node for VA-API (e.g. /dev/dri/renderD129)
-  -u, --ubuntu <ver>     Ubuntu version: 22.04 or 24.04 (default: 24.04)
+    -u, --ubuntu <ver>     Ubuntu version: 22.04, 24.04, or 26.04 (default: 24.04)
   -r, --resolution <res> Resolution in WIDTHxHEIGHT format (default: 1920x1080)
   -d, --dpi <dpi>        DPI setting (default: 96)
   -S, --stream-scale <f> Stream resolution scale (0.25-1.0, default: 1.0)
@@ -119,7 +119,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         -u|--ubuntu)
             if [ -z "${2:-}" ]; then
-                echo "Error: --ubuntu requires a version (22.04 or 24.04)" >&2
+                echo "Error: --ubuntu requires a version (22.04, 24.04, or 26.04)" >&2
                 exit 1
             fi
             UBUNTU_VERSION="${2}"
@@ -217,9 +217,9 @@ if [[ ! $RESOLUTION =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]]; then
 fi
 
 case "${UBUNTU_VERSION}" in
-    22.04|24.04) ;;
+    22.04|24.04|26.04) ;;
     *)
-        echo "Error: Unsupported Ubuntu version: ${UBUNTU_VERSION}. Use 22.04 or 24.04." >&2
+        echo "Error: Unsupported Ubuntu version: ${UBUNTU_VERSION}. Use 22.04, 24.04, or 26.04." >&2
         exit 1
         ;;
 esac
@@ -395,6 +395,21 @@ WSL_ENVIRONMENT="false"
 DISABLE_ZINK="false"
 XDG_RUNTIME_DIR=""
 LD_LIBRARY_PATH=""
+GALLIUM_DRIVER=""
+MESA_LOADER_DRIVER_OVERRIDE=""
+MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-}"
+LIBGL_ALWAYS_SOFTWARE=""
+__GLX_VENDOR_LIBRARY_NAME=""
+__EGL_VENDOR_LIBRARY_FILENAMES=""
+PIXELFLUX_WAYLAND="false"
+WAYLAND_DISPLAY=""
+SELKIES_WAYLAND_SOCKET_INDEX=""
+
+if [ "${UBUNTU_VERSION}" = "26.04" ]; then
+    PIXELFLUX_WAYLAND="true"
+    WAYLAND_DISPLAY="wayland-1"
+    SELKIES_WAYLAND_SOCKET_INDEX="0"
+fi
 
 case "${GPU_VENDOR}" in
     nvidia)
@@ -410,6 +425,19 @@ case "${GPU_VENDOR}" in
         DISABLE_ZINK="true"
         XDG_RUNTIME_DIR="/mnt/wslg/runtime-dir"
         LD_LIBRARY_PATH="/usr/lib/wsl/lib"
+        GALLIUM_DRIVER="d3d12"
+        MESA_LOADER_DRIVER_OVERRIDE="d3d12"
+        MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-NVIDIA}"
+        LIBGL_ALWAYS_SOFTWARE="0"
+        LIBVA_DRIVER_NAME="d3d12"
+        __GLX_VENDOR_LIBRARY_NAME="mesa"
+        __EGL_VENDOR_LIBRARY_FILENAMES="/usr/share/glvnd/egl_vendor.d/50_mesa.json"
+        if [ -e "/dev/dxg" ]; then
+            GPU_DEVICES="/dev/dxg:/dev/dxg:rwm"
+        fi
+        if [ -d "/dev/dri" ]; then
+            GPU_DEVICES="${GPU_DEVICES:+${GPU_DEVICES},}/dev/dri:/dev/dri:rwm"
+        fi
         ;;
     intel)
         LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-iHD}"
@@ -512,18 +540,14 @@ ENV_VARS=(
     ENCODER GPU_VENDOR GPU_ALL GPU_NUMS DOCKER_GPUS DRI_NODE
     ENABLE_NVIDIA LIBVA_DRIVER_NAME NVIDIA_VISIBLE_DEVICES GPU_DEVICES
     WSL_ENVIRONMENT DISABLE_ZINK XDG_RUNTIME_DIR LD_LIBRARY_PATH
+    GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE MESA_D3D12_DEFAULT_ADAPTER_NAME LIBGL_ALWAYS_SOFTWARE
+    __GLX_VENDOR_LIBRARY_NAME __EGL_VENDOR_LIBRARY_FILENAMES
+    PIXELFLUX_WAYLAND WAYLAND_DISPLAY SELKIES_WAYLAND_SOCKET_INDEX
     SSL_DIR SSL_CERT_PATH SSL_KEY_PATH
     HOST_HOME_MOUNT HOST_MNT_MOUNT
     USER_UID USER_GID USER_NAME
     DOCKER_MODE START_DOCKER DOCKER_SOCK_MOUNT HOST_DOCKER_SOCK_MOUNT DOCKER_SOCK_GID
 )
-
-if [ -n "${DISABLE_ZINK}" ]; then
-    ENV_VARS+=(DISABLE_ZINK)
-fi
-if [ -n "${WSL_ENVIRONMENT}" ]; then
-    ENV_VARS+=(WSL_ENVIRONMENT)
-fi
 
 emit_exports() {
     for var in "${ENV_VARS[@]}"; do

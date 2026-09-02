@@ -18,7 +18,7 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 | **Password handling** | Plaintext in command | Environment variable |
 | **Shell** | Generic bash | Ubuntu Desktop bash (color prompt, Git branch, aliases) |
 | **GPU selection** | Auto-detect | Explicit `--encoder` / `--gpu` flags |
-| **Dependency versions** | Floating | Pinned (VirtualGL 3.1.4, compatible Pixelflux wheel per platform, Selkies latest main / pinnable via `SELKIES_COMMIT`) |
+| **Dependency versions** | Floating | Pinned (VirtualGL 3.1.4, Pixelflux 1.6.0, Selkies latest main / pinnable via `SELKIES_COMMIT`) |
 | **Docker-in-Docker** | — | `--docker-mode dind\|dood` |
 | **Stream tuning** | — | `-S` stream scale, `-f` framerate control |
 | **Dev Container** | — | `create-devcontainer-config.sh` (same settings as CLI) |
@@ -35,8 +35,8 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 - **Docker mode switching** — `--docker-mode dood` (host socket) or `dind` (container-internal dockerd).
 - **Browser-only access** — `https://localhost:<30000+UID>` after startup. No SSH/RDP distribution needed.
 - **Secure passwords** — Set via environment variable; never exposed in commands or logs.
-- **Multi-language** — `-l jp` at build time installs Linux-side Japanese input (Fcitx/Anthy), timezone, and locale.
-- **Version-pinned** — Reproducible builds with pinned VirtualGL 3.1.4, a platform-compatible Pixelflux wheel, and Selkies (latest `main` by default; pinnable via `SELKIES_COMMIT` build arg).
+- **Multi-language** — `-l ja` at build time installs Japanese input (Mozc), timezone, and locale.
+- **Version-pinned** — Reproducible builds with pinned VirtualGL 3.1.4, Pixelflux 1.6.0, and Selkies (latest `main` by default; pinnable via `SELKIES_COMMIT` build arg).
 
 ## Platform Support
 
@@ -45,7 +45,7 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 | **Ubuntu + NVIDIA GPU** | ✅ | ✅ | ✅ NVENC | Best performance |
 | **Ubuntu + Intel GPU** | ✅ | ✅ | ✅ VA-API (QSV) | Integrated GPU OK |
 | **Ubuntu + AMD GPU** | ✅ | ✅ | ✅ VA-API | RDNA / GCN |
-| **WSL2 + NVIDIA GPU** | ❌ Software | ❌ Software | ✅ NVENC | Encoding works, rendering is software |
+| **WSL2 + NVIDIA GPU** | ✅ Mesa D3D12 | ✅ WebGL / ⚠️ Vulkan | ✅ NVENC | OpenGL through `/dev/dxg` plus NVENC |
 | **macOS (Docker Desktop)** | ❌ | ❌ Software | ❌ | VM limitation; workflow is identical |
 
 ---
@@ -55,8 +55,9 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 ```bash
 # 1. Build user image (1-2 min; base image pulled from GHCR automatically)
 ./build-user-image.sh                    # English (default)
-./build-user-image.sh -l jp              # Japanese environment
+./build-user-image.sh -l ja              # Japanese environment
 ./build-user-image.sh -u 22.04           # Ubuntu 22.04
+./build-user-image.sh -u 26.04           # Ubuntu 26.04 (X11/Xvfb)
 
 # 2. Start the container
 ./start-container.sh                     # Interactive settings
@@ -73,8 +74,6 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 
 # 4. Save changes (IMPORTANT — do this before removing the container)
 ./commit-container.sh
-# Keep the previous image only when rollback is explicitly needed:
-./commit-container.sh --keep-history
 
 # 5. Stop
 ./stop-container.sh            # Stop (container persists, can restart)
@@ -227,7 +226,7 @@ The base image is pulled from GHCR automatically — no manual base build needed
 ./build-user-image.sh
 
 # Japanese
-./build-user-image.sh -l jp
+./build-user-image.sh -l ja
 
 # Skip password prompt
 USER_PASSWORD=yourpass ./build-user-image.sh
@@ -236,6 +235,7 @@ USER_PASSWORD=yourpass ./build-user-image.sh
 **Options:**
 ```bash
 ./build-user-image.sh -u 22.04           # Ubuntu 22.04
+./build-user-image.sh -u 26.04           # Ubuntu 26.04 (X11/Xvfb)
 ./build-user-image.sh -v 2.0.0           # Custom version
 ./build-user-image.sh -b my-base:1.1.0   # Custom base image tag
 ./build-user-image.sh -i ghcr.io/you/img  # Custom base image name
@@ -304,31 +304,24 @@ container name, Ubuntu version, architecture, docker mode (`dind`/`dood`), encod
 - Image format: `webtop-kde-{username}-{arch}-u{ubuntu_version}:{version}`
 - Committed images persist after container deletion
 - Next startup automatically uses the committed image
-- The previous image tag is removed by default when it is no longer referenced.
-  `--keep-history` retains it with a timestamped `history` tag. Commit layers are
-  not compacted; use `flatten-container.sh` to reduce accumulated layers.
-- The in-container **Commit Container** desktop icon asks whether to retain the
-  previous image before committing.
 
-### Flattening the Image
+The desktop shortcut **Commit Container** displays a Yes / No / Cancel dialog:
+
+- **Yes — Keep History:** perform a normal `docker commit` and add another layer.
+- **No — Merge Previous:** merge only the immediately previous container commit and the current changes into one layer. Older base-image history remains intact.
+- **Cancel:** make no changes.
+
+The separate **Flatten Container** desktop shortcut is the only action that merges the complete image history into one filesystem layer. It runs only after an English OK / Cancel warning. Its compressed-archive icon distinguishes it from the normal commit action. The equivalent host command is:
 
 ```bash
 ./flatten-container.sh
 ```
 
-- Creates a single-layer image from the current container filesystem while
-  preserving runtime image metadata such as environment variables, entrypoint,
-  command, labels, ports, and declared volumes.
-- Uses temporary disk space approximately equal to the container filesystem and
-  can take several minutes.
-- Mounted volume and bind-mount contents are not included, matching normal
-  `docker commit` behavior.
-- By default, the CLI and desktop action remove the source container and its old
-  untagged image after a successful flatten. Start the container again to use the
-  flattened image. Use `--keep-container` with the CLI to defer removal; its old
-  layers remain in use until that container is removed.
-- The in-container **Flatten Container** desktop icon provides the same operation
-  and uses the Breeze `archive-insert` action icon.
+Flattening preserves the runtime image configuration, including the entrypoint,
+environment, ports, volumes, labels, user and working directory. As with
+`docker commit`, contents supplied by volumes or bind mounts are not included.
+The running container continues to reference its previous layers; after safely
+removing that container, run `docker image prune` to reclaim dangling layers.
 
 **Typical workflow:**
 ```bash
@@ -356,9 +349,10 @@ Only needed if you want to build from scratch instead of pulling from GHCR (30-6
 ```bash
 ./files/build-base-image.sh                         # Ubuntu 24.04, auto-detect arch
 ./files/build-base-image.sh -u 22.04                # Ubuntu 22.04
+./files/build-base-image.sh -u 26.04                # Ubuntu 26.04 (X11/Xvfb)
 ./files/build-base-image.sh -a amd64                # Intel/AMD 64-bit
 ./files/build-base-image.sh -a arm64                # Apple Silicon / ARM
-./files/build-base-image.sh -a amd64 -u 22.04       # Combine options
+./files/build-base-image.sh -a amd64 -u 26.04       # Combine options
 ./files/build-base-image.sh --no-cache               # Clean rebuild
 
 # Push to GHCR
@@ -377,7 +371,7 @@ IMAGE_NAME=ghcr.io/you/your-base ./files/push-base-image.sh
 
 | Script | Description | Usage |
 |---|---|---|
-| `build-user-image.sh` | Build user-specific image | `./build-user-image.sh [-l jp] [-u 22.04]` |
+| `build-user-image.sh` | Build user-specific image | `./build-user-image.sh [-l ja] [-u 22.04|24.04|26.04]` |
 | `start-container.sh` | Start or resume the container | `./start-container.sh [--encoder <type>]` |
 | `configure-container.sh` | Create or edit saved startup settings | `./configure-container.sh [--config <file>]` |
 | `create-devcontainer-config.sh` | Generate Dev Container config | `./create-devcontainer-config.sh` |
@@ -389,7 +383,7 @@ IMAGE_NAME=ghcr.io/you/your-base ./files/push-base-image.sh
 |---|---|---|
 | `shell-container.sh` | Open a shell inside the container | `./shell-container.sh` |
 | `commit-container.sh` | Save container state to image | `./commit-container.sh` |
-| `flatten-container.sh` | Compact container into a single-layer image | `./flatten-container.sh` |
+| `flatten-container.sh` | Replace accumulated image history with one filesystem layer | `./flatten-container.sh` |
 | `logs-container.sh` | View container logs | `./logs-container.sh` |
 | `restart-container.sh` | Restart the container | `./restart-container.sh` |
 | `delete-image.sh` | Delete the user image | `./delete-image.sh` |
@@ -465,183 +459,42 @@ Selkies streams bidirectional audio to the browser via WebRTC.
 
 ## Appendix: HTTPS/SSL
 
-Selkies uses a secure WebSocket (`wss://`) for the desktop stream. Merely bypassing
-the HTTPS warning is not sufficient: some browsers still reject WSS before the
-request reaches nginx. Install the local CA on every device that runs a browser.
+### Quick Setup (Recommended)
 
-### 1. Generate a local CA and server certificate
+Generate a CA-signed certificate and trust it on your OS:
 
 ```bash
-# Accessing the container as https://localhost:PORT
-./generate-ssl-cert.sh -c localhost
+# 1. Generate CA + server certificate. The current hostname and host IPs are
+#    added to Subject Alternative Names automatically.
+./generate-ssl-cert.sh
 
-# Accessing a remote Docker host by DNS name
-./generate-ssl-cert.sh -f -c webtop.example.lan
-
-# ssl/ is auto-detected
-./start-container.sh
-```
-
-If the container already existed before `ssl/` was created, Docker cannot add the
-certificate bind mount to that existing container. Save any work that exists only
-inside the container, then recreate it:
-
-```bash
-docker stop linuxserver-kde-$(whoami)
-docker rm linuxserver-kde-$(whoami)
-./start-container.sh
-```
-
-When only the files in an already-mounted `ssl/` directory are replaced, restart
-the container so nginx loads the new certificate.
-
-Use the same DNS name in the browser that you passed to `-c`. The generator adds
-`localhost`, `127.0.0.1`, and `::1` automatically, but does not add an arbitrary
-remote IP address as an IP SAN. For access by remote IP, use your own certificate
-with that IP in `subjectAltName`, or assign the host a local DNS name.
-
-The generated files are:
-
-| File | Purpose | Distribute? |
-|---|---|---|
-| `ssl/ca.crt` | Local CA public certificate | Yes, to browser devices |
-| `ssl/ca.key` | Local CA private key | **No — keep secret** |
-| `ssl/cert.pem` | Server certificate | Mounted into the container |
-| `ssl/cert.key` | Server private key | **No — keep secret** |
-
-### 2. Trust `ssl/ca.crt` on browser devices
-
-Install the CA on the device where the browser runs. This may be different from
-the Docker host.
-
-#### macOS
-
-For the current user (recommended for a development machine):
-
-```bash
-security add-trusted-cert -r trustRoot \
-  -k "$HOME/Library/Keychains/login.keychain-db" ./ssl/ca.crt
-```
-
-For all users (requires an administrator):
-
-```bash
+# 2. Trust the CA on your OS (one-time setup)
+#    macOS:
 sudo security add-trusted-cert -d -r trustRoot \
   -k /Library/Keychains/System.keychain ./ssl/ca.crt
-```
 
-Alternatively, import `ca.crt` into Keychain Access, open the certificate, expand
-**Trust**, and select **Always Trust**. See Apple's
-[certificate trust documentation](https://support.apple.com/guide/keychain-access/kyca11871/mac).
-Quit the browser completely (`Cmd+Q`) and reopen it after changing trust.
-
-#### Windows 10/11
-
-Copy `ca.crt` to Windows, then run PowerShell. Current-user installation does not
-require administrator privileges:
-
-```powershell
-Import-Certificate -FilePath .\ca.crt `
-  -CertStoreLocation Cert:\CurrentUser\Root
-```
-
-To trust it for every user, open PowerShell as Administrator:
-
-```powershell
-Import-Certificate -FilePath .\ca.crt `
-  -CertStoreLocation Cert:\LocalMachine\Root
-```
-
-See Microsoft's [`Import-Certificate` documentation](https://learn.microsoft.com/powershell/module/pki/import-certificate).
-Fully quit and restart Chrome, Edge, or Firefox.
-
-#### WSL2
-
-The usual browser runs on Windows, so install the CA in the **Windows** certificate
-store using the preceding Windows steps. For example, first copy it from WSL:
-
-```bash
-cp ./ssl/ca.crt /mnt/c/Users/<WindowsUser>/Downloads/kde-webtop-ca.crt
-```
-
-If command-line programs inside WSL (`curl`, `git`, SDKs) must also trust the CA,
-install it separately inside the WSL distribution using the Ubuntu/Debian steps below.
-
-#### Ubuntu / Debian
-
-```bash
-sudo apt-get install -y ca-certificates
-sudo cp ./ssl/ca.crt /usr/local/share/ca-certificates/kde-webtop-ca.crt
+#    Linux (Ubuntu/Debian):
+sudo cp ./ssl/ca.crt /usr/local/share/ca-certificates/local-dev-ca.crt
 sudo update-ca-certificates
+
+#    Google Chrome/Chromium on Linux (Chrome has a separate NSS trust DB):
+./trust-local-ca-chrome.sh
+
+#    Windows (PowerShell as Administrator):
+Import-Certificate -FilePath .\ssl\ca.crt -CertStoreLocation Cert:\LocalMachine\Root
+
+# 3. Start the container (ssl/ is auto-detected)
+./start-container.sh
 ```
 
-The `.crt` extension is required. See Ubuntu's
-[root CA installation guide](https://ubuntu.com/server/docs/how-to/security/install-a-root-ca-certificate-in-the-trust-store/).
+Fully quit and restart Chrome after importing the CA. Then use a hostname or IP listed by the generator (for example,
+`https://localhost:31000` or `https://<host-ip>:31000`). Browsers will then
+accept the certificate without a name-mismatch warning.
 
-#### Fedora / RHEL / Rocky Linux / AlmaLinux
-
-```bash
-sudo cp ./ssl/ca.crt /etc/pki/ca-trust/source/anchors/kde-webtop-ca.crt
-sudo update-ca-trust
-```
-
-See Red Hat's
-[shared system certificates documentation](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/7/html/security_guide/sec-shared-system-certificates).
-
-#### iOS / iPadOS / visionOS
-
-Transfer only `ca.crt` to the device and install the downloaded certificate
-profile. Then open **Settings > General > About > Certificate Trust Settings**
-and enable full trust for **Local Development CA**. A manually installed root is
-not trusted for TLS until this switch is enabled. See
-[Apple's instructions](https://support.apple.com/102390).
-
-#### Android
-
-Transfer only `ca.crt`, then open **Settings > Security & privacy > More security
-settings > Encryption & credentials > Install a certificate > CA certificate**.
-Menu names vary by Android vendor and release. Install a private CA only on a
-device you control. See Google's
-[certificate installation instructions](https://support.google.com/pixelphone/answer/2844832).
-
-#### ChromeOS
-
-Open `chrome://settings/certificates`, select **Authorities > Import**, and import
-`ca.crt`. Enable trust for websites when prompted. On a managed Chromebook, the
-administrator may need to deploy the CA from **Google Admin console > Devices >
-Networks > Certificates**. See Google's
-[ChromeOS certificate instructions](https://support.google.com/chromebook/answer/1282338)
-and [managed-device instructions](https://support.google.com/chrome/a/answer/6342302).
-
-### Browser-specific notes
-
-- Chrome, Chromium, Edge, and Safari use locally managed trust settings from the
-  operating system. Fully restart the browser after installing or replacing a CA.
-- Firefox uses third-party roots from the OS by default on Windows, macOS, and
-  Android. If disabled, enable **Allow Firefox to automatically trust third-party
-  root certificates you install** under **Settings > Privacy & Security >
-  Certificates**. On Linux, import `ca.crt` under **View Certificates >
-  Authorities** if the system CA is not detected. See Mozilla's
-  [CA setup documentation](https://support.mozilla.org/kb/setting-certificate-authorities-firefox).
-- Do not use `--no-ca` for routine browser access. It creates a standalone
-  self-signed server certificate and does not remove browser trust warnings.
-
-### 3. Verify HTTPS and WSS
-
-Use the HTTPS URL printed by `start-container.sh`:
-
-```bash
-# Do not use -k: this must pass normal certificate verification
-curl -I https://localhost:<HTTPS-port>/
-```
-
-A `200` or redirect to `/auth/login` means TLS validation succeeded. In browser
-Developer Tools, **Network > WS**, `/websockets` should show status `101`. If the
-page reloads every few seconds and nginx never logs `/websockets`, fully restart
-the browser and verify that the CA was installed on the browser device.
-
-If you regenerate certificates with `./generate-ssl-cert.sh -f`, reinstall the
-new `ssl/ca.crt` on every browser device because a new CA key is generated.
+> **Note:** `./generate-ssl-cert.sh -f` keeps the existing CA and only reissues
+> the server certificate, so the registered trust remains valid. Use
+> `--new-ca` only when you intentionally want to replace the CA; after that you
+> must register the new `ca.crt` again.
 
 ### Using Your Own Certificates
 
@@ -659,15 +512,17 @@ cp /path/to/key.pem ssl/cert.key
 | `-c <hostname>` | Common name / hostname | `localhost` |
 | `-d <dir>` | Output directory | `./ssl` |
 | `-n <days>` | Validity period | `365` |
+| `--san <name-or-ip>` | Additional DNS name or IP (repeatable) | — |
 | `--no-ca` | Self-signed cert (no CA) | CA mode |
-| `-f` | Force overwrite existing certs | — |
+| `-f` | Reissue the server certificate, keeping an existing CA | — |
+| `--new-ca` | Replace the existing CA too | — |
 
-Output files: `ssl/ca.crt`, `ssl/ca.key`, `ssl/cert.pem`, `ssl/cert.key`.
+Output files: `ssl/ca.crt`, `ssl/ca.key`, `ssl/cert.pem`, `ssl/cert.key`
 
 ### Certificate Priority
 
-1. Explicit `-s <dir>`, saved `ssl_dir`, or `SSL_DIR`
-2. `ssl/cert.pem` + `ssl/cert.key` in the project directory when no SSL directory was specified
+1. `ssl/cert.pem` + `ssl/cert.key` (project directory)
+2. `SSL_DIR` environment variable
 3. Image default certificate (fallback)
 
 ---
@@ -743,6 +598,7 @@ Check browser audio permissions and use HTTPS (some browsers block audio over HT
 - Xvfb does not support DRI3, so Vulkan applications cannot present frames
 - VirtualGL-based OpenGL works normally
 - In some setups, vkcube detects the NVIDIA GPU under Xvfb, but presentation behavior is configuration-dependent
+- Ubuntu 26.04 uses the distro Xvfb because the custom DRI3 patch is not compatible with xorg-server 21.1.22
 
 ### macOS
 - Docker Desktop runs containers inside a Linux VM — no access to Apple GPU (Metal)
@@ -750,9 +606,11 @@ Check browser audio permissions and use HTTPS (some browsers block audio over HT
 - Use native Linux or WSL2 for hardware acceleration
 
 ### WSL2
-- Only NVIDIA GPUs are supported
-- Rendering is software (llvmpipe); WebGL/Vulkan are software-only
-- Hardware encoding (NVENC) works via `--encoder nvidia-wsl`
+- The `nvidia-wsl` encoding profile requires NVIDIA for NVENC; Mesa D3D12 can select a different render adapter on hybrid systems
+- `--encoder nvidia-wsl` passes `/dev/dxg` and the WSLg libraries into the container, enabling GPU OpenGL through Mesa D3D12
+- `MESA_D3D12_DEFAULT_ADAPTER_NAME` defaults to `NVIDIA`; on hybrid systems it can be changed to a substring of the preferred adapter name
+- Pixelflux uses NVENC independently from the OpenGL rendering path
+- Vulkan depends on whether the WSL/Mesa Dozen (`dzn`) driver is available; it is not required for accelerated OpenGL/WebGL
 
 ---
 
@@ -787,6 +645,7 @@ Check browser audio permissions and use HTTPS (some browsers block audio over HT
 |---|---|---|
 | `ENCODER` | Encoder type | (unset) |
 | `GPU_VENDOR` | GPU vendor | `software` |
+| `MESA_D3D12_DEFAULT_ADAPTER_NAME` | GPU name substring selected on WSL2 | `NVIDIA` |
 | `DOCKER_MODE` | Docker mode | `dind` |
 
 #### Network
@@ -811,7 +670,7 @@ kde-selkies-webtop-devcontainer/
 ├── restart-container.sh          # Restart container
 ├── shell-container.sh            # Shell access
 ├── commit-container.sh           # Save changes
-├── flatten-container.sh          # Compact image layers
+├── flatten-container.sh          # Flatten image history into one layer
 ├── logs-container.sh             # View logs
 ├── delete-image.sh               # Delete user image
 ├── generate-ssl-cert.sh          # Generate SSL certificate
@@ -833,7 +692,7 @@ kde-selkies-webtop-devcontainer/
 External dependencies are pinned for reproducible builds:
 
 - **VirtualGL:** 3.1.4 (build argument in Dockerfile)
-- **Pixelflux:** 1.6.0 on amd64; 1.4.7 on Ubuntu 22.04 arm64 because Jammy's libva does not provide the `vaMapBuffer2` symbol required by newer arm64 wheels. The arm64 wheel is downloaded from PyPI and SHA-256 verified during the base-image build.
+- **Pixelflux:** 1.6.0 (local `.whl` files in `files/pixelflux/`)
 - **Selkies:** Tracks latest `main` branch by default. Pin to a specific commit via `--build-arg SELKIES_COMMIT=<hash>`
 
 Hardware encoding:
@@ -869,3 +728,35 @@ See each project's license for details.
 **This project:**
 - **Enhancements:** Two-stage build, non-root execution, UID/GID matching, secure passwords, management scripts, version pinning, multi-GPU/encoder support, Dev Container integration
 - **Maintainer:** [@tatsuyai713](https://github.com/tatsuyai713)
+
+## Enabling NVDEC (hardware decode) on the host
+
+The stream is decoded by the viewer's browser. Chrome / Edge on Linux ship
+with NVIDIA hardware video decode disabled, so NVDEC stays idle (CPU decode)
+unless the host is configured:
+
+```bash
+# Install nvidia-vaapi-driver (the Ubuntu archive version 0.0.8 is old; use the PPA)
+sudo add-apt-repository ppa:ubuntuhandbook1/nvidia-vaapi
+sudo apt update && sudo apt install nvidia-vaapi-driver
+```
+
+Launch the browser with:
+
+```bash
+LIBVA_DRIVER_NAME=nvidia NVD_BACKEND=direct google-chrome \
+  --enable-features=AcceleratedVideoDecodeLinuxGL,VaapiOnNvidiaGPUs \
+  --ignore-gpu-blocklist --use-gl=angle --use-angle=gl
+# On a Wayland desktop also add --ozone-platform=wayland
+# For Edge, replace google-chrome with microsoft-edge
+```
+
+Verify via chrome://gpu (Video Acceleration Information) and by watching
+`nvidia-smi` `utilization.decoder` while viewing the stream. This is
+independent of the server-side NVENC encoding.
+
+> **Intel / AMD hosts**: nvidia-vaapi-driver is not needed. Install
+> `intel-media-va-driver` (Intel) or rely on the Mesa VA drivers (AMD,
+> usually preinstalled) and launch the browser with only
+> `--enable-features=AcceleratedVideoDecodeLinuxGL` (no `LIBVA_DRIVER_NAME`,
+> `NVD_BACKEND`, or `VaapiOnNvidiaGPUs`).

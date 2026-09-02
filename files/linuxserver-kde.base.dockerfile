@@ -198,28 +198,39 @@ ENV PATCH_VERSION=21 \
 RUN \
   echo "**** build deps ****" && \
   apt-get update && \
-  apt-get install -y devscripts dpkg-dev && \
-  apt-get build-dep -y xorg-server
+  UBUNTU_VERSION="$(. /etc/os-release && echo ${VERSION_ID})" && \
+  if [ "${UBUNTU_VERSION}" = "26.04" ]; then \
+    echo "**** Ubuntu ${UBUNTU_VERSION}: use distro Xvfb (DRI3 patch not compatible) ****" && \
+    apt-get install -y xvfb; \
+  else \
+    apt-get install -y devscripts dpkg-dev && \
+    apt-get build-dep -y xorg-server; \
+  fi
 
 RUN \
   echo "**** get and build xvfb ****" && \
-  apt-get source xorg-server && \
-  cd xorg-server-* && \
-  cp /patches/${PATCH_VERSION}-xvfb-dri3.patch patch.patch && \
-  patch -p0 < patch.patch && \
-  awk ' \
-    { print } \
-    /include \/usr\/share\/dpkg\/architecture.mk/ { \
-      print ""; \
-      print "GLAMOR_DEP_LIBS := $(shell pkg-config --libs gbm epoxy libdrm)"; \
-      print "GLAMOR_DEP_CFLAGS := $(shell pkg-config --cflags gbm epoxy libdrm)"; \
-      print "export DEB_LDFLAGS_PREPEND ?= $(GLAMOR_DEP_LIBS)"; \
-      print "export DEB_CFLAGS_PREPEND ?= $(GLAMOR_DEP_CFLAGS)"; \
-    } \
-  ' debian/rules > debian/rules.tmp && mv debian/rules.tmp debian/rules && \
-  debuild -us -uc -b && \
+  UBUNTU_VERSION="$(. /etc/os-release && echo ${VERSION_ID})" && \
   mkdir -p /build-out/usr/bin && \
-  mv debian/xvfb/usr/bin/Xvfb /build-out/usr/bin/
+  if [ "${UBUNTU_VERSION}" = "26.04" ]; then \
+    cp /usr/bin/Xvfb /build-out/usr/bin/; \
+  else \
+    apt-get source xorg-server && \
+    cd xorg-server-* && \
+    cp /patches/${PATCH_VERSION}-xvfb-dri3.patch patch.patch && \
+    patch -p0 < patch.patch && \
+    awk ' \
+      { print } \
+      /include \/usr\/share\/dpkg\/architecture.mk/ { \
+        print ""; \
+        print "GLAMOR_DEP_LIBS := $(shell pkg-config --libs gbm epoxy libdrm)"; \
+        print "GLAMOR_DEP_CFLAGS := $(shell pkg-config --cflags gbm epoxy libdrm)"; \
+        print "export DEB_LDFLAGS_PREPEND ?= $(GLAMOR_DEP_LIBS)"; \
+        print "export DEB_CFLAGS_PREPEND ?= $(GLAMOR_DEP_CFLAGS)"; \
+      } \
+    ' debian/rules > debian/rules.tmp && mv debian/rules.tmp debian/rules && \
+    debuild -us -uc -b && \
+    mv debian/xvfb/usr/bin/Xvfb /build-out/usr/bin/; \
+  fi
 
 
 ###########################################
@@ -267,7 +278,9 @@ COPY alpine-root/ /
 ###########################################
 FROM alpine-base-temp AS frontend
 
-ARG SELKIES_COMMIT=main
+# Pinned to selkies main as of 2026-06-02 (when the STREAM_SCALE and wl-paste
+# patch scripts were last verified); later upstream commits break the patches.
+ARG SELKIES_COMMIT=874b0ca0c31fbebc9f49a02e4729c312b0102e57
 
 RUN \
   echo "**** install build packages ****" && \
@@ -314,6 +327,7 @@ RUN \
 FROM ubuntu-base-temp AS selkies-base
 
 COPY pixelflux/ /tmp/pixelflux/
+COPY patch-selkies-wl-paste-leak-apply.py /tmp/patch-selkies-wl-paste-leak-apply.py
 
 # set version label
 ARG VERSION
@@ -325,10 +339,10 @@ ENV DISPLAY=:1 \
     PERL5LIB=/usr/local/bin \
     HOME=/config \
     START_DOCKER=true \
-    PULSE_RUNTIME_PATH=/run/pulse \
+    PULSE_RUNTIME_PATH=/defaults \
     SELKIES_INTERPOSER=/usr/lib/selkies_joystick_interposer.so \
     NVIDIA_DRIVER_CAPABILITIES=all \
-    DISABLE_ZINK=false \
+    DISABLE_ZINK=true \
     DISABLE_DRI3=false \
     DPI=96 \
     STREAM_SCALE=1.0 \
@@ -343,7 +357,8 @@ ARG LIBVA_LIBDIR="/usr/lib/x86_64-linux-gnu"
 ARG PROOT_ARCH="x86_64"
 ARG PROOT_APPS_VERSION="0.3.1"
 ARG VIRTUALGL_VERSION="3.1.4"
-ARG SELKIES_COMMIT=main
+# Keep in sync with the frontend stage pin above (selkies main as of 2026-06-02).
+ARG SELKIES_COMMIT=874b0ca0c31fbebc9f49a02e4729c312b0102e57
 
 # Step 1: Install base system packages and Docker
 RUN \
@@ -354,7 +369,22 @@ RUN \
   sed -i '/locale/d' /etc/dpkg/dpkg.cfg.d/excludes && \
   echo "**** install docker ****" && \
   unset VERSION && \
-  curl https://get.docker.com | sh && \
+  (curl -fsSL https://get.docker.com | sh || true) && \
+  if ! command -v docker >/dev/null 2>&1; then \
+    echo "**** get.docker.com unavailable; trying download.docker.com noble packages ****" && \
+    { install -m 0755 -d /etc/apt/keyrings && \
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
+      chmod a+r /etc/apt/keyrings/docker.asc && \
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list && \
+      apt-get update && \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; } \
+      || { rm -f /etc/apt/sources.list.d/docker.list; apt-get update; false; } || true; \
+  fi && \
+  if ! command -v docker >/dev/null 2>&1; then \
+    echo "**** docker.com is unreachable (blocked network?); installing docker.io from the Ubuntu archive ****" && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-buildx docker-compose-v2; \
+  fi && \
+  command -v docker >/dev/null 2>&1 && \
   echo "**** install deps ****" && \
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
   apt-get update && \
@@ -440,31 +470,23 @@ RUN \
   fi && \
   python3 -m venv --system-site-packages /opt/selkies-env && \
   export PKG_CONFIG_PATH="/usr/local/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig:/usr/lib/pkgconfig" && \
-  if [ "${UBUNTU_VERSION}" = "22.04" ] || [ "${UBUNTU_VERSION}" = "24.04" ]; then \
-    echo "av==14.4.0" > /tmp/selkies-constraints.txt; \
+  if [ "${UBUNTU_VERSION}" = "22.04" ]; then \
+    printf '%s\n' "av==14.4.0" "pcmflux==1.0.8" "pixelflux==1.6.0" > /tmp/selkies-constraints.txt; \
+  elif [ "${UBUNTU_VERSION}" = "24.04" ]; then \
+    # pixelflux 2.0 (NVENC on X11 and Wayland) via patch-selkies-pixelflux2.py
+    printf '%s\n' "av==14.4.0" "pcmflux==1.0.8" "pixelflux==2.0.0" > /tmp/selkies-constraints.txt; \
     /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt .; \
   else \
-    /opt/selkies-env/bin/pip install .; \
+    # pcmflux 2.x predates the pinned selkies; pixelflux 2.0 is used via the
+    # patch-selkies-pixelflux2.py compatibility layer to get NVENC on Wayland.
+    printf '%s\n' "pcmflux==1.0.8" "pixelflux==2.0.0" > /tmp/selkies-constraints.txt; \
+    /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt .; \
   fi && \
   /opt/selkies-env/bin/pip install setuptools && \
   if [ "$(dpkg --print-architecture)" = "amd64" ] && [ "${UBUNTU_VERSION}" = "22.04" ]; then \
     PIXELFLUX_WHL="/tmp/pixelflux/pixelflux-1.6.0-cp310-cp310-linux_x86_64.whl" && \
     test -f "${PIXELFLUX_WHL}" && \
     echo "Installing pixelflux from local wheel for Ubuntu 22.04: ${PIXELFLUX_WHL}" && \
-    /opt/selkies-env/bin/pip install --force-reinstall "${PIXELFLUX_WHL}"; \
-  elif [ "$(dpkg --print-architecture)" = "arm64" ] && [ "${UBUNTU_VERSION}" = "22.04" ]; then \
-    PIXELFLUX_WHL="/tmp/pixelflux-1.4.7-cp310-cp310-manylinux_2_28_aarch64.whl" && \
-    PIXELFLUX_URL="https://files.pythonhosted.org/packages/4f/6e/832ed1b22373e0a1b80826b5dab8d38634a7f4db2bf7254b0aaea4dfe928/$(basename "${PIXELFLUX_WHL}")" && \
-    PIXELFLUX_SHA256="650ba1dbfafceb8b64ebdbee7e935928a705c341e7bc2336b6c9942bc4b7bcd3" && \
-    echo "Installing Jammy-compatible pixelflux wheel for Ubuntu 22.04 arm64: ${PIXELFLUX_WHL}" && \
-    curl -fL --retry 3 -o "${PIXELFLUX_WHL}" "${PIXELFLUX_URL}" && \
-    echo "${PIXELFLUX_SHA256}  ${PIXELFLUX_WHL}" | sha256sum -c - && \
-    /opt/selkies-env/bin/pip install --no-deps --force-reinstall "${PIXELFLUX_WHL}" && \
-    /opt/selkies-env/bin/python3 -c 'import pixelflux; capture = pixelflux.ScreenCapture(); assert capture._module'; \
-  elif [ "$(dpkg --print-architecture)" = "amd64" ] && [ "${UBUNTU_VERSION}" = "24.04" ]; then \
-    PIXELFLUX_WHL="/tmp/pixelflux/pixelflux-1.6.0-cp312-cp312-linux_x86_64.whl" && \
-    test -f "${PIXELFLUX_WHL}" && \
-    echo "Installing pixelflux from local wheel for Ubuntu 24.04: ${PIXELFLUX_WHL}" && \
     /opt/selkies-env/bin/pip install --force-reinstall "${PIXELFLUX_WHL}"; \
   elif [ "$(dpkg --print-architecture)" = "amd64" ]; then \
     echo "Warning: Unknown Ubuntu version ${UBUNTU_VERSION}; skipping local pixelflux wheel install"; \
@@ -490,6 +512,13 @@ RUN \
   echo '#!/bin/bash' > /usr/local/bin/selkies && \
   echo 'exec /opt/selkies-env/bin/python3 -m selkies "$@"' >> /usr/local/bin/selkies && \
   chmod +x /usr/local/bin/selkies && \
+  echo "**** patch selkies wl-paste subprocess leak (Ubuntu 26.04+ only) ****" && \
+  UBUNTU_VERSION="$(. /etc/os-release && echo ${VERSION_ID})" && \
+  if [ "$(echo "${UBUNTU_VERSION}" | cut -d. -f1)" -ge 26 ]; then \
+    /opt/selkies-env/bin/python3 /tmp/patch-selkies-wl-paste-leak-apply.py; \
+  else \
+    echo "Skipping wl-paste patch on Ubuntu ${UBUNTU_VERSION}"; \
+  fi && \
   rm -rf /tmp/*
 
 # Step 3: System configuration and tools
@@ -564,7 +593,7 @@ RUN \
   if [ "${ARCH_CUR}" = "arm64" ] && [ "${LIBVA_TARGET_LIBDIR}" = "/usr/lib/x86_64-linux-gnu" ]; then \
     LIBVA_TARGET_LIBDIR="/usr/lib/aarch64-linux-gnu"; \
   fi && \
-  if [ "${UBUNTU_MAJOR}" -ge 24 ] && [ "${ARCH_CUR}" = "amd64" ] && [ -n "${LIBVA_DEB_URL}" ]; then \
+  if [ "${UBUNTU_VERSION}" = "24.04" ] && [ "${ARCH_CUR}" = "amd64" ] && [ -n "${LIBVA_DEB_URL}" ]; then \
     echo "**** libva hack (Ubuntu ${UBUNTU_VERSION}) ****" && \
     mkdir /tmp/libva && \
     curl -o /tmp/libva/libva.deb -L "${LIBVA_DEB_URL}" && \
@@ -577,7 +606,7 @@ RUN \
     else \
       echo "**** libva hack skipped (libva.so.2 not found in ${LIBVA_TARGET_LIBDIR}) ****"; \
     fi; \
-  elif [ "${UBUNTU_MAJOR}" -ge 24 ] && [ "${ARCH_CUR}" = "arm64" ] && [ -n "${LIBVA_DEB_URL_ARM64}" ]; then \
+  elif [ "${UBUNTU_VERSION}" = "24.04" ] && [ "${ARCH_CUR}" = "arm64" ] && [ -n "${LIBVA_DEB_URL_ARM64}" ]; then \
     echo "**** libva hack (Ubuntu ${UBUNTU_VERSION}, arm64) ****" && \
     mkdir /tmp/libva && \
     curl -o /tmp/libva/libva.deb -L "${LIBVA_DEB_URL_ARM64}" && \
@@ -590,7 +619,7 @@ RUN \
     else \
       echo "**** libva hack skipped (libva.so.2 not found in ${LIBVA_TARGET_LIBDIR}) ****"; \
     fi; \
-  elif [ "${ARCH_CUR}" = "amd64" ] && [ -n "${LIBVA_DEB_URL_JAMMY}" ]; then \
+  elif [ "${UBUNTU_VERSION}" = "22.04" ] && [ "${ARCH_CUR}" = "amd64" ] && [ -n "${LIBVA_DEB_URL_JAMMY}" ]; then \
     echo "**** libva hack (Ubuntu ${UBUNTU_VERSION}, jammy-compatible override) ****" && \
     mkdir /tmp/libva && \
     curl -o /tmp/libva/libva.deb -L "${LIBVA_DEB_URL_JAMMY}" && \
@@ -625,11 +654,19 @@ RUN \
     UBUNTU_VERSION_NODOT=$(echo "${UBUNTU_VERSION}" | tr -d '.'); \
     CUDA_VERSION="12-6"; \
     CUDA_KEYRING_VERSION="1.1"; \
-    curl -fsSL "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VERSION_NODOT}/x86_64/cuda-keyring_${CUDA_KEYRING_VERSION}-1_all.deb" -o /tmp/cuda-keyring.deb && \
-    dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends cuda-nvrtc-${CUDA_VERSION} && \
-    rm -rf /var/lib/apt/lists/*; \
+    if curl -fsSL "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VERSION_NODOT}/x86_64/cuda-keyring_${CUDA_KEYRING_VERSION}-1_all.deb" -o /tmp/cuda-keyring.deb; then \
+      dpkg -i /tmp/cuda-keyring.deb && rm -f /tmp/cuda-keyring.deb && \
+      apt-get update && \
+      if apt-cache show cuda-nvrtc-${CUDA_VERSION} >/dev/null 2>&1; then \
+        apt-get install -y --no-install-recommends cuda-nvrtc-${CUDA_VERSION}; \
+      else \
+        echo "**** cuda-nvrtc-${CUDA_VERSION} unavailable for Ubuntu ${UBUNTU_VERSION}; skipping ****"; \
+      fi && \
+      rm -rf /var/lib/apt/lists/*; \
+    else \
+      echo "**** CUDA repo unavailable for Ubuntu ${UBUNTU_VERSION}; skipping CUDA NVRTC ****"; \
+      rm -f /tmp/cuda-keyring.deb; \
+    fi; \
   fi
 
 # Step 8: Final cleanup
@@ -674,6 +711,13 @@ RUN if [ -f /usr/local/bin/patch-selkies-stream-scale.py ]; then \
       /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-stream-scale.py; \
     fi
 
+# Adapt the pinned selkies to the pixelflux 2.x API (enables NVENC on Wayland).
+# No-op when pixelflux 1.x is installed (22.04/24.04).
+RUN if [ -f /usr/local/bin/patch-selkies-pixelflux2.py ]; then \
+      chmod +x /usr/local/bin/patch-selkies-pixelflux2.py && \
+      /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-pixelflux2.py; \
+    fi
+
 # ports and volumes
 EXPOSE 3000 3001
 VOLUME /config
@@ -699,10 +743,16 @@ RUN \
   echo "**** install packages ****" && \
   add-apt-repository ppa:xtradeb/apps && \
   apt-get update && \
+  KDE_OPTIONAL_PACKAGES="" && \
+  if apt-cache show kubuntu-web-shortcuts >/dev/null 2>&1; then \
+    KDE_OPTIONAL_PACKAGES="${KDE_OPTIONAL_PACKAGES} kubuntu-web-shortcuts"; \
+  else \
+    echo "**** kubuntu-web-shortcuts unavailable; skipping ****"; \
+  fi && \
   DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
     bc chromium dolphin gwenview kde-config-gtk-style kdialog kfind khotkeys \
     kio-extras knewstuff-dialog konsole ksystemstats kubuntu-settings-desktop \
-    kubuntu-wallpapers kubuntu-web-shortcuts kwin-addons kwin-x11 kwrite \
+    kubuntu-wallpapers ${KDE_OPTIONAL_PACKAGES} kwin-addons kwin-x11 kwrite \
     plasma-desktop plasma-workspace qml-module-qt-labs-platform systemsettings kubuntu-desktop && \
   if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
     echo "**** install latest google-chrome (amd64) ****" && \
@@ -716,9 +766,18 @@ RUN \
   sed -i 's#^Exec=.*#Exec=/usr/local/bin/wrapped-chromium#g' \
     /usr/share/applications/chromium.desktop && \
   echo "**** kde tweaks ****" && \
-  sed -i \
-    's/applications:org.kde.discover.desktop,/applications:org.kde.konsole.desktop,/g' \
-    /usr/share/plasma/plasmoids/org.kde.plasma.taskmanager/contents/config/main.xml && \
+  echo "**** fix: KDE Plasma 6 kbuildsycoca6 looks for applications.menu not plasma-applications.menu ****" && \
+  if [ -f /etc/xdg/menus/plasma-applications.menu ] && [ ! -e /etc/xdg/menus/applications.menu ]; then \
+    ln -sf /etc/xdg/menus/plasma-applications.menu /etc/xdg/menus/applications.menu; \
+  fi && \
+  TASKMANAGER_CONFIG=/usr/share/plasma/plasmoids/org.kde.plasma.taskmanager/contents/config/main.xml && \
+  if [ -f "${TASKMANAGER_CONFIG}" ]; then \
+    sed -i \
+      's/applications:org.kde.discover.desktop,/applications:org.kde.konsole.desktop,/g' \
+      "${TASKMANAGER_CONFIG}"; \
+  else \
+    echo "**** taskmanager config unavailable; skipping ****"; \
+  fi && \
   echo "**** cleanup ****" && \
   apt-get autoclean && \
   rm -rf /config/.cache /config/.launchpadlib /var/lib/apt/lists/* /var/tmp/* /tmp/*

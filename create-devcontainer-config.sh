@@ -351,6 +351,7 @@ services:
       - USER_UID=\${USER_UID}
       - USER_GID=\${USER_GID}
       - USER_NAME=\${USER_NAME}
+      - CONTAINER_NAME=\${CONTAINER_NAME}
       - PUID=\${HOST_UID}
       - PGID=\${HOST_GID}
       - GPU_VENDOR=\${GPU_VENDOR}
@@ -362,6 +363,15 @@ services:
       - DISABLE_ZINK=\${DISABLE_ZINK}
       - XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR}
       - LD_LIBRARY_PATH=\${LD_LIBRARY_PATH}
+      - GALLIUM_DRIVER=\${GALLIUM_DRIVER}
+      - MESA_LOADER_DRIVER_OVERRIDE=\${MESA_LOADER_DRIVER_OVERRIDE}
+      - MESA_D3D12_DEFAULT_ADAPTER_NAME=\${MESA_D3D12_DEFAULT_ADAPTER_NAME}
+      - LIBGL_ALWAYS_SOFTWARE=\${LIBGL_ALWAYS_SOFTWARE}
+      - __GLX_VENDOR_LIBRARY_NAME=\${__GLX_VENDOR_LIBRARY_NAME}
+      - __EGL_VENDOR_LIBRARY_FILENAMES=\${__EGL_VENDOR_LIBRARY_FILENAMES}
+      - PIXELFLUX_WAYLAND=\${PIXELFLUX_WAYLAND:-false}
+      - WAYLAND_DISPLAY=\${WAYLAND_DISPLAY}
+      - SELKIES_WAYLAND_SOCKET_INDEX=\${SELKIES_WAYLAND_SOCKET_INDEX}
     volumes:
       - \${HOME}:\${HOST_HOME_MOUNT}:rw
     ports:
@@ -412,18 +422,13 @@ elif [ -n "${GPU_NUMS}" ]; then
 fi
 
 if [ "${ENCODER}" = "nvidia-wsl" ]; then
-    # Add WSL-specific devices if they exist
-    if [ -e "/dev/dxg" ]; then
-        DEVICE_ENTRIES+=("/dev/dxg:/dev/dxg:rwm")
-    fi
     # Add WSL-specific volumes
-    if [ -d "/usr/lib/wsl/lib" ]; then
-        VOLUME_ENTRIES+=("/usr/lib/wsl/lib:/usr/lib/wsl/lib:ro")
+    if [ -d "/usr/lib/wsl" ]; then
+        VOLUME_ENTRIES+=("/usr/lib/wsl:/usr/lib/wsl:ro")
     fi
     if [ -d "/mnt/wslg" ]; then
         VOLUME_ENTRIES+=("/mnt/wslg:/mnt/wslg:rw")
         VOLUME_ENTRIES+=("/mnt/wslg/.X11-unix:/tmp/.X11-unix:rw")
-        VOLUME_ENTRIES+=("/usr/lib/wsl/drivers:/usr/lib/wsl/drivers:ro")
     fi
 fi
 

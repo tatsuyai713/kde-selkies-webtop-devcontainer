@@ -11,6 +11,10 @@ export QT_SCALE_FACTOR="${SCALE_FACTOR}"
 # 96 DPI to avoid multiplying the requested scale a second time.
 export QT_FONT_DPI=96
 
+# Use KWin's OpenGL compositor. Ubuntu 24.04 runs Plasma on X11/Xvfb, where
+# KWin otherwise inherits the historical software/no-compositing default.
+export KWIN_COMPOSE="${KWIN_COMPOSE:-O2}"
+
 # GTK needs an integer UI scale and a fractional font adjustment. Their
 # product matches DPI / 96 (for example, 144 DPI => 2 * 0.75 = 1.5).
 if [ "${DPI}" -ge 120 ]; then
@@ -36,12 +40,19 @@ if [ -n "${KWRITECONFIG}" ]; then
   "${KWRITECONFIG}" --file "${HOME}/.config/kdeglobals" --group KScreen --key ScreenScaleFactors --delete 2>/dev/null || true
 fi
 
-# Disable compositing and screen lock
-if [ ! -f $HOME/.config/kwinrc ]; then
-  kwriteconfig5 --file $HOME/.config/kwinrc --group Compositing --key Enabled false
-fi
-if [ ! -f $HOME/.config/kscreenlockerrc ]; then
-  kwriteconfig5 --file $HOME/.config/kscreenlockerrc --group Daemon --key Autolock false
+# Enable GPU compositing and disable screen lock.
+KWRITECONFIG="$(command -v kwriteconfig6 || command -v kwriteconfig5 || true)"
+if [ -n "$KWRITECONFIG" ]; then
+  "$KWRITECONFIG" --file "$HOME/.config/kwinrc" --group Compositing --key Enabled true
+  if ! grep -q '^wobblywindowsEnabled=' "$HOME/.config/kwinrc" 2>/dev/null; then
+    "$KWRITECONFIG" --file "$HOME/.config/kwinrc" --group Plugins --key wobblywindowsEnabled true
+  fi
+  if ! grep -q '^translucencyEnabled=' "$HOME/.config/kwinrc" 2>/dev/null; then
+    "$KWRITECONFIG" --file "$HOME/.config/kwinrc" --group Plugins --key translucencyEnabled true
+  fi
+  if [ ! -f "$HOME/.config/kscreenlockerrc" ]; then
+    "$KWRITECONFIG" --file "$HOME/.config/kscreenlockerrc" --group Daemon --key Autolock false
+  fi
 fi
 
 # Power related
@@ -95,35 +106,69 @@ fi
 
 # Enable Nvidia GPU support if detected
 NVIDIA_PRESENT=false
-if which nvidia-smi > /dev/null 2>&1 && nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null | head -n1 | grep -q .; then
+DRI_GPU_PRESENT=false
+WSL_D3D12_PRESENT=false
+if [ "${WSL_ENVIRONMENT:-false}" = "true" ] && [ -e /dev/dxg ]; then
+  WSL_D3D12_PRESENT=true
+  export GALLIUM_DRIVER=d3d12
+  export MESA_LOADER_DRIVER_OVERRIDE=d3d12
+  export MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-NVIDIA}"
+  export LIBGL_ALWAYS_SOFTWARE=0
+  export __GLX_VENDOR_LIBRARY_NAME=mesa
+  export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+  unset __NV_PRIME_RENDER_OFFLOAD
+  echo "WSL2 vGPU detected - using Mesa D3D12 OpenGL (${MESA_D3D12_DEFAULT_ADAPTER_NAME})"
+elif which nvidia-smi > /dev/null 2>&1 && nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null | head -n1 | grep -q .; then
   NVIDIA_PRESENT=true
   echo "NVIDIA GPU detected"
 fi
+if compgen -G '/dev/dri/renderD*' >/dev/null; then
+  DRI_GPU_PRESENT=true
+  echo "DRM render node detected"
+fi
 
-if [ "${NVIDIA_PRESENT}" = "true" ] && [ "${DISABLE_ZINK}" == "false" ]; then
+if [ "${WSL_D3D12_PRESENT}" != "true" ] && [ "${NVIDIA_PRESENT}" = "true" ] && [ "${DISABLE_ZINK:-true}" == "false" ]; then
+  echo "NVIDIA Zink override enabled"
   export LIBGL_KOPPER_DRI2=1
   export MESA_LOADER_DRIVER_OVERRIDE=zink
   export GALLIUM_DRIVER=zink
+fi
+
+# Intel and AMD use Mesa directly through the Xvfb DRI3 render node. Driver
+# auto-detection selects iris/radeonsi as appropriate and avoids llvmpipe.
+if [ "${WSL_D3D12_PRESENT}" != "true" ] && [ "${NVIDIA_PRESENT}" != "true" ] && [ "${DRI_GPU_PRESENT}" = "true" ]; then
+  unset MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER
+  export LIBGL_ALWAYS_SOFTWARE=0
+  export LIBGL_DRI3_ENABLE=1
+  echo "Intel/AMD GPU - using native Mesa DRI3 OpenGL"
 fi
 
 # Configure GPU acceleration
 # If USE_XORG=true, use native OpenGL (no VirtualGL needed)
 # If USE_XORG=false (Xvfb), use VirtualGL for GPU acceleration
 USE_VGL=false
-if [ "${USE_XORG}" = "true" ]; then
+if [ "${WSL_D3D12_PRESENT}" = "true" ]; then
+  # WSL exposes graphics through Mesa's D3D12 Gallium driver. VirtualGL's
+  # native NVIDIA EGL backend is not available through /dev/dxg.
+  echo "WSL2 Xvfb mode - using Mesa D3D12 OpenGL without VirtualGL"
+elif [ "${USE_XORG}" = "true" ]; then
   # Xorg mode: direct GPU access, no VirtualGL needed
   if [ "${NVIDIA_PRESENT}" = "true" ]; then
     echo "Xorg mode with NVIDIA GPU - using native OpenGL"
     export __GLX_VENDOR_LIBRARY_NAME=nvidia
     export __NV_PRIME_RENDER_OFFLOAD=1
+    export LIBGL_ALWAYS_SOFTWARE=0
   fi
 elif [ "${NVIDIA_PRESENT}" = "true" ] && which vglrun > /dev/null 2>&1; then
   # Xvfb mode with NVIDIA: use VirtualGL
   export VGL_DISPLAY="${VGL_DISPLAY:-egl}"
   export __GLX_VENDOR_LIBRARY_NAME=nvidia
   export __NV_PRIME_RENDER_OFFLOAD=1
+  export LIBGL_ALWAYS_SOFTWARE=0
   USE_VGL=true
   echo "Xvfb mode with NVIDIA GPU - using VirtualGL"
+elif [ "${DRI_GPU_PRESENT}" = "true" ]; then
+  echo "Xvfb DRI3 mode with Intel/AMD GPU - using native OpenGL"
 fi
 
 # Start DE (without exec to allow dbus-launch to work properly)

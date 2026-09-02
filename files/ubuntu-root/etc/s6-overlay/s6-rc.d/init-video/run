@@ -2,6 +2,9 @@
 
 TARGET_USER="${CUSTOM_USER:-${USER_NAME:-root}}"
 FILES=$(find /dev/dri /dev/dvb -type c -print 2>/dev/null)
+if [ -c /dev/dxg ]; then
+    FILES="${FILES} /dev/dxg"
+fi
 
 for i in $FILES
 do
@@ -40,8 +43,12 @@ done
 # Intel/AMD: uses VA-API via vaapi_render_node_index
 # No explicit encoder setting needed
 
-# check if nvidia gpu is present
-if which nvidia-smi > /dev/null 2>&1 && ls -A /dev/dri 2>/dev/null; then
+# WSL uses Mesa D3D12 for OpenGL. Installing native NVIDIA GLVND/GBM metadata
+# there can make EGL select libraries that cannot render through /dev/dxg.
+if [[ "${WSL_ENVIRONMENT:-false}" == "true" ]]; then
+    echo "**** WSL2 detected: keeping Mesa D3D12 as the OpenGL provider ****"
+# check if a native Linux NVIDIA GPU is present
+elif which nvidia-smi > /dev/null 2>&1 && ls -A /dev/dri 2>/dev/null; then
     # nvidia-container-toolkit may not place files correctly, so we set them up here
     echo "**** NVIDIA GPU detected ****"
     OPENCL_ICDS=$(find /etc/OpenCL/vendors -name '*nvidia*.icd' 2>/dev/null)
