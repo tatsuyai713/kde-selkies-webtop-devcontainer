@@ -492,7 +492,11 @@ export XMODIFIERS="@im=fcitx"
 export INPUT_METHOD=fcitx
 export GTK_IM_MODULE=fcitx
 export QT_IM_MODULE=fcitx
-DEFAULT_FLAGS="--password-store=basic --in-process-gpu --ozone-platform=x11"
+if [ -n "${WAYLAND_DISPLAY}" ] && [ -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ]; then
+  DEFAULT_FLAGS="--password-store=basic --ozone-platform=wayland"
+else
+  DEFAULT_FLAGS="--password-store=basic --in-process-gpu --ozone-platform=x11"
+fi
 EXTRA_FLAGS=(${CHROMIUM_FLAGS:-})
 
 # Cleanup
@@ -537,13 +541,22 @@ fi
 
 if [ "${ARCH}" != "arm64" ]; then
   if [ -x /usr/bin/google-chrome-stable ]; then
-    printf '%s\n' \
-      '#!/bin/bash' \
-      'CHROME_BIN="/usr/bin/google-chrome-stable"' \
-      'export XMODIFIERS="@im=fcitx"' \
-      'export INPUT_METHOD=fcitx' \
-      'exec "${CHROME_BIN}" --password-store=basic --in-process-gpu --no-sandbox ${CHROME_EXTRA_FLAGS} "$@"' \
-      > /usr/local/bin/google-chrome-wrapped
+    cat > /usr/local/bin/google-chrome-wrapped <<'EOF_GCW'
+#!/bin/bash
+CHROME_BIN="/usr/bin/google-chrome-stable"
+export XMODIFIERS="@im=fcitx"
+export INPUT_METHOD=fcitx
+# In the KDE Wayland session (Ubuntu 26.04+) run Chrome as a native Wayland
+# client so it renders through kwin's NVIDIA EGL and gets GPU-accelerated
+# compositing, WebGL and NVDEC video decode. The X11/Xvfb path only exposes
+# llvmpipe (software). Fall back to X11 on non-Wayland (22.04/24.04) sessions.
+if [ -n "${WAYLAND_DISPLAY}" ] && [ -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ]; then
+  OZONE_FLAGS="--ozone-platform=wayland"
+else
+  OZONE_FLAGS="--ozone-platform=x11 --in-process-gpu"
+fi
+exec "${CHROME_BIN}" --password-store=basic ${OZONE_FLAGS} --no-sandbox ${CHROME_EXTRA_FLAGS} "$@"
+EOF_GCW
     chmod 755 /usr/local/bin/google-chrome-wrapped
     for chrome_bin in google-chrome-beta google-chrome-unstable; do
       if [ -x "/usr/bin/${chrome_bin}" ]; then
