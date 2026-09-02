@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # Base image must be provided via --build-arg BASE_IMAGE=<image>
 ARG BASE_IMAGE=scratch
 FROM ${BASE_IMAGE}
@@ -7,9 +9,6 @@ ARG USER_UID
 ARG USER_GID
 ARG VIDEO_GID=""
 ARG RENDER_GID=""
-# Note: USER_PASSWORD is used only during image build for initial setup.
-# It is not stored in the image layers. Change password after first login.
-ARG USER_PASSWORD=""
 ARG HOST_HOSTNAME="Docker-Host"
 ARG USER_LANGUAGE="en"
 ARG USER_LANG_ENV="en_US.UTF-8"
@@ -23,7 +22,9 @@ ENV HOME="/home/${USER_NAME}" \
     LANGUAGE="${USER_LANGUAGE_ENV}" \
     LC_ALL="${USER_LANG_ENV}"
 
-RUN set -eux; \
+RUN --mount=type=secret,id=user_password \
+  set -eu; \
+  USER_PASSWORD="$(cat /run/secrets/user_password 2>/dev/null || true)"; \
   TARGET_USER="${USER_NAME}"; \
   TARGET_UID="${USER_UID}"; \
   TARGET_GID="${USER_GID}"; \
@@ -175,10 +176,10 @@ RUN set -eux; \
   mkdir -p /defaults /app /opt/selkies-env && \
   chown -R "${TARGET_UID}:${TARGET_GID}" /defaults /app /opt/selkies-env
 
-# optional Japanese locale and input (toggle via USER_LANGUAGE=ja)
+# optional Japanese locale and input (toggle via USER_LANGUAGE=jp)
 RUN set -eux; \
   LANG_SEL="$(echo "${USER_LANGUAGE}" | tr '[:upper:]' '[:lower:]')" ; \
-  if [ "${LANG_SEL}" = "ja" ] || [ "${LANG_SEL}" = "ja_jp" ] || [ "${LANG_SEL}" = "ja-jp" ]; then \
+  if [ "${LANG_SEL}" = "jp" ]; then \
     UBUNTU_VERSION="$(. /etc/os-release && echo ${VERSION_ID})"; \
     if dpkg --compare-versions "$UBUNTU_VERSION" ge "26.04"; then \
       # Ubuntu 26.04+ (Plasma 6): use fcitx5
@@ -366,7 +367,7 @@ RUN set -eux; \
 # Set fcitx environment variables globally when Japanese locale is selected
 ARG USER_LANGUAGE
 RUN LANG_SEL="$(echo "${USER_LANGUAGE}" | tr '[:upper:]' '[:lower:]')" ; \
-  if [ "${LANG_SEL}" = "ja" ] || [ "${LANG_SEL}" = "ja_jp" ] || [ "${LANG_SEL}" = "ja-jp" ]; then \
+  if [ "${LANG_SEL}" = "jp" ]; then \
     UBUNTU_VERSION="$(. /etc/os-release && echo ${VERSION_ID})"; \
     mkdir -p /etc/profile.d; \
     if dpkg --compare-versions "$UBUNTU_VERSION" ge "26.04"; then \

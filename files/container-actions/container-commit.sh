@@ -98,7 +98,8 @@ kdialog_progress=$(kdialog --progressbar "Saving container image..." 0 2>/dev/nu
 # Execute a normal layered commit or merge only the newest two commit layers.
 if [[ "${commit_mode}" == "history" ]]; then
     set +e
-    save_output=$("${DOCKER_CMD[@]}" commit "${REAL_CONTAINER_NAME}" "${DEFAULT_IMAGE}" 2>&1)
+    save_output=$("${DOCKER_CMD[@]}" commit --message "Container Commit" \
+        "${REAL_CONTAINER_NAME}" "${DEFAULT_IMAGE}" 2>&1)
     save_status=$?
     set -e
 else

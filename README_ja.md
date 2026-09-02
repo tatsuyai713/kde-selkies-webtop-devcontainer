@@ -35,7 +35,7 @@
 - **Docker モード切替** — `--docker-mode dood`（ホスト socket）または `dind`（コンテナ内 dockerd）。
 - **ブラウザのみでアクセス** — 起動後 `https://localhost:<30000+UID>` にアクセス。SSH/RDP の配布不要。
 - **安全なパスワード** — 環境変数で設定。コマンドやログに表示されない。
-- **多言語対応** — ビルド時に `-l ja` で日本語入力（Mozc）、タイムゾーン、ロケールを設定。
+- **多言語対応** — ビルド時に `-l jp` で日本語入力、タイムゾーン、ロケールを設定。
 - **バージョン固定** — VirtualGL 3.1.4、Pixelflux 1.6.0、Selkies（デフォルトで最新 `main`、`SELKIES_COMMIT` ビルド引数で固定可能）により再現可能なビルドを保証。
 
 ## 対応環境
@@ -55,7 +55,7 @@
 ```bash
 # 1. ユーザーイメージをビルド（1-2分、ベースイメージは GHCR から自動取得）
 ./build-user-image.sh                    # 英語（デフォルト）
-./build-user-image.sh -l ja              # 日本語環境
+./build-user-image.sh -l jp              # 日本語環境
 ./build-user-image.sh -u 22.04           # Ubuntu 22.04
 ./build-user-image.sh -u 26.04           # Ubuntu 26.04（X11/Xvfb）
 
@@ -226,7 +226,7 @@ vainfo  # VAProfileH264Main : VAEntrypointEncSlice が表示されること
 ./build-user-image.sh
 
 # 日本語
-./build-user-image.sh -l ja
+./build-user-image.sh -l jp
 
 # パスワードプロンプトをスキップ
 USER_PASSWORD=yourpass ./build-user-image.sh
@@ -317,7 +317,7 @@ USER_PASSWORD=yourpass ./build-user-image.sh
 ./flatten-container.sh
 ```
 
-Flatten後も、ENTRYPOINT、環境変数、公開ポート、ボリューム定義、ラベル、ユーザー、作業ディレクトリなどの実行設定は維持されます。通常の `docker commit` と同様、ボリュームやバインドマウントから提供される内容はイメージに含まれません。
+Flatten後も、ENTRYPOINT、環境変数、公開ポート、ボリューム定義、ラベル、ヘルスチェック、ユーザー、作業ディレクトリなどの実行設定を検証して維持します。通常の `docker commit` と同様、ボリュームやバインドマウントから提供される内容はイメージに含まれません。
 
 実行中コンテナは削除されるまで古いレイヤーを参照します。安全にコンテナを削除した後、`docker image prune` を実行すると、タグの外れた古いレイヤーの容量を回収できます。
 
@@ -369,7 +369,7 @@ IMAGE_NAME=ghcr.io/you/your-base ./files/push-base-image.sh
 
 | スクリプト | 説明 | 使い方 |
 |---|---|---|
-| `build-user-image.sh` | ユーザー固有イメージをビルド | `./build-user-image.sh [-l ja] [-u 22.04|24.04|26.04]` |
+| `build-user-image.sh` | ユーザー固有イメージをビルド | `./build-user-image.sh [-l jp] [-u 22.04|24.04|26.04]` |
 | `start-container.sh` | コンテナを起動/再開 | `./start-container.sh [--encoder <type>]` |
 | `configure-container.sh` | 保存済みの起動設定を作成・編集 | `./configure-container.sh [--config <file>]` |
 | `create-devcontainer-config.sh` | Dev Container 設定を生成 | `./create-devcontainer-config.sh` |

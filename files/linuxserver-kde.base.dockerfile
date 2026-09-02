@@ -488,6 +488,15 @@ RUN \
     test -f "${PIXELFLUX_WHL}" && \
     echo "Installing pixelflux from local wheel for Ubuntu 22.04: ${PIXELFLUX_WHL}" && \
     /opt/selkies-env/bin/pip install --force-reinstall "${PIXELFLUX_WHL}"; \
+  elif [ "$(dpkg --print-architecture)" = "arm64" ] && [ "${UBUNTU_VERSION}" = "22.04" ]; then \
+    PIXELFLUX_WHL="/tmp/pixelflux-1.4.7-cp310-cp310-manylinux_2_28_aarch64.whl" && \
+    PIXELFLUX_URL="https://files.pythonhosted.org/packages/4f/6e/832ed1b22373e0a1b80826b5dab8d38634a7f4db2bf7254b0aaea4dfe928/$(basename "${PIXELFLUX_WHL}")" && \
+    PIXELFLUX_SHA256="650ba1dbfafceb8b64ebdbee7e935928a705c341e7bc2336b6c9942bc4b7bcd3" && \
+    echo "Installing Jammy-compatible pixelflux wheel for Ubuntu 22.04 arm64: ${PIXELFLUX_WHL}" && \
+    curl -fL --retry 3 -o "${PIXELFLUX_WHL}" "${PIXELFLUX_URL}" && \
+    echo "${PIXELFLUX_SHA256}  ${PIXELFLUX_WHL}" | sha256sum -c - && \
+    /opt/selkies-env/bin/pip install --no-deps --force-reinstall "${PIXELFLUX_WHL}" && \
+    /opt/selkies-env/bin/python3 -c 'import pixelflux; capture = pixelflux.ScreenCapture(); assert capture._module'; \
   elif [ "$(dpkg --print-architecture)" = "amd64" ]; then \
     echo "Warning: Unknown Ubuntu version ${UBUNTU_VERSION}; skipping local pixelflux wheel install"; \
   else \

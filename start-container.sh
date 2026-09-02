@@ -284,6 +284,121 @@ load_yaml_config() {
   val=$(yaml_get "${file}" "shm_noexec");     [[ -n "${val}" ]] && SHM_NOEXEC="${val}"
 }
 
+print_access_info() {
+  local https_binding=""
+  local http_binding=""
+  local https_port=""
+  local http_port=""
+
+  https_binding=$(docker port "${NAME}" 3001/tcp 2>/dev/null | head -n1 || true)
+  http_binding=$(docker port "${NAME}" 3000/tcp 2>/dev/null | head -n1 || true)
+  [[ -n "${https_binding}" ]] && https_port="${https_binding##*:}"
+  [[ -n "${http_binding}" ]] && http_port="${http_binding##*:}"
+
+  echo
+  echo "Container access information"
+  echo "----------------------------"
+  echo "  Container: ${NAME}"
+  [[ -n "${https_port}" ]] && echo "  Web desktop (HTTPS): https://localhost:${https_port}"
+  [[ -n "${http_port}" ]] && echo "  Web desktop (HTTP):  http://localhost:${http_port}"
+  echo "  Logs: docker logs -f ${NAME}"
+  echo "  Stop: docker stop ${NAME}"
+  echo
+  echo "When accessing from another computer, replace localhost with the Docker host name or IP address."
+}
+
+selkies_websocket_ready() {
+  docker exec "${NAME}" /opt/selkies-env/bin/python3 -c '
+import base64
+import hashlib
+import os
+import socket
+
+key = base64.b64encode(os.urandom(16)).decode()
+request = (
+    "GET /websockets HTTP/1.1\r\n"
+    "Host: 127.0.0.1:8082\r\n"
+    "Upgrade: websocket\r\n"
+    "Connection: Upgrade\r\n"
+    "Sec-WebSocket-Key: " + key + "\r\n"
+    "Sec-WebSocket-Version: 13\r\n\r\n"
+)
+with socket.create_connection(("127.0.0.1", 8082), timeout=3) as sock:
+    sock.sendall(request.encode())
+    response = b""
+    while b"\r\n\r\n" not in response:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        response += chunk
+
+headers = response.split(b"\r\n\r\n", 1)[0].decode("latin-1")
+expected = base64.b64encode(hashlib.sha1(
+    (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+).digest()).decode()
+assert headers.startswith("HTTP/1.1 101 "), headers
+assert ("Sec-WebSocket-Accept: " + expected).lower() in headers.lower(), headers
+' >/dev/null 2>&1
+}
+
+wait_for_selkies_websocket() {
+  local timeout_seconds="$1"
+  local elapsed=0
+
+  while (( elapsed < timeout_seconds )); do
+    if selkies_websocket_ready; then
+      return 0
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  return 1
+}
+
+recover_selkies_websocket() {
+  local old_pid=""
+  local current_pid=""
+  local elapsed=0
+
+  old_pid=$(docker exec "${NAME}" pgrep -o -f '^/opt/selkies-env/bin/python3 -m selkies ' 2>/dev/null || true)
+  echo "Warning: Selkies is not responding to a WebSocket handshake; restarting only the Selkies service." >&2
+  docker exec "${NAME}" s6-svc -t /run/service/svc-selkies >/dev/null
+
+  while (( elapsed < 8 )); do
+    current_pid=$(docker exec "${NAME}" pgrep -o -f '^/opt/selkies-env/bin/python3 -m selkies ' 2>/dev/null || true)
+    if [[ -z "${old_pid}" || -z "${current_pid}" || "${current_pid}" != "${old_pid}" ]]; then
+      break
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  current_pid=$(docker exec "${NAME}" pgrep -o -f '^/opt/selkies-env/bin/python3 -m selkies ' 2>/dev/null || true)
+  if [[ -n "${old_pid}" && "${current_pid}" == "${old_pid}" ]]; then
+    echo "Warning: Selkies did not stop after TERM; terminating stale PID ${old_pid}." >&2
+    docker exec "${NAME}" kill -KILL "${old_pid}" >/dev/null 2>&1 || true
+  fi
+
+  if wait_for_selkies_websocket 30; then
+    echo "Selkies WebSocket service recovered."
+    return 0
+  fi
+
+  echo "Error: Selkies WebSocket service did not recover. Check: docker logs ${NAME}" >&2
+  return 1
+}
+
+ensure_selkies_websocket() {
+  local startup_timeout="${1:-10}"
+
+  echo "Checking Selkies WebSocket readiness..."
+  if wait_for_selkies_websocket "${startup_timeout}"; then
+    echo "Selkies WebSocket is ready."
+    return 0
+  fi
+  recover_selkies_websocket
+}
+
 handle_existing_container() {
   if ! docker ps -a --format '{{.Names}}' | grep -qx "${NAME}"; then
     return 0
@@ -301,10 +416,14 @@ handle_existing_container() {
       echo "Container ${NAME} exists in status: ${status}. Starting with the previous configuration..."
       docker start "${NAME}" >/dev/null
       echo "Container ${NAME} started."
+      ensure_selkies_websocket 60
+      print_access_info
       exit 0
       ;;
     running)
       echo "Container ${NAME} is already running."
+      ensure_selkies_websocket 6
+      print_access_info
       exit 0
       ;;
     *)
@@ -895,3 +1014,6 @@ docker run -d \
   ${SSL_FLAGS[@]+"${SSL_FLAGS[@]}"} \
   ${DOCKER_MODE_FLAGS[@]+"${DOCKER_MODE_FLAGS[@]}"} \
   "$IMAGE"
+
+ensure_selkies_websocket 60
+print_access_info

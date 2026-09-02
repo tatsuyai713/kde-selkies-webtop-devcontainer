@@ -36,7 +36,7 @@ Usage: $0 [-b base_image] [-i base_image_name] [-a arch] [-p platform] [-l langu
   -u, --ubuntu     Ubuntu version (22.04, 24.04, or 26.04). Default: ${UBUNTU_VERSION}
   -a, --arch       Arch hint (amd64/arm64) to pick base tag
   -p, --platform   Platform override for buildx (e.g. linux/arm64)
-  -l, --language   Language pack to install (en or ja). Default: ${USER_LANGUAGE}
+  -l, --language   Language pack to install (en or jp). Default: ${USER_LANGUAGE}
   -v, --version    Version tag to use (default: ${VERSION})
   -n, --no-cache   Build without cache (passes --no-cache to buildx)
   (env) USER_PASSWORD  Password to set for the user (will prompt if empty)
@@ -158,7 +158,7 @@ if ! "${DOCKER_CMD[@]}" images --format '{{.Repository}}:{{.Tag}}' | grep -q "^$
   exit 1
 fi
 
-if [[ "${USER_LANGUAGE_NORMALIZED}" == "ja" || "${USER_LANGUAGE_NORMALIZED}" == "ja_jp" || "${USER_LANGUAGE_NORMALIZED}" == "ja-jp" ]]; then
+if [[ "${USER_LANGUAGE_NORMALIZED}" == "jp" ]]; then
   LANG_ARG="ja_JP.UTF-8"
   LANGUAGE_ARG="ja_JP:ja"
 fi
@@ -184,6 +184,7 @@ else
   echo "Native architecture build detected (host: ${HOST_NATIVE_ARCH}, target: ${TARGET_ARCH})"
 fi
 
+export USER_PASSWORD
 "${DOCKER_CMD[@]}" buildx build \
   --platform "${PLATFORM}" \
   ${NO_CACHE_FLAG} \
@@ -194,7 +195,7 @@ fi
   --build-arg USER_GID="${USER_GID}" \
   --build-arg VIDEO_GID="${VIDEO_GID}" \
   --build-arg RENDER_GID="${RENDER_GID}" \
-  --build-arg USER_PASSWORD="${USER_PASSWORD}" \
+  --secret id=user_password,env=USER_PASSWORD \
   --build-arg USER_LANGUAGE="${USER_LANGUAGE}" \
   --build-arg USER_LANG_ENV="${LANG_ARG}" \
   --build-arg USER_LANGUAGE_ENV="${LANGUAGE_ARG}" \
