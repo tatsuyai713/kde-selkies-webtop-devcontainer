@@ -7,3 +7,4 @@ ssl
 .devcontainer/
 .env
 configs/
+files/ghcr.txt

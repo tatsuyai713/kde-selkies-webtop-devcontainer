@@ -13,8 +13,13 @@ VFBCOMMAND=""
 if ! which nvidia-smi && [ -e "/dev/dri/renderD128" ]; then
   VFBCOMMAND="-vfbdevice /dev/dri/renderD128"
 fi
-if [ ! -z ${DRINODE+x} ]; then
+if [ -n "${DRINODE:-}" ]; then
   VFBCOMMAND="-vfbdevice ${DRINODE}"
+elif [ -n "${DRI_NODE:-}" ]; then
+  # start-container.sh exposes the selected Intel/AMD render node as DRI_NODE.
+  # Use the same device for Xvfb DRI3 so KWin and the encoder stay on the
+  # requested GPU, including hybrid/multi-GPU hosts.
+  VFBCOMMAND="-vfbdevice ${DRI_NODE}"
 fi
 if [ "${DISABLE_DRI3}" != "false" ]; then
   VFBCOMMAND=""

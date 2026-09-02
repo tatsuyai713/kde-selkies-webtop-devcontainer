@@ -45,7 +45,7 @@
 | **Ubuntu + NVIDIA GPU** | ✅ | ✅ | ✅ NVENC | 最高パフォーマンス |
 | **Ubuntu + Intel GPU** | ✅ | ✅ | ✅ VA-API (QSV) | 統合GPU可 |
 | **Ubuntu + AMD GPU** | ✅ | ✅ | ✅ VA-API | RDNA / GCN |
-| **WSL2 + NVIDIA GPU** | ❌ ソフトウェア | ❌ ソフトウェア | ✅ NVENC | エンコードは動作、レンダリングはソフトウェア |
+| **WSL2 + NVIDIA GPU** | ✅ Mesa D3D12 | ✅ WebGL / ⚠️ Vulkan | ✅ NVENC | `/dev/dxg` 経由のOpenGL＋NVENC |
 | **macOS (Docker Desktop)** | ❌ | ❌ ソフトウェア | ❌ | VM 制限あり。ワークフローは同一 |
 
 ---
@@ -565,9 +565,10 @@ docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pact
 - ハードウェアアクセラレーションが必要な場合は Linux 実機または WSL2 を使用
 
 ### WSL2
-- NVIDIA GPU のみ対応
-- レンダリングはソフトウェア（llvmpipe）、WebGL/Vulkan もソフトウェアのみ
-- ハードウェアエンコード（NVENC）は `--encoder nvidia-wsl` で動作
+- `--encoder nvidia-wsl` は `/dev/dxg` とWSLgライブラリをコンテナへ渡し、Mesa D3D12でOpenGLをGPU実行
+- `MESA_D3D12_DEFAULT_ADAPTER_NAME` のデフォルトは `NVIDIA`。ハイブリッドGPUでは任意のアダプター名の部分文字列に変更可能
+- ハードウェアエンコード（NVENC）はOpenGLとは独立してPixelfluxから使用
+- VulkanはWSL/MesaのDozen（dzn）ドライバー提供状況に依存。OpenGL/WebGLのD3D12高速化には不要
 
 ---
 
@@ -602,6 +603,7 @@ docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pact
 |---|---|---|
 | `ENCODER` | エンコーダー種別 | （未設定） |
 | `GPU_VENDOR` | GPU ベンダー | `software` |
+| `MESA_D3D12_DEFAULT_ADAPTER_NAME` | WSL2で使用するGPU名の部分文字列 | `NVIDIA` |
 | `DOCKER_MODE` | Docker モード | `dind` |
 
 #### ネットワーク

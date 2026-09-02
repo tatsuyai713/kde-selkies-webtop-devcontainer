@@ -32,9 +32,28 @@ def main():
         print("patch-selkies-pixelflux2: selkies.py not found; skipping")
         return 0
     s = open(path).read()
+    old_wayland_bootstrap = "            _pf_v2_module.ensure_wayland_display()"
+    gpu_wayland_bootstrap = '''            _pf_render_node = _pf_os.environ.get("DRI_NODE", "")
+            _pf_auto_gpu = _pf_os.environ.get("SELKIES_AUTO_GPU", "")
+            if not _pf_render_node and not _pf_auto_gpu:
+                _pf_auto_gpu = "true"
+            _pf_v2_module.ensure_wayland_display(
+                render_node=_pf_render_node,
+                auto_gpu=_pf_auto_gpu,
+            )'''
+
     if "_CSCompat" in s:
-        print("patch-selkies-pixelflux2: already applied")
-        return 0
+        if old_wayland_bootstrap in s:
+            s = s.replace(old_wayland_bootstrap, gpu_wayland_bootstrap, 1)
+            open(path, "w").write(s)
+            import py_compile
+            py_compile.compile(path, doraise=True)
+            print("patch-selkies-pixelflux2: upgraded Wayland bootstrap in", path)
+            return 0
+        if "_pf_render_node" in s:
+            print("patch-selkies-pixelflux2: already applied")
+            return 0
+        raise RuntimeError("existing pixelflux2 patch has an unsupported Wayland bootstrap")
 
     old_import = "    from pixelflux import CaptureSettings, ScreenCapture, StripeCallback\n"
     new_import = """    try:
@@ -47,7 +66,14 @@ def main():
         import os as _pf_os
         if _pf_os.environ.get("PIXELFLUX_WAYLAND", "").lower() == "true":
             import pixelflux as _pf_v2_module
-            _pf_v2_module.ensure_wayland_display()
+            _pf_render_node = _pf_os.environ.get("DRI_NODE", "")
+            _pf_auto_gpu = _pf_os.environ.get("SELKIES_AUTO_GPU", "")
+            if not _pf_render_node and not _pf_auto_gpu:
+                _pf_auto_gpu = "true"
+            _pf_v2_module.ensure_wayland_display(
+                render_node=_pf_render_node,
+                auto_gpu=_pf_auto_gpu,
+            )
 
     import types as _pf_types
 

@@ -11,6 +11,10 @@ export KDE_FULL_SESSION=true
 export KDE_SESSION_VERSION=6
 export QT_QPA_PLATFORM=wayland
 export QT_QPA_PLATFORMTHEME=kde
+# KWin otherwise silently falls back to QPainter when the nested compositor
+# starts without dmabuf support. Pixelflux is initialized on the selected GPU
+# before Plasma starts, so require the OpenGL 2 renderer for GPU compositing.
+export KWIN_COMPOSE=O2
 # kwin_wayland_wrapper puts Xwayland on :0. The container-level DISPLAY=:1
 # points at the fallback Xvfb, which is invisible in the Wayland session, so
 # X11 apps (e.g. Chrome with --ozone-platform=x11) must target :0 here.
@@ -53,6 +57,15 @@ if [ -n "${KWRITECONFIG}" ]; then
   "${KWRITECONFIG}" --file "${HOME}/.config/kcmfonts" --group General --key forceFontDPI 96
   "${KWRITECONFIG}" --file "${HOME}/.config/kdeglobals" --group KScreen --key ScaleFactor 1
   "${KWRITECONFIG}" --file "${HOME}/.config/kdeglobals" --group KScreen --key ScreenScaleFactors --delete 2>/dev/null || true
+
+  # Restore the GPU-only effects expected from the KDE desktop, but preserve a
+  # user's later choice to disable either effect.
+  if ! grep -q '^wobblywindowsEnabled=' "${HOME}/.config/kwinrc" 2>/dev/null; then
+    "${KWRITECONFIG}" --file "${HOME}/.config/kwinrc" --group Plugins --key wobblywindowsEnabled true
+  fi
+  if ! grep -q '^translucencyEnabled=' "${HOME}/.config/kwinrc" 2>/dev/null; then
+    "${KWRITECONFIG}" --file "${HOME}/.config/kwinrc" --group Plugins --key translucencyEnabled true
+  fi
 fi
 
 if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
@@ -70,6 +83,24 @@ if [ -z "${WAYLAND_DISPLAY:-}" ]; then
     export WAYLAND_DISPLAY=wayland-1
   else
     export WAYLAND_DISPLAY=wayland-0
+  fi
+fi
+
+# Pixelflux creates the Wayland socket before its EGL renderer and globals are
+# fully ready. Starting KWin in that short window makes Qt repeatedly abort and
+# can delay Plasma for about a minute. Probe the real Wayland EGL display first
+# so the initial KWin process starts directly with the selected GPU's OpenGL.
+if command -v eglinfo >/dev/null 2>&1; then
+  EGL_READY=false
+  for _ in $(seq 1 120); do
+    if eglinfo -B -p wayland >/dev/null 2>&1; then
+      EGL_READY=true
+      break
+    fi
+    sleep .25
+  done
+  if [[ "${EGL_READY}" != true ]]; then
+    echo "WARNING: Wayland EGL did not become ready; KWin will attempt startup anyway." >&2
   fi
 fi
 
@@ -97,7 +128,7 @@ if command -v dbus-update-activation-environment >/dev/null 2>&1; then
     DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP DESKTOP_SESSION \
     KDE_FULL_SESSION KDE_SESSION_VERSION QT_QPA_PLATFORM QT_QPA_PLATFORMTHEME \
     XDG_RUNTIME_DIR HOME LANG LANGUAGE LC_ALL \
-    DPI SCALE_FACTOR \
+    DPI SCALE_FACTOR KWIN_COMPOSE \
     GTK_IM_MODULE QT_IM_MODULE SDL_IM_MODULE GLFW_IM_MODULE \
     XMODIFIERS INPUT_METHOD DBUS_SESSION_BUS_ADDRESS \
     PULSE_SERVER \

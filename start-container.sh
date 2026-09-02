@@ -720,13 +720,15 @@ case "${GPU_VENDOR}" in
     else
       echo "Warning: /dev/dxg not found. Are you running on WSL2?" >&2
     fi
-    if [ -d "/usr/lib/wsl/lib" ]; then
-      GPU_FLAGS+=(-v /usr/lib/wsl/lib:/usr/lib/wsl/lib:ro)
+    if [ -d "/dev/dri" ]; then
+      GPU_FLAGS+=(--device=/dev/dri:/dev/dri:rwm)
+    fi
+    if [ -d "/usr/lib/wsl" ]; then
+      GPU_FLAGS+=(-v /usr/lib/wsl:/usr/lib/wsl:ro)
     fi
     if [ -d "/mnt/wslg" ]; then
       GPU_FLAGS+=(-v /mnt/wslg:/mnt/wslg:rw)
       GPU_FLAGS+=(-v /mnt/wslg/.X11-unix:/tmp/.X11-unix:rw)
-      GPU_FLAGS+=(-v /usr/lib/wsl/drivers:/usr/lib/wsl/drivers:ro)
     fi
     GPU_ENV_VARS+=(
       -e ENABLE_NVIDIA=true
@@ -734,6 +736,13 @@ case "${GPU_VENDOR}" in
       -e DISABLE_ZINK=true
       -e XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir
       -e LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}
+      -e GALLIUM_DRIVER=d3d12
+      -e MESA_LOADER_DRIVER_OVERRIDE=d3d12
+      -e MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-NVIDIA}"
+      -e LIBGL_ALWAYS_SOFTWARE=0
+      -e LIBVA_DRIVER_NAME=d3d12
+      -e __GLX_VENDOR_LIBRARY_NAME=mesa
+      -e __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
     )
     ;;
   *)

@@ -45,7 +45,7 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 | **Ubuntu + NVIDIA GPU** | ✅ | ✅ | ✅ NVENC | Best performance |
 | **Ubuntu + Intel GPU** | ✅ | ✅ | ✅ VA-API (QSV) | Integrated GPU OK |
 | **Ubuntu + AMD GPU** | ✅ | ✅ | ✅ VA-API | RDNA / GCN |
-| **WSL2 + NVIDIA GPU** | ❌ Software | ❌ Software | ✅ NVENC | Encoding works, rendering is software |
+| **WSL2 + NVIDIA GPU** | ✅ Mesa D3D12 | ✅ WebGL / ⚠️ Vulkan | ✅ NVENC | OpenGL through `/dev/dxg` plus NVENC |
 | **macOS (Docker Desktop)** | ❌ | ❌ Software | ❌ | VM limitation; workflow is identical |
 
 ---
@@ -606,9 +606,11 @@ Check browser audio permissions and use HTTPS (some browsers block audio over HT
 - Use native Linux or WSL2 for hardware acceleration
 
 ### WSL2
-- Only NVIDIA GPUs are supported
-- Rendering is software (llvmpipe); WebGL/Vulkan are software-only
-- Hardware encoding (NVENC) works via `--encoder nvidia-wsl`
+- The `nvidia-wsl` encoding profile requires NVIDIA for NVENC; Mesa D3D12 can select a different render adapter on hybrid systems
+- `--encoder nvidia-wsl` passes `/dev/dxg` and the WSLg libraries into the container, enabling GPU OpenGL through Mesa D3D12
+- `MESA_D3D12_DEFAULT_ADAPTER_NAME` defaults to `NVIDIA`; on hybrid systems it can be changed to a substring of the preferred adapter name
+- Pixelflux uses NVENC independently from the OpenGL rendering path
+- Vulkan depends on whether the WSL/Mesa Dozen (`dzn`) driver is available; it is not required for accelerated OpenGL/WebGL
 
 ---
 
@@ -643,6 +645,7 @@ Check browser audio permissions and use HTTPS (some browsers block audio over HT
 |---|---|---|
 | `ENCODER` | Encoder type | (unset) |
 | `GPU_VENDOR` | GPU vendor | `software` |
+| `MESA_D3D12_DEFAULT_ADAPTER_NAME` | GPU name substring selected on WSL2 | `NVIDIA` |
 | `DOCKER_MODE` | Docker mode | `dind` |
 
 #### Network
