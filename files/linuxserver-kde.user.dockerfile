@@ -364,6 +364,18 @@ RUN set -eux; \
     fi; \
   fi
 
+# im-config (pulled in by kubuntu-desktop) logs through systemd-cat whenever the
+# binary exists. There is no journald in the container, so every login shell
+# printed "Failed to create stream fd: No such file or directory" three times
+# via /etc/profile.d/im-config_wayland.sh. Only use systemd-cat when the journal
+# stdout socket is actually present; otherwise im-config falls back to logger,
+# which is silent without a syslog socket.
+RUN set -eux; \
+  if [ -f /usr/share/im-config/initializer ]; then \
+    sed -i 's|^if \[ -e /usr/bin/systemd-cat \] ; then$|if [ -e /usr/bin/systemd-cat ] \&\& [ -S /run/systemd/journal/stdout ] ; then|' \
+      /usr/share/im-config/initializer; \
+  fi
+
 # Set fcitx environment variables globally when Japanese locale is selected
 ARG USER_LANGUAGE
 RUN LANG_SEL="$(echo "${USER_LANGUAGE}" | tr '[:upper:]' '[:lower:]')" ; \
@@ -621,3 +633,34 @@ fi
 EOF
 
 # Keep default USER=root so s6 init can modify system paths.
+
+# The base image already carries this service definition, but re-copy it here so
+# the "wait for the socket selkies actually created" fix ships with a user-image
+# rebuild instead of requiring a full base rebuild.
+COPY --chmod=755 ubuntu-root/etc/s6-overlay/s6-rc.d/svc-de/run /etc/s6-overlay/s6-rc.d/svc-de/run
+
+# Same reasoning for svc-selkies/run (XKB_DEFAULT_* export for Japanese sessions)
+# and for the selkies keymap patch below: both live in the base image, so apply
+# them here too so a user-image rebuild is enough.
+COPY --chmod=755 ubuntu-root/etc/s6-overlay/s6-rc.d/svc-selkies/run /etc/s6-overlay/s6-rc.d/svc-selkies/run
+COPY --chmod=755 ubuntu-root/usr/local/bin/patch-selkies-wayland-keymap.py /usr/local/bin/patch-selkies-wayland-keymap.py
+# selkies on Wayland hard-codes a US layout when mapping browser keysyms to
+# scancodes, while KWin interprets them with the session layout (jp for
+# Japanese builds): Shift+2 came out as '*' and Shift+8 as ')'. Build the map
+# from XKB_DEFAULT_* so both sides agree.
+RUN if [ -x /opt/selkies-env/bin/python3 ]; then \
+      /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-wayland-keymap.py; \
+    fi
+
+# WSL2 GPU compositing. KWin 6.6 asks gbm for SCANOUT|RENDERING buffers and
+# Mesa's d3d12 driver refuses SCANOUT, so on WSL2 KWin could only ever fall back
+# to QPainter. This tiny shim drops the flag (see the source for details);
+# startwm_wayland.sh preloads it into the session on WSL2 hosts only.
+# kwin_wayland carries cap_sys_nice, which makes glibc ignore LD_PRELOAD, so the
+# capability is removed here -- realtime scheduling is not available to the
+# compositor inside the container anyway.
+COPY ubuntu-root/usr/local/src/kwin-d3d12-noscanout.c /usr/local/src/kwin-d3d12-noscanout.c
+RUN set -eux; \
+  gcc -shared -fPIC -O2 -Wall -o /usr/local/lib/kwin-d3d12-noscanout.so /usr/local/src/kwin-d3d12-noscanout.c -ldl; \
+  chmod 755 /usr/local/lib/kwin-d3d12-noscanout.so; \
+  if [ -x /usr/bin/kwin_wayland ]; then setcap -r /usr/bin/kwin_wayland || true; fi

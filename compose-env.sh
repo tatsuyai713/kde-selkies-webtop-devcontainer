@@ -10,7 +10,7 @@ show_usage() {
 Usage: compose-env.sh [options]
 
 Options (same as start-container.sh):
-  -e, --encoder <type>   Encoder: software, nvidia, nvidia-wsl, intel, amd (required)
+  -e, --encoder <type>   Encoder: software, nvidia, nvidia-wsl, intel, amd, intel-wsl, amd-wsl (required)
     -g, --gpu <value>      Docker --gpus value (optional): all or device=0,1
             --all              Shortcut for --gpu all
             --num <list>       Shortcut for --gpu device=<list>
@@ -35,6 +35,7 @@ Environment overrides:
   SSL: SSL_DIR
   Container: CONTAINER_NAME, CONTAINER_HOSTNAME
   Image: IMAGE_BASE, IMAGE_TAG
+  WSL2 GPU policy: WSL_GPU_MODE (full|compositor|software), WSL_QTQUICK_GPU, WSL_INTEL_VAAPI
 EOF
 }
 
@@ -258,7 +259,7 @@ case "${ENCODER}" in
     software|none|cpu)
         ENCODER="software"
         ;;
-    nvidia|nvidia-wsl|intel|amd)
+    nvidia|nvidia-wsl|intel|amd|intel-wsl|amd-wsl)
         ;;
     *)
         echo "Error: Unknown encoder: ${ENCODER}" >&2
@@ -387,29 +388,95 @@ HOST_MNT_MOUNT="/home/${HOST_USER}/host_mnt"
 
 # GPU configuration
 # Note: pixelflux handles hardware encoding automatically based on GPU_VENDOR
+#
+# Values destined for the container's environment carry a RUNTIME_ prefix (like
+# RUNTIME_TZ / RUNTIME_LANG above). docker compose interpolates ${VAR} in the
+# compose file from the invoking shell FIRST and only falls back to the env
+# file, so an unprefixed key here would be silently replaced by the host
+# session's own value. On WSLg that is exactly what happened to WAYLAND_DISPLAY:
+# the host exports wayland-0, the desktop then waited forever for a socket
+# selkies never creates, and the browser only ever saw a black stream.
 ENABLE_NVIDIA="false"
-LIBVA_DRIVER_NAME=""
-NVIDIA_VISIBLE_DEVICES=""
+RUNTIME_LIBVA_DRIVER_NAME=""
+RUNTIME_NVIDIA_VISIBLE_DEVICES=""
 GPU_DEVICES=""
 WSL_ENVIRONMENT="false"
+# WSL2 GPU policy for the desktop session (see startwm_wayland.sh): full |
+# compositor | software. Empty = per-profile default (nvidia-wsl / amd-wsl:
+# full, intel-wsl: software). WSL_QTQUICK_GPU=1 re-enables GPU Qt Quick in
+# "full" mode on intel-wsl.
+WSL_GPU_MODE="${WSL_GPU_MODE:-}"
+WSL_QTQUICK_GPU="${WSL_QTQUICK_GPU:-}"
+# WSL_INTEL_VAAPI=1: let pixelflux try Mesa d3d12 VA-API encoding on intel-wsl
+# (broken with Intel driver 32.0.101.8517: empty frames; x264 otherwise).
+WSL_INTEL_VAAPI="${WSL_INTEL_VAAPI:-}"
 DISABLE_ZINK="false"
-XDG_RUNTIME_DIR=""
-LD_LIBRARY_PATH=""
-GALLIUM_DRIVER=""
-MESA_LOADER_DRIVER_OVERRIDE=""
-MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-}"
-LIBGL_ALWAYS_SOFTWARE=""
-__GLX_VENDOR_LIBRARY_NAME=""
-__EGL_VENDOR_LIBRARY_FILENAMES=""
+RUNTIME_XDG_RUNTIME_DIR=""
+RUNTIME_LD_LIBRARY_PATH=""
+RUNTIME_GALLIUM_DRIVER=""
+RUNTIME_MESA_LOADER_DRIVER_OVERRIDE=""
+RUNTIME_MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-}"
+RUNTIME_LIBGL_ALWAYS_SOFTWARE=""
+RUNTIME_GLX_VENDOR_LIBRARY_NAME=""
+RUNTIME_EGL_VENDOR_LIBRARY_FILENAMES=""
 PIXELFLUX_WAYLAND="false"
-WAYLAND_DISPLAY=""
+RUNTIME_WAYLAND_DISPLAY=""
 SELKIES_WAYLAND_SOCKET_INDEX=""
 
 if [ "${UBUNTU_VERSION}" = "26.04" ]; then
     PIXELFLUX_WAYLAND="true"
-    WAYLAND_DISPLAY="wayland-1"
+    RUNTIME_WAYLAND_DISPLAY="wayland-1"
     SELKIES_WAYLAND_SOCKET_INDEX="0"
 fi
+
+# WSL2 GPU path shared by nvidia-wsl / intel-wsl / amd-wsl. The GPU is reached
+# through /dev/dxg and Mesa's d3d12 gallium driver, which is vendor-neutral: the
+# Windows (WDDM) driver's Linux user-mode library under /usr/lib/wsl/drivers
+# does the actual work for NVIDIA, Intel and AMD alike. Only the DXCore adapter
+# name substring differs, which is what $1 supplies as the default.
+# $2 is the gallium driver for the container-level (non-session) processes,
+# i.e. pixelflux's EGL renderer: "d3d12" renders on the GPU, "llvmpipe" keeps
+# the GPU untouched. intel-wsl passes llvmpipe: the Intel Windows driver hangs
+# under Mesa d3d12 load (the TDR takes the host display down) and its D3D12
+# video encoder returns empty frames, so the Intel GPU is not used at all
+# unless WSL_INTEL_VAAPI=1 (svc-selkies then switches pixelflux to d3d12 for
+# VA-API). The desktop session's own policy is WSL_GPU_MODE.
+configure_wsl_d3d12_runtime() {
+    local default_adapter="$1"
+    local gallium_driver="${2:-d3d12}"
+    WSL_ENVIRONMENT="true"
+    DISABLE_ZINK="true"
+    # No XDG_RUNTIME_DIR override: /mnt/wslg/runtime-dir belongs to WSLg's
+    # own compositor. The container runs its own selkies/KWin stack out of
+    # $HOME/.XDG, which init-selkies-config sets up.
+    RUNTIME_LD_LIBRARY_PATH="/usr/lib/wsl/lib"
+    RUNTIME_GALLIUM_DRIVER="${gallium_driver}"
+    # Note: d3d12 has no DRM winsys, so GL on the vgem node always ends up in
+    # the kms_swrast fallback + GALLIUM_DRIVER; the override is effectively a
+    # no-op for GL. svc-selkies unsets it for pixelflux because Mesa's d3d12
+    # VA-API driver fails to initialise while it is set.
+    RUNTIME_MESA_LOADER_DRIVER_OVERRIDE="d3d12"
+    RUNTIME_MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-${default_adapter}}"
+    RUNTIME_LIBGL_ALWAYS_SOFTWARE="0"
+    # Mesa's d3d12 VA-API driver: used by Chrome for decode on every vendor and
+    # by pixelflux for H.264 encode on intel-wsl / amd-wsl (nvidia-wsl uses NVENC).
+    RUNTIME_LIBVA_DRIVER_NAME="d3d12"
+    RUNTIME_GLX_VENDOR_LIBRARY_NAME="mesa"
+    RUNTIME_EGL_VENDOR_LIBRARY_FILENAMES="/usr/share/glvnd/egl_vendor.d/50_mesa.json"
+    if [ -e "/dev/dxg" ]; then
+        GPU_DEVICES="/dev/dxg:/dev/dxg:rwm"
+    else
+        echo "Warning: /dev/dxg not found. Are you running on WSL2?" >&2
+    fi
+    # /dev/dri on WSL2 is the vgem render node (sudo modprobe vgem). It is
+    # what lets pixelflux advertise linux-dmabuf so KWin can composite on
+    # the GPU (together with the kwin-d3d12-noscanout shim in the image).
+    # The container is privileged, so the node would leak in anyway; pass
+    # it explicitly to keep the dependency visible.
+    if [ -d "/dev/dri" ]; then
+        GPU_DEVICES="${GPU_DEVICES:+${GPU_DEVICES},}/dev/dri:/dev/dri:rwm"
+    fi
+}
 
 case "${GPU_VENDOR}" in
     nvidia)
@@ -421,26 +488,20 @@ case "${GPU_VENDOR}" in
         ;;
     nvidia-wsl)
         ENABLE_NVIDIA="true"
-        WSL_ENVIRONMENT="true"
-        DISABLE_ZINK="true"
-        XDG_RUNTIME_DIR="/mnt/wslg/runtime-dir"
-        LD_LIBRARY_PATH="/usr/lib/wsl/lib"
-        GALLIUM_DRIVER="d3d12"
-        MESA_LOADER_DRIVER_OVERRIDE="d3d12"
-        MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-NVIDIA}"
-        LIBGL_ALWAYS_SOFTWARE="0"
-        LIBVA_DRIVER_NAME="d3d12"
-        __GLX_VENDOR_LIBRARY_NAME="mesa"
-        __EGL_VENDOR_LIBRARY_FILENAMES="/usr/share/glvnd/egl_vendor.d/50_mesa.json"
-        if [ -e "/dev/dxg" ]; then
-            GPU_DEVICES="/dev/dxg:/dev/dxg:rwm"
-        fi
-        if [ -d "/dev/dri" ]; then
-            GPU_DEVICES="${GPU_DEVICES:+${GPU_DEVICES},}/dev/dri:/dev/dri:rwm"
-        fi
+        configure_wsl_d3d12_runtime "NVIDIA"
+        ;;
+    intel-wsl)
+        # DXCore reports Intel adapters as "Intel(R) ...". No GPU use by
+        # default (see configure_wsl_d3d12_runtime / WSL_GPU_MODE).
+        configure_wsl_d3d12_runtime "Intel" "llvmpipe"
+        ;;
+    amd-wsl)
+        # DXCore reports AMD adapters as "AMD Radeon ..." or "Radeon ...", so
+        # match on Radeon. Override with MESA_D3D12_DEFAULT_ADAPTER_NAME if needed.
+        configure_wsl_d3d12_runtime "Radeon"
         ;;
     intel)
-        LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-iHD}"
+        RUNTIME_LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-iHD}"
         if [ -d "/dev/dri" ]; then
             GPU_DEVICES="/dev/dri:/dev/dri:rwm"
         else
@@ -452,7 +513,7 @@ case "${GPU_VENDOR}" in
         fi
         ;;
     amd)
-        LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-radeonsi}"
+        RUNTIME_LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-radeonsi}"
         if [ -d "/dev/dri" ]; then
             GPU_DEVICES="/dev/dri:/dev/dri:rwm"
         else
@@ -474,9 +535,9 @@ esac
 if [ -n "${DOCKER_GPUS}" ]; then
     ENABLE_NVIDIA="true"
     if [ "${DOCKER_GPUS}" = "all" ]; then
-        NVIDIA_VISIBLE_DEVICES="all"
+        RUNTIME_NVIDIA_VISIBLE_DEVICES="all"
     elif [[ "${DOCKER_GPUS}" =~ ^device= ]]; then
-        NVIDIA_VISIBLE_DEVICES="${DOCKER_GPUS#device=}"
+        RUNTIME_NVIDIA_VISIBLE_DEVICES="${DOCKER_GPUS#device=}"
     fi
 fi
 
@@ -538,11 +599,11 @@ ENV_VARS=(
     WIDTH HEIGHT DPI STREAM_SCALE FRAMERATE SCALE_FACTOR FORCE_DEVICE_SCALE_FACTOR CHROMIUM_FLAGS SHM_SIZE RESOLUTION TIMEZONE
     RUNTIME_TZ RUNTIME_LANG RUNTIME_LC_ALL RUNTIME_LANGUAGE
     ENCODER GPU_VENDOR GPU_ALL GPU_NUMS DOCKER_GPUS DRI_NODE
-    ENABLE_NVIDIA LIBVA_DRIVER_NAME NVIDIA_VISIBLE_DEVICES GPU_DEVICES
-    WSL_ENVIRONMENT DISABLE_ZINK XDG_RUNTIME_DIR LD_LIBRARY_PATH
-    GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE MESA_D3D12_DEFAULT_ADAPTER_NAME LIBGL_ALWAYS_SOFTWARE
-    __GLX_VENDOR_LIBRARY_NAME __EGL_VENDOR_LIBRARY_FILENAMES
-    PIXELFLUX_WAYLAND WAYLAND_DISPLAY SELKIES_WAYLAND_SOCKET_INDEX
+    ENABLE_NVIDIA RUNTIME_LIBVA_DRIVER_NAME RUNTIME_NVIDIA_VISIBLE_DEVICES GPU_DEVICES
+    WSL_ENVIRONMENT DISABLE_ZINK WSL_GPU_MODE WSL_QTQUICK_GPU WSL_INTEL_VAAPI RUNTIME_XDG_RUNTIME_DIR RUNTIME_LD_LIBRARY_PATH
+    RUNTIME_GALLIUM_DRIVER RUNTIME_MESA_LOADER_DRIVER_OVERRIDE RUNTIME_MESA_D3D12_DEFAULT_ADAPTER_NAME RUNTIME_LIBGL_ALWAYS_SOFTWARE
+    RUNTIME_GLX_VENDOR_LIBRARY_NAME RUNTIME_EGL_VENDOR_LIBRARY_FILENAMES
+    PIXELFLUX_WAYLAND RUNTIME_WAYLAND_DISPLAY SELKIES_WAYLAND_SOCKET_INDEX
     SSL_DIR SSL_CERT_PATH SSL_KEY_PATH
     HOST_HOME_MOUNT HOST_MNT_MOUNT
     USER_UID USER_GID USER_NAME

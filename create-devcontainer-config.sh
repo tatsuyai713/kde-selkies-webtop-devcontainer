@@ -107,6 +107,10 @@ shared_apply_locale_from_timezone "${TIMEZONE}"
 shared_collect_interactive_settings
 TARGET_ARCH="$(shared_normalize_arch_or_die "${TARGET_ARCH}")"
 GPU_VENDOR="${ENCODER}"
+
+# Must run before compose-env.sh: it only passes /dev/dri through to the
+# container when the node already exists on the host.
+shared_ensure_wsl_render_node
 COMPOSE_ENV_SCRIPT="${SCRIPT_DIR}/compose-env.sh"
 
 if [ ! -x "${COMPOSE_ENV_SCRIPT}" ]; then
@@ -227,9 +231,15 @@ case "${GPU_VENDOR}" in
             GPU_DEVICES="/dev/dri:/dev/dri:rwm"
         fi
         ;;
-    nvidia-wsl)
+    nvidia-wsl|intel-wsl|amd-wsl)
+        # Same device set for every WSL2 vendor: the GPU is /dev/dxg, Mesa's
+        # d3d12 driver picks the adapter (see compose-env.sh).
         if [ -e "/dev/dxg" ]; then
             GPU_DEVICES="/dev/dxg:/dev/dxg:rwm"
+        fi
+        # vgem render node: needed for GPU compositing (see compose-env.sh)
+        if [ -d "/dev/dri" ]; then
+            GPU_DEVICES="${GPU_DEVICES:+${GPU_DEVICES},}/dev/dri:/dev/dri:rwm"
         fi
         ;;
 esac
@@ -356,21 +366,24 @@ services:
       - PGID=\${HOST_GID}
       - GPU_VENDOR=\${GPU_VENDOR}
       - ENABLE_NVIDIA=\${ENABLE_NVIDIA}
-      - NVIDIA_VISIBLE_DEVICES=\${NVIDIA_VISIBLE_DEVICES:-void}
-      - NVIDIA_DRIVER_CAPABILITIES=\${NVIDIA_DRIVER_CAPABILITIES:-all}
-      - LIBVA_DRIVER_NAME=\${LIBVA_DRIVER_NAME}
+      - NVIDIA_VISIBLE_DEVICES=\${RUNTIME_NVIDIA_VISIBLE_DEVICES:-void}
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - LIBVA_DRIVER_NAME=\${RUNTIME_LIBVA_DRIVER_NAME}
       - WSL_ENVIRONMENT=\${WSL_ENVIRONMENT}
+      - WSL_GPU_MODE=\${WSL_GPU_MODE}
+      - WSL_QTQUICK_GPU=\${WSL_QTQUICK_GPU}
+      - WSL_INTEL_VAAPI=\${WSL_INTEL_VAAPI}
       - DISABLE_ZINK=\${DISABLE_ZINK}
-      - XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR}
-      - LD_LIBRARY_PATH=\${LD_LIBRARY_PATH}
-      - GALLIUM_DRIVER=\${GALLIUM_DRIVER}
-      - MESA_LOADER_DRIVER_OVERRIDE=\${MESA_LOADER_DRIVER_OVERRIDE}
-      - MESA_D3D12_DEFAULT_ADAPTER_NAME=\${MESA_D3D12_DEFAULT_ADAPTER_NAME}
-      - LIBGL_ALWAYS_SOFTWARE=\${LIBGL_ALWAYS_SOFTWARE}
-      - __GLX_VENDOR_LIBRARY_NAME=\${__GLX_VENDOR_LIBRARY_NAME}
-      - __EGL_VENDOR_LIBRARY_FILENAMES=\${__EGL_VENDOR_LIBRARY_FILENAMES}
+      - XDG_RUNTIME_DIR=\${RUNTIME_XDG_RUNTIME_DIR}
+      - LD_LIBRARY_PATH=\${RUNTIME_LD_LIBRARY_PATH}
+      - GALLIUM_DRIVER=\${RUNTIME_GALLIUM_DRIVER}
+      - MESA_LOADER_DRIVER_OVERRIDE=\${RUNTIME_MESA_LOADER_DRIVER_OVERRIDE}
+      - MESA_D3D12_DEFAULT_ADAPTER_NAME=\${RUNTIME_MESA_D3D12_DEFAULT_ADAPTER_NAME}
+      - LIBGL_ALWAYS_SOFTWARE=\${RUNTIME_LIBGL_ALWAYS_SOFTWARE}
+      - __GLX_VENDOR_LIBRARY_NAME=\${RUNTIME_GLX_VENDOR_LIBRARY_NAME}
+      - __EGL_VENDOR_LIBRARY_FILENAMES=\${RUNTIME_EGL_VENDOR_LIBRARY_FILENAMES}
       - PIXELFLUX_WAYLAND=\${PIXELFLUX_WAYLAND:-false}
-      - WAYLAND_DISPLAY=\${WAYLAND_DISPLAY}
+      - WAYLAND_DISPLAY=\${RUNTIME_WAYLAND_DISPLAY}
       - SELKIES_WAYLAND_SOCKET_INDEX=\${SELKIES_WAYLAND_SOCKET_INDEX}
     volumes:
       - \${HOME}:\${HOST_HOME_MOUNT}:rw
@@ -421,15 +434,18 @@ elif [ -n "${GPU_NUMS}" ]; then
     echo "    gpus: \"device=${GPU_NUMS}\"" >> .devcontainer/docker-compose.override.yml
 fi
 
-if [ "${ENCODER}" = "nvidia-wsl" ]; then
-    # Add WSL-specific volumes
+if [[ "${ENCODER}" == *-wsl ]]; then
+    # Add WSL-specific volumes (nvidia-wsl / intel-wsl / amd-wsl). /usr/lib/wsl
+    # carries libd3d12/libdxcore plus every vendor's WDDM user-mode driver.
     if [ -d "/usr/lib/wsl" ]; then
         VOLUME_ENTRIES+=("/usr/lib/wsl:/usr/lib/wsl:ro")
     fi
-    if [ -d "/mnt/wslg" ]; then
-        VOLUME_ENTRIES+=("/mnt/wslg:/mnt/wslg:rw")
-        VOLUME_ENTRIES+=("/mnt/wslg/.X11-unix:/tmp/.X11-unix:rw")
-    fi
+    # Deliberately NOT mounting /mnt/wslg. Only /usr/lib/wsl (+ /dev/dxg) is
+    # needed for the d3d12 GPU driver. WSLg's own runtime dir and X11 socket
+    # directory belong to the host's compositor: bind-mounting
+    # /mnt/wslg/.X11-unix over /tmp/.X11-unix hands the container a root-owned
+    # tmpfs it cannot chmod, which aborts the desktop start script, and hides
+    # kwin's own Xwayland :0 behind WSLg's X server.
 fi
 
 if [ -n "${GPU_DEVICES}" ]; then

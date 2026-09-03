@@ -30,7 +30,7 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 - **Non-root by default** — Containers run under your own user. Proper permission separation, sudo when needed.
 - **Automatic UID/GID matching** — Mounted host directories just work. No "permission denied" on shared folders.
 - **Unified configuration** — `start-container.sh` (day-to-day) and `create-devcontainer-config.sh` (VS Code Dev Container) share the same interactive settings.
-- **Explicit encoder/GPU control** — `--encoder nvidia|intel|amd|software|nvidia-wsl` selects the encoder. `--all`/`--num` controls Docker GPU assignment independently.
+- **Explicit encoder/GPU control** — `--encoder nvidia|intel|amd|software|nvidia-wsl|intel-wsl|amd-wsl` selects the encoder. `--all`/`--num` controls Docker GPU assignment independently.
 - **Stream scaling** — `-S 0.5` halves the actual encoding resolution, reducing both bandwidth and encoder load.
 - **Docker mode switching** — `--docker-mode dood` (host socket) or `dind` (container-internal dockerd).
 - **Browser-only access** — `https://localhost:<30000+UID>` after startup. No SSH/RDP distribution needed.
@@ -46,6 +46,8 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 | **Ubuntu + Intel GPU** | ✅ | ✅ | ✅ VA-API (QSV) | Integrated GPU OK |
 | **Ubuntu + AMD GPU** | ✅ | ✅ | ✅ VA-API | RDNA / GCN |
 | **WSL2 + NVIDIA GPU** | ✅ Mesa D3D12 | ✅ WebGL / ⚠️ Vulkan | ✅ NVENC | OpenGL through `/dev/dxg` plus NVENC |
+| **WSL2 + Intel GPU** | ✅ Mesa D3D12 | ✅ WebGL / ⚠️ Vulkan | ⚠️ VA-API (Mesa D3D12) | `--encoder intel-wsl`; encode needs D3D12 Video Encode in the Windows driver, else x264 fallback |
+| **WSL2 + AMD GPU** | ✅ Mesa D3D12 | ✅ WebGL / ⚠️ Vulkan | ⚠️ VA-API (Mesa D3D12) | `--encoder amd-wsl`; encode needs D3D12 Video Encode in the Windows driver, else x264 fallback |
 | **macOS (Docker Desktop)** | ❌ | ❌ Software | ❌ | VM limitation; workflow is identical |
 
 ---
@@ -67,6 +69,8 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 ./start-container.sh --encoder intel                 # Intel VA-API
 ./start-container.sh --encoder amd -r 1920x1080 -S 0.5  # AMD + half stream resolution
 ./start-container.sh --encoder nvidia-wsl --all      # WSL2 + NVIDIA NVENC
+./start-container.sh --encoder intel-wsl             # WSL2 + Intel (Mesa D3D12 OpenGL + VA-API)
+./start-container.sh --encoder amd-wsl               # WSL2 + AMD (Mesa D3D12 OpenGL + VA-API)
 
 # 3. Open in browser
 #    https://localhost:<30000+UID>  (e.g. UID 1000 → https://localhost:31000)
@@ -98,6 +102,12 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 ```bash
 ./build-user-image.sh -u 22.04
 ./start-container.sh --encoder nvidia-wsl --all
+```
+
+**WSL2 + Intel / AMD**
+```bash
+sudo modprobe vgem                        # DRM render node for GPU compositing / VA-API (offered by the scripts too)
+./start-container.sh --encoder intel-wsl  # or: --encoder amd-wsl
 ```
 
 ### VS Code Dev Container
@@ -397,7 +407,7 @@ IMAGE_NAME=ghcr.io/you/your-base ./files/push-base-image.sh
 ./start-container.sh [options]
 
 Encoder / GPU:
-  -e, --encoder <type>       software | nvidia | nvidia-wsl | intel | amd
+  -e, --encoder <type>       software | nvidia | nvidia-wsl | intel | amd | intel-wsl | amd-wsl
   -g, --gpu <value>          Docker --gpus value: all or device=0,1
   --all                      Shortcut for --gpu all
   --num <list>               Shortcut for --gpu device=<list>
@@ -573,6 +583,15 @@ docker exec linuxserver-kde-$(whoami) ls -la /run/user/$(id -u)
 
 Causes: `/run/user/<uid>` missing or wrong permissions, plasmashell crash → restart the container.
 
+**On WSL2** there are two more causes, both fixed in this repository:
+
+- `docker compose` interpolates `${VAR}` in the compose file from the invoking shell *before* falling back to `.env`. WSLg exports `WAYLAND_DISPLAY=wayland-0` (and `XDG_RUNTIME_DIR`), so an unprefixed key in `.env` was silently overridden and the desktop waited forever for a socket selkies never creates. Container-bound values therefore use `RUNTIME_*` keys (`RUNTIME_WAYLAND_DISPLAY`, ...) in `.env`, and `svc-de` falls back to whichever `wayland-*` socket selkies actually created. **Always use the prefixed form when adding GPU/display variables.**
+- `/mnt/wslg` is deliberately not mounted any more. Bind-mounting `/mnt/wslg/.X11-unix` over `/tmp/.X11-unix` handed the container a root-owned tmpfs whose `chmod` failed under `set -e` in `startwm_wayland.sh`, aborting the session. Only `/usr/lib/wsl` and `/dev/dxg` are needed for the d3d12 GPU driver.
+
+If the desktop is black on WSL2 *after* loading `vgem` on the host, the user image predates the `kwin-d3d12-noscanout` shim (see [WSL2](#wsl2) under Known Limitations) — rebuild the user image.
+
+On WSL2, `docker logs` showing `D3D12: Removing Device.` followed by repeated `error in client communication` means the GPU was reset (Intel driver hang, host suspend/resume) and the pixelflux compositor lost its D3D12 device. `svc-de` now restarts selkies automatically in that case; to do it by hand: `docker exec linuxserver-kde-$(whoami) s6-svc -r /run/service/svc-selkies`.
+
 ### WebGL/Vulkan Not Working
 
 ```bash
@@ -607,11 +626,17 @@ Check browser audio permissions and use HTTPS (some browsers block audio over HT
 - Use native Linux or WSL2 for hardware acceleration
 
 ### WSL2
-- The `nvidia-wsl` encoding profile requires NVIDIA for NVENC; Mesa D3D12 can select a different render adapter on hybrid systems
-- `--encoder nvidia-wsl` passes `/dev/dxg` and the WSLg libraries into the container, enabling GPU OpenGL through Mesa D3D12
-- `MESA_D3D12_DEFAULT_ADAPTER_NAME` defaults to `NVIDIA`; on hybrid systems it can be changed to a substring of the preferred adapter name
-- Pixelflux uses NVENC independently from the OpenGL rendering path
+- `--encoder nvidia-wsl`, `intel-wsl` and `amd-wsl` all pass `/dev/dxg`, the vgem render node and the WSLg libraries (`/usr/lib/wsl`) into the container, enabling GPU OpenGL through Mesa D3D12 for every vendor; the Windows (WDDM) driver does the rendering
+- `MESA_D3D12_DEFAULT_ADAPTER_NAME` selects the D3D12 adapter by name substring and defaults to `NVIDIA`, `Intel` or `Radeon` depending on the profile; on hybrid systems set it to a substring of the preferred adapter name
+- `nvidia-wsl` encodes with NVENC, independently from the OpenGL rendering path
+- `intel-wsl` / `amd-wsl` encode with VA-API through Mesa's `d3d12` VA driver (`LIBVA_DRIVER_NAME=d3d12`), i.e. the Windows driver's D3D12 Video Encode API. Whether H.264 encode is available depends on the Windows GPU driver; pixelflux falls back to x264 software encoding when it is not (check `vainfo` inside the container)
+- Mesa's d3d12 VA driver only initialises through its vgem path, which requires `MESA_LOADER_DRIVER_OVERRIDE` to be unset and `GALLIUM_DRIVER=d3d12`; `svc-selkies` arranges that for pixelflux (with the override set, `vaInitialize failed with error code 2`). Verified on the NVIDIA adapter (H.264/HEVC decodable). On Intel (driver 32.0.101.8517) the D3D12 encoder ignores `FrameStartOffset` (SPS/PPS overwritten) and returns `EncodedBitstreamWrittenBytesCount=0`, so `intel-wsl` encodes with x264 unless `WSL_INTEL_VAAPI=1`; `amd-wsl` uses VA-API (untested)
+- On Intel GPUs, GPU rendering through Mesa d3d12 hangs the Windows driver under load (Qt Quick within a minute, GL clients as load rises). Windows resets the adapter (`LiveKernelEvent 141`, repeated: `124`), which also blacks out or freezes the *host* desktop; in the container Mesa prints `D3D12: Removing Device.`, pixelflux loses its D3D12 device and the stream stays black. `intel-wsl` therefore does not use the GPU at all: the container runs GL on llvmpipe (`GALLIUM_DRIVER=llvmpipe`, pixelflux included), encodes with x264, and `startwm_wayland.sh` applies `WSL_GPU_MODE` (`software` by default for `intel-wsl`: QPainter compositing, apps on llvmpipe; `compositor`: only `kwin_wayland` uses D3D12, every other process is forced to llvmpipe by the constructor in `kwin-d3d12-noscanout.c`; `full` = everything on the GPU, the `nvidia-wsl` / `amd-wsl` default). Qt Quick renders in software outside `full` mode and, on `intel-wsl`, in `full` mode too unless `WSL_QTQUICK_GPU=1`. `svc-de` restarts `svc-selkies` automatically when KWin logs `create_immed failed and produced an invalid wl_buffer`
+- Without vgem (`sudo modprobe vgem` on the host) there is no `/dev/dri` node: KWin composites in software and `intel-wsl` / `amd-wsl` fall back to software encoding
 - Vulkan depends on whether the WSL/Mesa Dozen (`dzn`) driver is available; it is not required for accelerated OpenGL/WebGL
+- **GPU compositing (desktop effects) needs a DRM render node.** WSL2 exposes the GPU only as `/dev/dxg` and creates no `/dev/dri`; without it pixelflux cannot advertise linux-dmabuf and KWin falls back to QPainter (no OpenGL effects, CPU-bound WebGL, high host load). Load `vgem` on the host (`sudo modprobe vgem`, persist with `echo vgem | sudo tee /etc/modules-load.d/vgem.conf`, or `[boot] command = modprobe vgem` in `/etc/wsl.conf` without systemd). `start-container.sh` / `create-devcontainer-config.sh` detect the missing node and offer to load it. The node must exist **before** the container config is generated, since `/dev/dri` is only passed through when present.
+- **KWin 6.6 + Mesa d3d12 needs the `kwin-d3d12-noscanout` shim** ([source](files/ubuntu-root/usr/local/src/kwin-d3d12-noscanout.c)). KWin allocates gbm buffers with `GBM_BO_USE_SCANOUT`, which the d3d12 driver rejects, so with a render node present KWin picked OpenGL and failed every frame (`Could not find a suitable render format` → black screen). The user image builds the shim, strips `cap_sys_nice` from `kwin_wayland` (glibc ignores `LD_PRELOAD` otherwise), and `startwm_wayland.sh` uses `KWIN_COMPOSE=O2` + `LD_PRELOAD` when both `/dev/dri/renderD128` and the shim exist, `KWIN_COMPOSE=Q` otherwise.
+- Check the result with `qdbus6 org.kde.KWin /KWin org.kde.KWin.supportInformation` inside the session: `Compositing Type: OpenGL` / `OpenGL renderer string: D3D12 (NVIDIA ...)` means GPU compositing; `QPainter` means vgem or the shim is missing.
 
 ---
 
@@ -646,7 +671,7 @@ Check browser audio permissions and use HTTPS (some browsers block audio over HT
 |---|---|---|
 | `ENCODER` | Encoder type | (unset) |
 | `GPU_VENDOR` | GPU vendor | `software` |
-| `MESA_D3D12_DEFAULT_ADAPTER_NAME` | GPU name substring selected on WSL2 | `NVIDIA` |
+| `MESA_D3D12_DEFAULT_ADAPTER_NAME` | GPU name substring selected on WSL2 | `NVIDIA` / `Intel` / `Radeon` (per `*-wsl` encoder) |
 | `DOCKER_MODE` | Docker mode | `dind` |
 
 #### Network

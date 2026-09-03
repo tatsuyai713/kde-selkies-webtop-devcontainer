@@ -339,7 +339,7 @@ ENV DISPLAY=:1 \
     PERL5LIB=/usr/local/bin \
     HOME=/config \
     START_DOCKER=true \
-    PULSE_RUNTIME_PATH=/defaults \
+    PULSE_RUNTIME_PATH=/run/pulse \
     SELKIES_INTERPOSER=/usr/lib/selkies_joystick_interposer.so \
     NVIDIA_DRIVER_CAPABILITIES=all \
     DISABLE_ZINK=true \
@@ -725,6 +725,13 @@ RUN if [ -f /usr/local/bin/patch-selkies-stream-scale.py ]; then \
 RUN if [ -f /usr/local/bin/patch-selkies-pixelflux2.py ]; then \
       chmod +x /usr/local/bin/patch-selkies-pixelflux2.py && \
       /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-pixelflux2.py; \
+    fi
+
+# Build selkies' Wayland keysym->scancode table from the session's XKB layout
+# instead of a hard-coded "us" (fixes Shift+2 -> '*' etc. on jp layouts).
+RUN if [ -f /usr/local/bin/patch-selkies-wayland-keymap.py ]; then \
+      chmod +x /usr/local/bin/patch-selkies-wayland-keymap.py && \
+      /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-wayland-keymap.py; \
     fi
 
 # ports and volumes

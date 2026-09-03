@@ -30,7 +30,7 @@
 - **デフォルト非root** — コンテナはあなたのユーザー権限で実行。適切な権限分離、必要時は sudo 利用可能。
 - **自動 UID/GID マッチング** — マウントしたホストディレクトリがそのまま動作。共有フォルダでの「permission denied」なし。
 - **統一された設定** — `start-container.sh`（日常利用）と `create-devcontainer-config.sh`（VS Code Dev Container）が同じ対話設定を共有。
-- **エンコーダー/GPU の明示的制御** — `--encoder nvidia|intel|amd|software|nvidia-wsl` でエンコーダーを選択。`--all`/`--num` で Docker GPU 割り当てを独立制御。
+- **エンコーダー/GPU の明示的制御** — `--encoder nvidia|intel|amd|software|nvidia-wsl|intel-wsl|amd-wsl` でエンコーダーを選択。`--all`/`--num` で Docker GPU 割り当てを独立制御。
 - **ストリームスケーリング** — `-S 0.5` でエンコード解像度を半分に。帯域とエンコーダー負荷の両方を削減。
 - **Docker モード切替** — `--docker-mode dood`（ホスト socket）または `dind`（コンテナ内 dockerd）。
 - **ブラウザのみでアクセス** — 起動後 `https://localhost:<30000+UID>` にアクセス。SSH/RDP の配布不要。
@@ -46,6 +46,8 @@
 | **Ubuntu + Intel GPU** | ✅ | ✅ | ✅ VA-API (QSV) | 統合GPU可 |
 | **Ubuntu + AMD GPU** | ✅ | ✅ | ✅ VA-API | RDNA / GCN |
 | **WSL2 + NVIDIA GPU** | ✅ Mesa D3D12 | ✅ WebGL / ⚠️ Vulkan | ✅ NVENC | `/dev/dxg` 経由のOpenGL＋NVENC |
+| **WSL2 + Intel GPU** | ✅ Mesa D3D12 | ✅ WebGL / ⚠️ Vulkan | ⚠️ VA-API (Mesa D3D12) | `--encoder intel-wsl`。エンコードは Windows ドライバの D3D12 Video Encode 対応が必要、非対応なら x264 にフォールバック |
+| **WSL2 + AMD GPU** | ✅ Mesa D3D12 | ✅ WebGL / ⚠️ Vulkan | ⚠️ VA-API (Mesa D3D12) | `--encoder amd-wsl`。エンコードは Windows ドライバの D3D12 Video Encode 対応が必要、非対応なら x264 にフォールバック |
 | **macOS (Docker Desktop)** | ❌ | ❌ ソフトウェア | ❌ | VM 制限あり。ワークフローは同一 |
 
 ---
@@ -67,6 +69,8 @@
 ./start-container.sh --encoder intel                 # Intel VA-API
 ./start-container.sh --encoder amd -r 1920x1080 -S 0.5  # AMD + 配信解像度半分
 ./start-container.sh --encoder nvidia-wsl --all      # WSL2 + NVIDIA NVENC
+./start-container.sh --encoder intel-wsl             # WSL2 + Intel（Mesa D3D12 OpenGL + VA-API）
+./start-container.sh --encoder amd-wsl               # WSL2 + AMD（Mesa D3D12 OpenGL + VA-API）
 
 # 3. ブラウザでアクセス
 #    https://localhost:<30000+UID>（例: UID 1000 → https://localhost:31000）
@@ -98,6 +102,12 @@
 ```bash
 ./build-user-image.sh -u 22.04
 ./start-container.sh --encoder nvidia-wsl --all
+```
+
+**WSL2 + Intel / AMD**
+```bash
+sudo modprobe vgem                        # GPU 合成 / VA-API 用の DRM レンダーノード（各スクリプトも対話的に提案）
+./start-container.sh --encoder intel-wsl  # または --encoder amd-wsl
 ```
 
 ### VS Code Dev Container
@@ -394,7 +404,7 @@ IMAGE_NAME=ghcr.io/you/your-base ./files/push-base-image.sh
 ./start-container.sh [オプション]
 
 エンコーダー / GPU:
-  -e, --encoder <type>       software | nvidia | nvidia-wsl | intel | amd
+  -e, --encoder <type>       software | nvidia | nvidia-wsl | intel | amd | intel-wsl | amd-wsl
   -g, --gpu <value>          Docker --gpus 値: all または device=0,1
   --all                      --gpu all のショートカット
   --num <list>               --gpu device=<list> のショートカット
@@ -531,6 +541,13 @@ docker exec linuxserver-kde-$(whoami) ls -la /run/user/$(id -u)
 
 原因: `/run/user/<uid>` が存在しないまたは権限不正、plasmashell のクラッシュ → コンテナを再起動。
 
+**WSL2 では**さらに次の 2 つの原因があり、いずれも本リポジトリで修正済みです：
+
+- `docker compose` は compose ファイル中の `${VAR}` を**呼び出し元シェルの環境変数を最優先**で展開し、`.env` はその後に参照します。WSLg は `WAYLAND_DISPLAY=wayland-0`（と `XDG_RUNTIME_DIR`）を常時エクスポートしているため、`.env` に素の名前で置いた値は乗っ取られ、デスクトップは selkies が作らないソケットを永遠に待ち続けていました。コンテナへ渡す値は `.env` 内で `RUNTIME_*` 接頭辞（`RUNTIME_WAYLAND_DISPLAY` など）を使い、`svc-de` は selkies が実際に作った `wayland-*` ソケットへフォールバックします。**GPU / ディスプレイ関連の変数を追加するときは必ず接頭辞付きにしてください。**
+- `/mnt/wslg` はマウントしなくなりました。`/mnt/wslg/.X11-unix` を `/tmp/.X11-unix` に被せると root 所有の tmpfs になり、`startwm_wayland.sh` の `chmod` が `set -e` で失敗してセッションが起動しませんでした。d3d12 GPU ドライバに必要なのは `/usr/lib/wsl` と `/dev/dxg` だけです。
+
+ホストで `vgem` を読み込んだ**後に**黒画面になる場合は、ユーザーイメージが `kwin-d3d12-noscanout` シム導入前のものです（既知の制限の [WSL2](#wsl2) を参照）。ユーザーイメージを再ビルドしてください。
+
 ### WebGL/Vulkan が動かない
 
 ```bash
@@ -565,10 +582,17 @@ docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pact
 - ハードウェアアクセラレーションが必要な場合は Linux 実機または WSL2 を使用
 
 ### WSL2
-- `--encoder nvidia-wsl` は `/dev/dxg` とWSLgライブラリをコンテナへ渡し、Mesa D3D12でOpenGLをGPU実行
-- `MESA_D3D12_DEFAULT_ADAPTER_NAME` のデフォルトは `NVIDIA`。ハイブリッドGPUでは任意のアダプター名の部分文字列に変更可能
-- ハードウェアエンコード（NVENC）はOpenGLとは独立してPixelfluxから使用
+- `--encoder nvidia-wsl` / `intel-wsl` / `amd-wsl` はいずれも `/dev/dxg`・vgem レンダーノード・WSLg ライブラリ（`/usr/lib/wsl`）をコンテナへ渡し、Mesa D3D12 で OpenGL を GPU 実行。描画そのものは Windows（WDDM）ドライバが担うためベンダー非依存
+- `MESA_D3D12_DEFAULT_ADAPTER_NAME` は D3D12 アダプターを名前の部分文字列で選択。デフォルトはプロファイルに応じて `NVIDIA` / `Intel` / `Radeon`。ハイブリッド GPU では使用したいアダプター名の部分文字列に変更可能
+- `nvidia-wsl` のハードウェアエンコード（NVENC）は OpenGL とは独立して Pixelflux から使用
+- `intel-wsl` / `amd-wsl` は Mesa の `d3d12` VA ドライバ（`LIBVA_DRIVER_NAME=d3d12`）経由の VA-API、つまり Windows ドライバの D3D12 Video Encode API でエンコード。H.264 エンコードの可否は Windows 側 GPU ドライバに依存し、非対応の場合 Pixelflux は自動的に x264 ソフトウェアエンコードへフォールバック（コンテナ内で `vainfo` で確認可能）
+- Mesa の d3d12 VA ドライバは vgem 専用経路でしか初期化できず、`MESA_LOADER_DRIVER_OVERRIDE` を外して `GALLIUM_DRIVER=d3d12` にする必要がある（override があると `vaInitialize failed with error code 2`）。`svc-selkies` が pixelflux 向けにこれを設定する。NVIDIA アダプタで H.264/HEVC のデコード可能な出力を確認済み。Intel（ドライバ 32.0.101.8517）では D3D12 エンコーダが `FrameStartOffset` を無視して SPS/PPS を上書きし、さらに `EncodedBitstreamWrittenBytesCount=0` を返すため、`intel-wsl` は `WSL_INTEL_VAAPI=1` を付けない限り x264。`amd-wsl` は VA-API を使う（未検証）
+- Intel GPU では Mesa d3d12 経由の GPU 描画が負荷時に Windows ドライバの GPU ハングを起こす（Qt Quick は起動後 1 分以内、GL クライアントは負荷上昇時）。Windows はアダプタをリセットし（`LiveKernelEvent 141`、連続すると `124`）、*ホスト側* の画面も黒くなる／固まる。コンテナ側では Mesa が `D3D12: Removing Device.` を出し、pixelflux の D3D12 デバイスも失われて黒画面が固定化する。そのため `intel-wsl` は GPU を一切使わない：コンテナの GL は llvmpipe（`GALLIUM_DRIVER=llvmpipe`、pixelflux 含む）、エンコードは x264。`startwm_wayland.sh` は `WSL_GPU_MODE` を適用する（`intel-wsl` の既定は `software`：QPainter 合成・アプリは llvmpipe。`compositor`：D3D12 を使うのは `kwin_wayland` のみで、他のプロセスは `kwin-d3d12-noscanout.c` のコンストラクタにより llvmpipe 描画。`full`：全プロセス GPU で `nvidia-wsl` / `amd-wsl` の既定）。Qt Quick は `full` 以外では常にソフトウェア描画、`intel-wsl` では `full` でも `WSL_QTQUICK_GPU=1` を付けない限りソフトウェア描画。`svc-de` は KWin ログの `create_immed failed and produced an invalid wl_buffer` を検出すると `svc-selkies` を自動再起動する
+- vgem 未ロード（ホストで `sudo modprobe vgem`）の場合は `/dev/dri` が無いため、KWin はソフトウェア合成となり `intel-wsl` / `amd-wsl` もソフトウェアエンコードにフォールバック
 - VulkanはWSL/MesaのDozen（dzn）ドライバー提供状況に依存。OpenGL/WebGLのD3D12高速化には不要
+- **GPU 合成（デスクトップエフェクト）には DRM レンダーノードが必要。** WSL2 は GPU を `/dev/dxg` としてのみ公開し `/dev/dri` を作らないため、そのままでは pixelflux が linux-dmabuf を公開できず KWin は QPainter（ソフトウェア合成：OpenGL エフェクト無効、WebGL は CPU 描画、ホスト負荷が高い）に落ちる。ホストで `vgem` を読み込む（`sudo modprobe vgem`。永続化は `echo vgem | sudo tee /etc/modules-load.d/vgem.conf`、systemd 無しなら `/etc/wsl.conf` に `[boot] command = modprobe vgem`）。`start-container.sh` / `create-devcontainer-config.sh` は未読み込みを検出すると対話的に提案する。`/dev/dri` は存在する場合のみコンテナへ渡されるので、**コンテナ設定を生成する前に**ノードが必要
+- **KWin 6.6 + Mesa d3d12 には `kwin-d3d12-noscanout` シムが必要**（[ソース](files/ubuntu-root/usr/local/src/kwin-d3d12-noscanout.c)）。KWin は gbm バッファを `GBM_BO_USE_SCANOUT` 付きで確保するが d3d12 ドライバはこれを拒否するため、レンダーノードがあると KWin は OpenGL を選んだ後に毎フレーム失敗していた（`Could not find a suitable render format` → 黒画面）。ユーザーイメージでシムをビルドし、`kwin_wayland` の `cap_sys_nice` を外し（glibc が `LD_PRELOAD` を無視するため）、`startwm_wayland.sh` は `/dev/dri/renderD128` とシムが揃えば `KWIN_COMPOSE=O2` + `LD_PRELOAD`、揃わなければ `KWIN_COMPOSE=Q` を使う
+- 確認はセッション内で `qdbus6 org.kde.KWin /KWin org.kde.KWin.supportInformation`。`Compositing Type: OpenGL` / `OpenGL renderer string: D3D12 (NVIDIA ...)` なら GPU 合成、`QPainter` なら vgem かシムが欠けている
 
 ---
 
@@ -603,7 +627,7 @@ docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pact
 |---|---|---|
 | `ENCODER` | エンコーダー種別 | （未設定） |
 | `GPU_VENDOR` | GPU ベンダー | `software` |
-| `MESA_D3D12_DEFAULT_ADAPTER_NAME` | WSL2で使用するGPU名の部分文字列 | `NVIDIA` |
+| `MESA_D3D12_DEFAULT_ADAPTER_NAME` | WSL2で使用するGPU名の部分文字列 | `NVIDIA` / `Intel` / `Radeon`（`*-wsl` エンコーダごと） |
 | `DOCKER_MODE` | Docker モード | `dind` |
 
 #### ネットワーク

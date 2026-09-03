@@ -36,7 +36,9 @@ if [ "${USE_PIPEWIRE}" = "true" ]; then
   sleep 0.5
   exec s6-setuidgid "${TARGET_USER}" env XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR}" /usr/bin/pipewire-pulse
 else
-  PULSE_DIR="${PULSE_RUNTIME_PATH:-/defaults}"
+  PULSE_DIR="/run/pulse"
+  export PULSE_RUNTIME_PATH="${PULSE_DIR}"
+  export PULSE_SERVER="unix:${PULSE_DIR}/native"
 
   # Pulseaudio requires a user-owned secure runtime dir. If a root shell ever
   # autospawned a daemon here, stale socket/pid files can block the real service.

@@ -89,7 +89,7 @@ Run without options to load settings from configs/<name>.yml (runs configure-con
   -p  platform for docker run (e.g. linux/arm64). Default: host
   -a  image arch for tag (amd64/arm64). Overrides auto-detect
   -s  host directory containing cert.pem and cert.key to mount at ssl (recommended for WSS)
-  -e, --encoder <type>  Encoder: software|nvidia|nvidia-wsl|intel|amd (required)
+  -e, --encoder <type>  Encoder: software|nvidia|nvidia-wsl|intel|amd|intel-wsl|amd-wsl (required)
   -f, --framerate <fps> Framerate: single value (60) or range (30-60). Default: 30
   -g, --gpu <value>     Docker --gpus value (optional): all or device=0,1
       --all             shortcut for --gpu all
@@ -113,6 +113,10 @@ Encoder examples:
   --encoder amd
   --encoder nvidia
   --encoder nvidia-wsl
+  --encoder intel-wsl      (WSL2 + Intel GPU: rendering and encoding on the CPU by default, the Intel
+                            driver hangs / encodes nothing through Mesa d3d12; WSL_GPU_MODE and
+                            WSL_INTEL_VAAPI override, see README)
+  --encoder amd-wsl        (WSL2 + AMD GPU: OpenGL and VA-API through Mesa D3D12)
 
 Docker GPU examples (optional):
   --gpu all
@@ -566,7 +570,7 @@ fi
 ENCODER=$(echo "${ENCODER}" | tr '[:upper:]' '[:lower:]')
 case "${ENCODER}" in
   software|none|cpu) ENCODER="software" ;;
-  nvidia|nvidia-wsl|intel|amd) ;;
+  nvidia|nvidia-wsl|intel|amd|intel-wsl|amd-wsl) ;;
   *)
     echo "Unsupported encoder: ${ENCODER}" >&2
     usage
@@ -575,6 +579,10 @@ case "${ENCODER}" in
 esac
 
 GPU_VENDOR="${ENCODER}"
+
+# Must run before the GPU branch below: /dev/dri is only passed through to the
+# container when the node already exists on the host.
+shared_ensure_wsl_render_node
 
 DOCKER_MODE=$(echo "${DOCKER_MODE}" | tr '[:upper:]' '[:lower:]')
 case "${DOCKER_MODE}" in
@@ -732,6 +740,55 @@ list_detected_gpus() {
   done
 }
 
+# WSL2 GPU path shared by nvidia-wsl / intel-wsl / amd-wsl. The GPU is reached
+# through /dev/dxg and Mesa's d3d12 gallium driver, which is vendor-neutral: the
+# Windows (WDDM) driver's Linux user-mode library under /usr/lib/wsl/drivers
+# does the actual work for NVIDIA, Intel and AMD alike. Only the DXCore adapter
+# name substring differs, which is what $1 supplies as the default.
+# $2: gallium driver for container-level processes (pixelflux). intel-wsl
+# passes "llvmpipe" so the Intel GPU is not used at all by default (its Windows
+# driver hangs under Mesa d3d12 load, and its D3D12 video encoder returns empty
+# frames); WSL_INTEL_VAAPI=1 lets svc-selkies try VA-API anyway. See README.
+add_wsl_d3d12_flags() {
+  local default_adapter="$1"
+  local gallium_driver="${2:-d3d12}"
+  if [ -e "/dev/dxg" ]; then
+    GPU_FLAGS+=(--device=/dev/dxg:/dev/dxg:rwm)
+  else
+    echo "Warning: /dev/dxg not found. Are you running on WSL2?" >&2
+  fi
+  # /dev/dri on WSL2 is the vgem render node (sudo modprobe vgem). It lets
+  # pixelflux advertise linux-dmabuf so KWin can composite on the GPU
+  # (together with the kwin-d3d12-noscanout shim in the image).
+  if [ -d "/dev/dri" ]; then
+    GPU_FLAGS+=(--device=/dev/dri:/dev/dri:rwm)
+  fi
+  if [ -d "/usr/lib/wsl" ]; then
+    GPU_FLAGS+=(-v /usr/lib/wsl:/usr/lib/wsl:ro)
+  fi
+  # Deliberately NOT mounting /mnt/wslg. Only /usr/lib/wsl (+ /dev/dxg) is
+  # needed for the d3d12 GPU driver. WSLg's own runtime dir and X11 socket
+  # directory belong to the host's compositor: bind-mounting
+  # /mnt/wslg/.X11-unix over /tmp/.X11-unix hands the container a root-owned
+  # tmpfs it cannot chmod, which aborts the desktop start script, and hides
+  # kwin's own Xwayland :0 behind WSLg's X server.
+  GPU_ENV_VARS+=(
+    -e WSL_ENVIRONMENT=true
+    -e WSL_GPU_MODE="${WSL_GPU_MODE:-}"
+    -e WSL_QTQUICK_GPU="${WSL_QTQUICK_GPU:-}"
+    -e WSL_INTEL_VAAPI="${WSL_INTEL_VAAPI:-}"
+    -e DISABLE_ZINK=true
+    -e LD_LIBRARY_PATH=/usr/lib/wsl/lib
+    -e GALLIUM_DRIVER="${gallium_driver}"
+    -e MESA_LOADER_DRIVER_OVERRIDE=d3d12
+    -e MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-${default_adapter}}"
+    -e LIBGL_ALWAYS_SOFTWARE=0
+    -e LIBVA_DRIVER_NAME=d3d12
+    -e __GLX_VENDOR_LIBRARY_NAME=mesa
+    -e __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+  )
+}
+
 case "${GPU_VENDOR}" in
   software|"")
     GPU_VENDOR="software"
@@ -834,35 +891,41 @@ case "${GPU_VENDOR}" in
     else
       echo "Warning: --encoder nvidia-wsl selected but no --gpu value provided; NVENC may be unavailable." >&2
     fi
-    if [ -e "/dev/dxg" ]; then
-      GPU_FLAGS+=(--device=/dev/dxg:/dev/dxg:rwm)
+    GPU_ENV_VARS+=(-e ENABLE_NVIDIA=true)
+    add_wsl_d3d12_flags "NVIDIA"
+    ;;
+  intel-wsl|amd-wsl)
+    # Intel / AMD on WSL2: OpenGL via Mesa d3d12 exactly like nvidia-wsl. Video
+    # encoding goes through Mesa's d3d12 VA-API driver (D3D12 Video Encode in
+    # the Windows driver) on the vgem render node; pixelflux falls back to x264
+    # by itself when the Windows driver offers no encoder.
+    # --gpus needs the NVIDIA container toolkit, so only pass it when asked.
+    if [ -n "${DOCKER_GPUS}" ]; then
+      GPU_FLAGS+=(--gpus "${DOCKER_GPUS}")
+      GPU_ENV_VARS+=(-e ENABLE_NVIDIA=true)
+      echo "NVIDIA GPUs enabled (--gpus ${DOCKER_GPUS}) for non-encoding purposes."
     else
-      echo "Warning: /dev/dxg not found. Are you running on WSL2?" >&2
+      GPU_ENV_VARS+=(-e ENABLE_NVIDIA=false)
     fi
-    if [ -d "/dev/dri" ]; then
-      GPU_FLAGS+=(--device=/dev/dri:/dev/dri:rwm)
+    if [ "${GPU_VENDOR}" = "intel-wsl" ]; then
+      # DXCore reports Intel adapters as "Intel(R) ...". No GPU use by default.
+      add_wsl_d3d12_flags "Intel" "llvmpipe"
+    else
+      # DXCore reports AMD adapters as "AMD Radeon ..." or "Radeon ...".
+      add_wsl_d3d12_flags "Radeon"
     fi
-    if [ -d "/usr/lib/wsl" ]; then
-      GPU_FLAGS+=(-v /usr/lib/wsl:/usr/lib/wsl:ro)
+    # The vgem node doubles as the VA-API device (LIBVA_DRIVER_NAME=d3d12 and
+    # MESA_LOADER_DRIVER_OVERRIDE=d3d12 route any DRM fd to the d3d12 driver).
+    WSL_VA_NODE="${DRI_NODE:-}"
+    if [ -z "${WSL_VA_NODE}" ] && [ -e "/dev/dri/renderD128" ]; then
+      WSL_VA_NODE="/dev/dri/renderD128"
     fi
-    if [ -d "/mnt/wslg" ]; then
-      GPU_FLAGS+=(-v /mnt/wslg:/mnt/wslg:rw)
-      GPU_FLAGS+=(-v /mnt/wslg/.X11-unix:/tmp/.X11-unix:rw)
+    if [ -n "${WSL_VA_NODE}" ]; then
+      GPU_ENV_VARS+=(-e DRI_NODE="${WSL_VA_NODE}")
+      echo "Using ${WSL_VA_NODE} as the VA-API / compositor render node (Mesa D3D12)."
+    else
+      echo "Warning: no /dev/dri render node on this WSL2 host; run 'sudo modprobe vgem' for GPU compositing and VA-API encoding. Falling back to software encoding." >&2
     fi
-    GPU_ENV_VARS+=(
-      -e ENABLE_NVIDIA=true
-      -e WSL_ENVIRONMENT=true
-      -e DISABLE_ZINK=true
-      -e XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir
-      -e LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}
-      -e GALLIUM_DRIVER=d3d12
-      -e MESA_LOADER_DRIVER_OVERRIDE=d3d12
-      -e MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-NVIDIA}"
-      -e LIBGL_ALWAYS_SOFTWARE=0
-      -e LIBVA_DRIVER_NAME=d3d12
-      -e __GLX_VENDOR_LIBRARY_NAME=mesa
-      -e __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
-    )
     ;;
   *)
     echo "Unsupported GPU vendor: ${GPU_VENDOR}" >&2

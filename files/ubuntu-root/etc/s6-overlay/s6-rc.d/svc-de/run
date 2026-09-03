@@ -16,11 +16,31 @@ fi
 
 # wayland entrypoint
 if [[ "${PIXELFLUX_WAYLAND}" == "true" ]]; then
-  SOCKET_PATH="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY:-wayland-1}"
+  # selkies owns the compositor socket; the desktop is only a client of it.
+  # Never wait forever on the configured name: docker compose interpolates
+  # ${WAYLAND_DISPLAY} in the compose file from the invoking shell before it
+  # falls back to the env file, so a host session (WSLg exports wayland-0) can
+  # hand us a name selkies never creates. That left the desktop unstarted and
+  # the browser showing nothing but a black stream. Give the configured socket
+  # a grace period, then take whichever one selkies actually made.
+  WL_NAME="${WAYLAND_DISPLAY:-wayland-1}"
+  SOCKET_PATH="${XDG_RUNTIME_DIR}/${WL_NAME}"
   echo "[svc-de] Wayland mode: Waiting for socket at ${SOCKET_PATH}..."
-  while [ ! -e "${SOCKET_PATH}" ]; do
+  for _ in $(seq 1 60); do
+    [ -S "${SOCKET_PATH}" ] && break
     sleep 0.5
   done
+  if [ ! -S "${SOCKET_PATH}" ]; then
+    FOUND=""
+    while [ -z "${FOUND}" ]; do
+      FOUND="$(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -type s -name 'wayland-*' 2>/dev/null | head -1)"
+      [ -z "${FOUND}" ] && sleep 0.5
+    done
+    WL_NAME="$(basename "${FOUND}")"
+    SOCKET_PATH="${FOUND}"
+    echo "[svc-de] WARNING: ${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY} never appeared; using ${WL_NAME} instead."
+    export WAYLAND_DISPLAY="${WL_NAME}"
+  fi
   echo "[svc-de] ${SOCKET_PATH} found launching de"
   cd $HOME
   exec s6-setuidgid "${TARGET_USER}" \
@@ -28,6 +48,26 @@ if [[ "${PIXELFLUX_WAYLAND}" == "true" ]]; then
   PID=$!
   echo "$PID" > /de-pid
   wait "$PID"
+
+  # KWin is a client of the selkies/pixelflux compositor. When pixelflux loses
+  # its GPU device (Mesa d3d12 logs "D3D12: Removing Device." after a Windows
+  # driver reset/TDR or a host suspend on WSL2), it never recreates it: every
+  # dmabuf KWin hands over is rejected with a protocol error
+  # ("create_immed failed and produced an invalid wl_buffer"), KWin dies, and
+  # the plain restart loop below would just repeat that forever with a black
+  # browser. Detect that signature in the session log and restart selkies so
+  # the next desktop start talks to a compositor with a fresh GPU device.
+  KWIN_LOG="/dev/shm/startplasma-wayland-${TARGET_UID}.log"
+  if [ -r "${KWIN_LOG}" ] && grep -qE "create_immed failed and produced an invalid wl_buffer|Wayland connection broke" "${KWIN_LOG}"; then
+    echo "[svc-de] KWin lost its connection to the pixelflux compositor (dmabuf import rejected, GPU device lost?); restarting svc-selkies before the next desktop start" >&2
+    s6-svc -r /run/service/svc-selkies
+    # Give the old compositor a moment to drop its socket so the next round
+    # does not connect to a half-dead instance.
+    for _ in $(seq 1 20); do
+      [ -S "${SOCKET_PATH}" ] || break
+      sleep 0.5
+    done
+  fi
   exit 1
 fi
 
