@@ -11,23 +11,19 @@ The patch keeps selkies working with pixelflux 1.6.x unchanged: every
 new code path is guarded by a PIXELFLUX_V2 flag derived from the import.
 Idempotent: exits successfully if the patch is already applied.
 """
+import glob
+import os
 import sys
 
-TARGET_CANDIDATES = [
-    "/opt/selkies-env/lib/python3.14/site-packages/selkies/selkies.py",
-    "/opt/selkies-env/lib/python3.12/site-packages/selkies/selkies.py",
-    "/opt/selkies-env/lib/python3.10/site-packages/selkies/selkies.py",
-]
+TARGET_GLOB = "/opt/selkies-env/lib/python*/site-packages/selkies/selkies.py"
+
 
 def main():
     path = None
-    for cand in TARGET_CANDIDATES:
-        try:
-            open(cand).close()
+    for cand in sorted(glob.glob(TARGET_GLOB)):
+        if os.path.isfile(cand):
             path = cand
             break
-        except OSError:
-            continue
     if path is None:
         print("patch-selkies-pixelflux2: selkies.py not found; skipping")
         return 0
@@ -137,17 +133,15 @@ def main():
     assert old_cs in s, "CaptureSettings anchor not found"
     s = s.replace(old_cs, "        cs = _CSCompat(CaptureSettings()) if PIXELFLUX_V2 else CaptureSettings()", 1)
 
-    old_ret = """            cs.watermark_location_enum = self.cli_args.watermark_location
-
-        return cs"""
-    new_ret = """            cs.watermark_location_enum = self.cli_args.watermark_location
-
-        if PIXELFLUX_V2:
+    # This return is unique in the pinned source. Match it directly instead of
+    # depending on whether the preceding blank line contains indentation.
+    old_ret = "        return cs"
+    new_ret = """        if PIXELFLUX_V2:
             raw = cs._raw
             raw.use_wayland = IS_WAYLAND
             return raw
         return cs"""
-    assert old_ret in s, "return anchor not found"
+    assert s.count(old_ret) == 1, "unique return anchor not found"
     s = s.replace(old_ret, new_ret, 1)
 
     open(path, "w").write(s)
