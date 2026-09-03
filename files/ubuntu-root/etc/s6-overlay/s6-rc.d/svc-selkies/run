@@ -2,8 +2,9 @@
 
 TARGET_USER="${CUSTOM_USER:-${USER_NAME:-root}}"
 PORT="${SELKIES_PORT:-8082}"
-export PULSE_RUNTIME_PATH="/run/pulse"
-export PULSE_SERVER="unix:${PULSE_RUNTIME_PATH}/native"
+TARGET_UID_SEL="$(id -u "${TARGET_USER}" 2>/dev/null || echo 1000)"
+. /usr/local/lib/pulse-runtime.sh
+webtop_configure_pulse_runtime "${TARGET_UID_SEL}"
 
 # selkies (Wayland mode) builds its keysym->scancode table from XKB_DEFAULT_*
 # (see patch-selkies-wayland-keymap.py). It must match the layout KWin uses
@@ -279,9 +280,9 @@ SELKIES_H264_PAINTOVER_CRF="${SELKIES_H264_PAINTOVER_CRF:-20}"
 CMD_OPTS+=(--h264-paintover-crf="${SELKIES_H264_PAINTOVER_CRF}")
 echo "[svc-selkies] H.264 Paint-over CRF set to: ${SELKIES_H264_PAINTOVER_CRF}"
 
-# Audio configuration: explicitly enable audio and point to the null-sink device
-# SELKIES_AUDIO_DEVICE: PulseAudio sink name to capture (default: "output")
-SELKIES_AUDIO_DEVICE="${SELKIES_AUDIO_DEVICE:-output}"
+# Audio capture reads from the monitor source of the virtual output sink.
+# Keep this overridable for installations that provide a different source.
+SELKIES_AUDIO_DEVICE="${SELKIES_AUDIO_DEVICE:-output.monitor}"
 CMD_OPTS+=(--audio-enabled=true)
 CMD_OPTS+=(--audio-device-name="${SELKIES_AUDIO_DEVICE}")
 echo "[svc-selkies] Audio enabled, device: ${SELKIES_AUDIO_DEVICE}"
@@ -294,23 +295,17 @@ echo "[svc-selkies] Binary clipboard disabled (text clipboard via Klipper D-Bus)
 
 echo "[svc-selkies] Using selkies with pixelflux (GPU_VENDOR=${GPU_VENDOR}, use-cpu=${USE_CPU:-false})"
 
-# Resolve the correct PulseAudio/PipeWire-pulse socket for this user.
-# PULSE_RUNTIME_PATH from the s6 container environment may be /defaults (legacy
-# Ubuntu 22.04/24.04 path); on Ubuntu 26.04+ PipeWire-pulse puts the socket at
-# $XDG_RUNTIME_DIR/pulse/native. Override PULSE_SERVER unconditionally so pactl
-# finds the real socket regardless of what with-contenv injects.
-TARGET_UID_SEL="$(id -u "${TARGET_USER}" 2>/dev/null || echo 1000)"
-PULSE_SOCKET_PATH="/run/user/${TARGET_UID_SEL}/pulse/native"
-export PULSE_SERVER="unix:${PULSE_SOCKET_PATH}"
-unset PULSE_RUNTIME_PATH
+# The shared resolver keeps Selkies on the same backend-specific endpoint as
+# the audio daemon and desktop session.
+PULSE_SOCKET_PATH="${WEBTOP_PULSE_SOCKET}"
 
 pactl_cmd() {
-  # Wrapper that always points to the correct PipeWire-pulse socket,
-  # bypassing any PULSE_RUNTIME_PATH injected by with-contenv.
+  # Do not use with-contenv here: it may still contain values inherited before
+  # init-adduser selected the runtime backend.
   s6-setuidgid "$TARGET_USER" env \
     PULSE_SERVER="unix:${PULSE_SOCKET_PATH}" \
     XDG_RUNTIME_DIR="/run/user/${TARGET_UID_SEL}" \
-    PULSE_RUNTIME_PATH="" \
+    PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-}" \
     pactl "$@"
 }
 

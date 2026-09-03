@@ -5,6 +5,10 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-$USER}"
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
+# Select the PulseAudio compatibility endpoint for this Ubuntu release.
+. /usr/local/lib/pulse-runtime.sh
+webtop_configure_pulse_runtime "$(id -u)"
+
 # Load Xresources with dynamic DPI if available
 if [ -f /defaults/Xresources ]; then
   # Update DPI in Xresources if DPI environment variable is set
@@ -37,20 +41,25 @@ fi
 
 # Configure GPU acceleration based on detected hardware
 if [ "${NVIDIA_PRESENT}" = "true" ]; then
-  if [ "${DISABLE_ZINK}" != "true" ]; then
+  if [ "${PIXELFLUX_WAYLAND:-false}" != "true" ] && [ "${NVIDIA_X11_ZINK:-true}" != "false" ]; then
     # NVIDIA GPU with Zink (Mesa's Vulkan-based OpenGL implementation)
     echo "Configuring NVIDIA GPU with Zink driver"
     export LIBGL_KOPPER_DRI2=1
     export MESA_LOADER_DRIVER_OVERRIDE=zink
     export GALLIUM_DRIVER=zink
+    export __GLX_VENDOR_LIBRARY_NAME=mesa
+    unset __NV_PRIME_RENDER_OFFLOAD
+    export KWIN_COMPOSE=X
   else
     # NVIDIA GPU with native OpenGL (EGL backend)
     echo "Configuring NVIDIA GPU with native EGL/OpenGL"
   fi
   export VGL_DISPLAY="${VGL_DISPLAY:-egl}"
-  export __GLX_VENDOR_LIBRARY_NAME=nvidia
-  export __NV_PRIME_RENDER_OFFLOAD=1
-  export __VK_LAYER_NV_optimus=NVIDIA_only
+  if [ "${PIXELFLUX_WAYLAND:-false}" = "true" ] || [ "${NVIDIA_X11_ZINK:-true}" = "false" ]; then
+    export __GLX_VENDOR_LIBRARY_NAME=nvidia
+    export __NV_PRIME_RENDER_OFFLOAD=1
+    export __VK_LAYER_NV_optimus=NVIDIA_only
+  fi
 elif [ "${GPU_AVAILABLE}" = "true" ]; then
   # Non-NVIDIA GPU (Intel/AMD) - use native drivers with Xvfb's DRI3 device
   echo "Configuring GPU with native drivers (Intel/AMD)"
@@ -120,22 +129,15 @@ export QT_LOGGING_RULES="${QT_LOGGING_RULES:-*.debug=false;qt.qpa.*=false}"
 # Start KDE Plasma desktop with appropriate GPU acceleration
 if which startplasma-x11 > /dev/null 2>&1; then
   echo "Starting KDE Plasma desktop"
-  # Use VirtualGL for all GPU types (NVIDIA, Intel, AMD)
-  # Only skip VirtualGL when no GPU is available (software rendering mode)
-  if [ "${GPU_AVAILABLE}" = "true" ] && which vglrun > /dev/null 2>&1; then
-    if [ "${NVIDIA_PRESENT}" = "true" ]; then
-      echo "Starting with NVIDIA GPU acceleration via VirtualGL (EGL backend)"
-      export VGL_FPS="${DISPLAY_REFRESH:-60}"
-      /usr/bin/vglrun -d "${VGL_DISPLAY:-egl}" +wm /usr/bin/dbus-launch --exit-with-session /usr/bin/startplasma-x11 > /tmp/startwm.log 2>&1 &
-    else
-      echo "Starting with GPU acceleration (Intel/AMD) via VirtualGL (Xvfb DRI3 backend)"
-      export VGL_FPS="${DISPLAY_REFRESH:-60}"
-      /usr/bin/vglrun -d "${VGL_DISPLAY}" +wm /usr/bin/dbus-launch --exit-with-session /usr/bin/startplasma-x11 > /tmp/startwm.log 2>&1 &
-    fi
-  else
-    echo "Starting with software rendering (no GPU acceleration)"
-    /usr/bin/dbus-launch --exit-with-session /usr/bin/startplasma-x11 > /tmp/startwm.log 2>&1 &
+  # Wrapping KWin in VirtualGL produces a valid GL context but a black final
+  # compositor image on Xvfb. Keep the desktop on its X server renderer;
+  # VirtualGL remains available explicitly for individual applications and
+  # Selkies hardware video encoding is configured independently.
+  if [ "${NVIDIA_PRESENT}" = "true" ] && { [ "${PIXELFLUX_WAYLAND:-false}" = "true" ] || [ "${NVIDIA_X11_ZINK:-true}" = "false" ]; }; then
+    unset __GLX_VENDOR_LIBRARY_NAME __NV_PRIME_RENDER_OFFLOAD
   fi
+  echo "Starting KDE Plasma with native X server rendering"
+  /usr/bin/dbus-launch --exit-with-session /usr/bin/startplasma-x11 > /tmp/startwm.log 2>&1 &
 
   # Start fcitx5 or fcitx if installed
   if which fcitx5 > /dev/null 2>&1; then

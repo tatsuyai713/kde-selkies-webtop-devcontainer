@@ -51,14 +51,24 @@ if [[ -z ${LSIO_READ_ONLY_FS} ]] && [[ -z ${LSIO_NON_ROOT_USER} ]]; then
     lsiown "${TARGET_USER}:${TARGET_USER}" /app /config /defaults /opt/selkies-env "${USER_HOME}"
 fi
 
-# Use a dedicated runtime directory for PulseAudio. /defaults contains image
-# configuration and may be restored to root ownership after service startup.
-PULSE_DIR="/run/pulse"
+# Publish the same backend-specific endpoint used by svc-pulseaudio. This is
+# consumed by with-contenv, so desktop applications and Selkies cannot inherit
+# a stale image-level PULSE_SERVER.
+. /usr/local/lib/pulse-runtime.sh
+TARGET_UID="$(id -u "${TARGET_USER}" 2>/dev/null || printf '%s' "${PUID}")"
 TARGET_GROUP="$(id -gn "${TARGET_USER}" 2>/dev/null || printf '%s' "${PGID}")"
-install -d -m 700 "${PULSE_DIR}"
-chown "${TARGET_USER}:${TARGET_GROUP}" "${PULSE_DIR}" 2>/dev/null || true
-printf '%s' "${PULSE_DIR}" > /run/s6/container_environment/PULSE_RUNTIME_PATH
-printf 'unix:%s/native' "${PULSE_DIR}" > /run/s6/container_environment/PULSE_SERVER
+webtop_configure_pulse_runtime "${TARGET_UID}"
+if [ "${WEBTOP_AUDIO_BACKEND}" = pulseaudio ]; then
+    install -d -m 700 "${WEBTOP_PULSE_DIR}"
+    chown "${TARGET_USER}:${TARGET_GROUP}" "${WEBTOP_PULSE_DIR}" 2>/dev/null || true
+    printf '%s' "${WEBTOP_PULSE_DIR}" > /run/s6/container_environment/PULSE_RUNTIME_PATH
+else
+    PIPEWIRE_RUNTIME_DIR="$(dirname "${WEBTOP_PULSE_DIR}")"
+    install -d -m 700 "${PIPEWIRE_RUNTIME_DIR}"
+    chown "${TARGET_USER}:${TARGET_GROUP}" "${PIPEWIRE_RUNTIME_DIR}" 2>/dev/null || true
+    rm -f /run/s6/container_environment/PULSE_RUNTIME_PATH
+fi
+printf '%s' "${PULSE_SERVER}" > /run/s6/container_environment/PULSE_SERVER
 
 cat /run/branding 2>/dev/null || true
 echo '

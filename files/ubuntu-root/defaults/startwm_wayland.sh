@@ -132,8 +132,8 @@ export DISPLAY=:0
     sleep 1
   done
 ) &
-export PULSE_SERVER="${PULSE_SERVER:-unix:/run/user/$(id -u)/pulse/native}"
-unset PULSE_RUNTIME_PATH
+. /usr/local/lib/pulse-runtime.sh
+webtop_configure_pulse_runtime "$(id -u)"
 
 # On Wayland the compositor output scale (set from DPI by the capture
 # backend) already scales every client. Forcing QT_SCALE_FACTOR/GDK_SCALE

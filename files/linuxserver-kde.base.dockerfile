@@ -339,7 +339,6 @@ ENV DISPLAY=:1 \
     PERL5LIB=/usr/local/bin \
     HOME=/config \
     START_DOCKER=true \
-    PULSE_RUNTIME_PATH=/run/pulse \
     SELKIES_INTERPOSER=/usr/lib/selkies_joystick_interposer.so \
     NVIDIA_DRIVER_CAPABILITIES=all \
     DISABLE_ZINK=true \

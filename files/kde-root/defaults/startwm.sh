@@ -91,6 +91,11 @@ if ! mkdir -p "${XDG_RUNTIME_DIR}" 2>/dev/null; then
 fi
 chmod 700 "${XDG_RUNTIME_DIR}"
 
+# Override any stale image/container value with the endpoint selected for this
+# Ubuntu release (PipeWire on 26.04+, PulseAudio on 22.04/24.04).
+. /usr/local/lib/pulse-runtime.sh
+webtop_configure_pulse_runtime "$(id -u)"
+
 # Create startup script if it does not exist (keep in sync with openbox)
 STARTUP_FILE="${HOME}/.config/autostart/autostart.desktop"
 if [ ! -f "${STARTUP_FILE}" ]; then
@@ -127,11 +132,19 @@ if compgen -G '/dev/dri/renderD*' >/dev/null; then
   echo "DRM render node detected"
 fi
 
-if [ "${WSL_D3D12_PRESENT}" != "true" ] && [ "${NVIDIA_PRESENT}" = "true" ] && [ "${DISABLE_ZINK:-true}" == "false" ]; then
+NVIDIA_X11_ZINK_ACTIVE=false
+if [ "${WSL_D3D12_PRESENT}" != "true" ] && [ "${NVIDIA_PRESENT}" = "true" ] && \
+   [ "${PIXELFLUX_WAYLAND:-false}" != "true" ] && [ "${NVIDIA_X11_ZINK:-true}" != "false" ]; then
+  NVIDIA_X11_ZINK_ACTIVE=true
   echo "NVIDIA Zink override enabled"
   export LIBGL_KOPPER_DRI2=1
   export MESA_LOADER_DRIVER_OVERRIDE=zink
   export GALLIUM_DRIVER=zink
+  export __GLX_VENDOR_LIBRARY_NAME=mesa
+  # KWin's OpenGL compositor disconnects from Xvfb with Zink. XRender keeps
+  # the desktop stable while all ordinary session applications inherit the
+  # accelerated Zink OpenGL/Vulkan path.
+  export KWIN_COMPOSE=X
 fi
 
 # Intel and AMD use Mesa directly through the Xvfb DRI3 render node. Driver
@@ -143,42 +156,32 @@ if [ "${WSL_D3D12_PRESENT}" != "true" ] && [ "${NVIDIA_PRESENT}" != "true" ] && 
   echo "Intel/AMD GPU - using native Mesa DRI3 OpenGL"
 fi
 
-# Configure GPU acceleration
-# If USE_XORG=true, use native OpenGL (no VirtualGL needed)
-# If USE_XORG=false (Xvfb), use VirtualGL for GPU acceleration
-USE_VGL=false
+# Configure GPU acceleration. Do not wrap the Plasma session or KWin in
+# VirtualGL: KWin's redirected compositor output is black on Xvfb even though
+# its GL context and the separate Selkies NVENC encoder initialize normally.
+# VirtualGL remains installed and can be used explicitly for individual GL
+# applications with `vglrun -d egl <application>`.
 if [ "${WSL_D3D12_PRESENT}" = "true" ]; then
   # WSL exposes graphics through Mesa's D3D12 Gallium driver. VirtualGL's
   # native NVIDIA EGL backend is not available through /dev/dxg.
   echo "WSL2 Xvfb mode - using Mesa D3D12 OpenGL without VirtualGL"
-elif [ "${USE_XORG}" = "true" ]; then
-  # Xorg mode: direct GPU access, no VirtualGL needed
-  if [ "${NVIDIA_PRESENT}" = "true" ]; then
-    echo "Xorg mode with NVIDIA GPU - using native OpenGL"
-    export __GLX_VENDOR_LIBRARY_NAME=nvidia
-    export __NV_PRIME_RENDER_OFFLOAD=1
-    export LIBGL_ALWAYS_SOFTWARE=0
-  fi
+elif [ "${NVIDIA_X11_ZINK_ACTIVE}" = "true" ]; then
+  echo "NVIDIA Xvfb mode - system-wide accelerated OpenGL through Mesa Zink"
 elif [ "${NVIDIA_PRESENT}" = "true" ] && which vglrun > /dev/null 2>&1; then
-  # Xvfb mode with NVIDIA: use VirtualGL
+  # Xvfb owns the desktop GL context. Keep NVIDIA GLX overrides out of the
+  # Plasma environment; they target the physical GPU rather than Xvfb.
   export VGL_DISPLAY="${VGL_DISPLAY:-egl}"
-  export __GLX_VENDOR_LIBRARY_NAME=nvidia
-  export __NV_PRIME_RENDER_OFFLOAD=1
-  export LIBGL_ALWAYS_SOFTWARE=0
-  USE_VGL=true
-  echo "Xvfb mode with NVIDIA GPU - using VirtualGL"
+  unset __GLX_VENDOR_LIBRARY_NAME __NV_PRIME_RENDER_OFFLOAD
+  echo "Xvfb mode with NVIDIA GPU - stable KDE compositor; VirtualGL available per application"
 elif [ "${DRI_GPU_PRESENT}" = "true" ]; then
   echo "Xvfb DRI3 mode with Intel/AMD GPU - using native OpenGL"
 fi
 
-# Start DE (without exec to allow dbus-launch to work properly)
+# Start DE (without exec to allow dbus-launch to work properly). Selkies uses
+# NVENC independently, so starting Plasma normally does not disable hardware
+# video encoding.
 # Export XDG_RUNTIME_DIR for the session
 export XDG_RUNTIME_DIR
 eval "$(dbus-launch --sh-syntax)"
-if [ "${USE_VGL}" = "true" ]; then
-  echo "Starting KDE Plasma with VirtualGL (VGL_DISPLAY=${VGL_DISPLAY})"
-  vglrun -d "${VGL_DISPLAY}" /usr/bin/startplasma-x11 > /dev/null 2>&1
-else
-  echo "Starting KDE Plasma (native rendering)"
-  /usr/bin/startplasma-x11 > /dev/null 2>&1
-fi
+echo "Starting KDE Plasma (native X server rendering)"
+/usr/bin/startplasma-x11 > /dev/null 2>&1

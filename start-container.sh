@@ -883,7 +883,19 @@ case "${GPU_VENDOR}" in
     if [ -d "/dev/dri" ]; then
       GPU_FLAGS+=(--device=/dev/dri:/dev/dri:rwm)
     fi
-    GPU_ENV_VARS+=(-e ENABLE_NVIDIA=true -e DISABLE_ZINK=true)
+    # X11/Xvfb cannot expose NVIDIA GLX directly, but Mesa Zink can render
+    # through the NVIDIA Vulkan driver without touching the host display.
+    # Ubuntu 26.04 uses the native Wayland/EGL path and does not need Zink.
+    if [[ "${UBUNTU_VERSION}" == "26.04" ]]; then
+      NVIDIA_ZINK_DEFAULT=true
+    else
+      NVIDIA_ZINK_DEFAULT=false
+    fi
+    GPU_ENV_VARS+=(
+      -e ENABLE_NVIDIA=true
+      -e DISABLE_ZINK="${DISABLE_ZINK:-${NVIDIA_ZINK_DEFAULT}}"
+      -e NVIDIA_X11_ZINK="$([[ "${UBUNTU_VERSION}" == "26.04" ]] && printf false || printf true)"
+    )
     ;;
   nvidia-wsl)
     if [ -n "${DOCKER_GPUS}" ]; then

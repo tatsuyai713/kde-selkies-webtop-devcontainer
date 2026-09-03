@@ -2,22 +2,11 @@
 TARGET_USER="${CUSTOM_USER:-${USER_NAME:-root}}"
 TARGET_GROUP="$(id -gn "${TARGET_USER}" 2>/dev/null || printf '%s' "${TARGET_USER}")"
 TARGET_UID="$(id -u "${TARGET_USER}" 2>/dev/null || echo 1000)"
+. /usr/local/lib/pulse-runtime.sh
+webtop_configure_pulse_runtime "${TARGET_UID}"
 
-# Ubuntu 26.04+: PipeWire replaces PulseAudio (pulseaudio binary removed)
-# Ubuntu 24.04 and earlier: use PulseAudio
-# Detection: prefer OS version check; fall back to binary existence check.
-# On 24.04, pipewire may coexist with pulseaudio — pulseaudio wins there.
-UBUNTU_VERSION_ID="$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-0}")"
-USE_PIPEWIRE=false
-if [ -x /usr/bin/pipewire ] && [ ! -x /usr/bin/pulseaudio ]; then
-  # pulseaudio absent → definitely a PipeWire-only distro (26.04+)
-  USE_PIPEWIRE=true
-elif awk "BEGIN{exit !(${UBUNTU_VERSION_ID//./} >= 2604)}" 2>/dev/null && [ -x /usr/bin/pipewire ]; then
-  # OS version >= 26.04 and pipewire present
-  USE_PIPEWIRE=true
-fi
-if [ "${USE_PIPEWIRE}" = "true" ]; then
-  echo "[svc-pulseaudio] PipeWire detected (no pulseaudio binary); starting PipeWire stack"
+if [ "${WEBTOP_AUDIO_BACKEND}" = "pipewire" ]; then
+  echo "[svc-pulseaudio] PipeWire detected; endpoint ${PULSE_SERVER}"
 
   # Ensure XDG_RUNTIME_DIR exists for the user
   XDG_RUNTIME_DIR="/run/user/${TARGET_UID}"
@@ -25,10 +14,6 @@ if [ "${USE_PIPEWIRE}" = "true" ]; then
   chown "${TARGET_USER}:${TARGET_GROUP}" "${XDG_RUNTIME_DIR}"
 
   export XDG_RUNTIME_DIR
-  # PULSE_RUNTIME_PATH must NOT be /defaults for PipeWire; unset it so pipewire-pulse
-  # uses the correct location: ${XDG_RUNTIME_DIR}/pulse/native
-  unset PULSE_RUNTIME_PATH
-
   # Start pipewire, wireplumber, and pipewire-pulse in order
   s6-setuidgid "${TARGET_USER}" env XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR}" /usr/bin/pipewire &
   sleep 1
@@ -36,9 +21,8 @@ if [ "${USE_PIPEWIRE}" = "true" ]; then
   sleep 0.5
   exec s6-setuidgid "${TARGET_USER}" env XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR}" /usr/bin/pipewire-pulse
 else
-  PULSE_DIR="/run/pulse"
-  export PULSE_RUNTIME_PATH="${PULSE_DIR}"
-  export PULSE_SERVER="unix:${PULSE_DIR}/native"
+  PULSE_DIR="${WEBTOP_PULSE_DIR}"
+  echo "[svc-pulseaudio] PulseAudio detected; endpoint ${PULSE_SERVER}"
 
   # Pulseaudio requires a user-owned secure runtime dir. If a root shell ever
   # autospawned a daemon here, stale socket/pid files can block the real service.

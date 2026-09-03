@@ -572,12 +572,12 @@ export XMODIFIERS="@im=fcitx"
 export INPUT_METHOD=fcitx
 # In the KDE Wayland session (Ubuntu 26.04+) run Chrome as a native Wayland
 # client so it renders through kwin's NVIDIA EGL and gets GPU-accelerated
-# compositing, WebGL and NVDEC video decode. The X11/Xvfb path only exposes
-# llvmpipe (software). Fall back to X11 on non-Wayland (22.04/24.04) sessions.
+# compositing, WebGL and NVDEC video decode. On 22.04/24.04, Chrome inherits
+# the session-wide Mesa Zink configuration backed by the NVIDIA Vulkan driver.
 if [ -n "${WAYLAND_DISPLAY}" ] && [ -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ]; then
   OZONE_FLAGS="--ozone-platform=wayland"
 else
-  OZONE_FLAGS="--ozone-platform=x11 --in-process-gpu"
+  OZONE_FLAGS="--ozone-platform=x11"
 fi
 exec "${CHROME_BIN}" --password-store=basic ${OZONE_FLAGS} --no-sandbox ${CHROME_EXTRA_FLAGS} "$@"
 EOF_GCW
@@ -639,7 +639,14 @@ EOF
 # rebuild instead of requiring a full base rebuild.
 COPY --chmod=755 ubuntu-root/etc/s6-overlay/s6-rc.d/svc-de/run /etc/s6-overlay/s6-rc.d/svc-de/run
 
-# Same reasoning for svc-selkies/run (XKB_DEFAULT_* export for Japanese sessions)
+# Keep audio endpoint selection in sync even when only the user image is rebuilt.
+# Ubuntu 22.04/24.04 use PulseAudio at /run/pulse, while 26.04 uses
+# pipewire-pulse below /run/user/<uid>.
+COPY --chmod=644 ubuntu-root/usr/local/lib/pulse-runtime.sh /usr/local/lib/pulse-runtime.sh
+COPY --chmod=755 ubuntu-root/etc/s6-overlay/s6-rc.d/init-adduser/run /etc/s6-overlay/s6-rc.d/init-adduser/run
+COPY --chmod=755 ubuntu-root/etc/s6-overlay/s6-rc.d/svc-pulseaudio/run /etc/s6-overlay/s6-rc.d/svc-pulseaudio/run
+
+# Same reasoning for svc-selkies/run (audio endpoint and XKB_DEFAULT_* export)
 # and for the selkies keymap patch below: both live in the base image, so apply
 # them here too so a user-image rebuild is enough.
 COPY --chmod=755 ubuntu-root/etc/s6-overlay/s6-rc.d/svc-selkies/run /etc/s6-overlay/s6-rc.d/svc-selkies/run
