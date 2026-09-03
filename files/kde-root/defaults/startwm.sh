@@ -136,15 +136,7 @@ NVIDIA_X11_ZINK_ACTIVE=false
 if [ "${WSL_D3D12_PRESENT}" != "true" ] && [ "${NVIDIA_PRESENT}" = "true" ] && \
    [ "${PIXELFLUX_WAYLAND:-false}" != "true" ] && [ "${NVIDIA_X11_ZINK:-true}" != "false" ]; then
   NVIDIA_X11_ZINK_ACTIVE=true
-  echo "NVIDIA Zink override enabled"
-  export LIBGL_KOPPER_DRI2=1
-  export MESA_LOADER_DRIVER_OVERRIDE=zink
-  export GALLIUM_DRIVER=zink
-  export __GLX_VENDOR_LIBRARY_NAME=mesa
-  # KWin's OpenGL compositor disconnects from Xvfb with Zink. XRender keeps
-  # the desktop stable while all ordinary session applications inherit the
-  # accelerated Zink OpenGL/Vulkan path.
-  export KWIN_COMPOSE=X
+  echo "NVIDIA Zink application acceleration enabled"
 fi
 
 # Intel and AMD use Mesa directly through the Xvfb DRI3 render node. Driver
@@ -183,5 +175,49 @@ fi
 # Export XDG_RUNTIME_DIR for the session
 export XDG_RUNTIME_DIR
 eval "$(dbus-launch --sh-syntax)"
+
+# Zink accelerates applications on Xvfb, but it is not a safe KWin compositor:
+# OpenGL mode disconnects and XRender renders translucent shadows as opaque
+# black rectangles. Start the compositor on llvmpipe/OpenGL, then replace only
+# plasmashell with a Zink-enabled process. Desktop launchers and their children
+# consequently inherit GPU acceleration without corrupting window effects.
+if [ "${NVIDIA_X11_ZINK_ACTIVE}" = "true" ]; then
+  unset MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER LIBGL_KOPPER_DRI2
+  unset __GLX_VENDOR_LIBRARY_NAME __NV_PRIME_RENDER_OFFLOAD
+  export LIBGL_ALWAYS_SOFTWARE=1
+  export KWIN_COMPOSE=O2
+fi
+
 echo "Starting KDE Plasma (native X server rendering)"
-/usr/bin/startplasma-x11 > /dev/null 2>&1
+/usr/bin/startplasma-x11 > /dev/null 2>&1 &
+PLASMA_SESSION_PID=$!
+
+if [ "${NVIDIA_X11_ZINK_ACTIVE}" = "true" ]; then
+  for _ in $(seq 1 100); do
+    if pgrep -u "$(id -u)" -x kwin_x11 >/dev/null && pgrep -u "$(id -u)" -x plasmashell >/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+
+  export LIBGL_KOPPER_DRI2=1
+  export MESA_LOADER_DRIVER_OVERRIDE=zink
+  export GALLIUM_DRIVER=zink
+  export __GLX_VENDOR_LIBRARY_NAME=mesa
+  export LIBGL_ALWAYS_SOFTWARE=0
+
+  if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment \
+      LIBGL_KOPPER_DRI2 MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER \
+      __GLX_VENDOR_LIBRARY_NAME LIBGL_ALWAYS_SOFTWARE 2>/dev/null || true
+  fi
+
+  if pgrep -u "$(id -u)" -x plasmashell >/dev/null; then
+    echo "Restarting Plasma Shell with system-wide NVIDIA Zink application acceleration"
+    /usr/bin/plasmashell --replace > /dev/shm/plasmashell-zink.log 2>&1 &
+  else
+    echo "WARNING: plasmashell did not start; Zink environment is configured for later applications." >&2
+  fi
+fi
+
+wait "${PLASMA_SESSION_PID}"

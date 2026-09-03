@@ -25,6 +25,7 @@ fi
 # GPU detection and configuration for WebGL/Vulkan/OpenGL support
 NVIDIA_PRESENT=false
 GPU_AVAILABLE=false
+NVIDIA_X11_ZINK_ACTIVE=false
 
 # Check for NVIDIA GPU
 if which nvidia-smi > /dev/null 2>&1 && nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null | head -n1 | grep -q .; then
@@ -44,12 +45,7 @@ if [ "${NVIDIA_PRESENT}" = "true" ]; then
   if [ "${PIXELFLUX_WAYLAND:-false}" != "true" ] && [ "${NVIDIA_X11_ZINK:-true}" != "false" ]; then
     # NVIDIA GPU with Zink (Mesa's Vulkan-based OpenGL implementation)
     echo "Configuring NVIDIA GPU with Zink driver"
-    export LIBGL_KOPPER_DRI2=1
-    export MESA_LOADER_DRIVER_OVERRIDE=zink
-    export GALLIUM_DRIVER=zink
-    export __GLX_VENDOR_LIBRARY_NAME=mesa
-    unset __NV_PRIME_RENDER_OFFLOAD
-    export KWIN_COMPOSE=X
+    NVIDIA_X11_ZINK_ACTIVE=true
   else
     # NVIDIA GPU with native OpenGL (EGL backend)
     echo "Configuring NVIDIA GPU with native EGL/OpenGL"
@@ -133,11 +129,44 @@ if which startplasma-x11 > /dev/null 2>&1; then
   # compositor image on Xvfb. Keep the desktop on its X server renderer;
   # VirtualGL remains available explicitly for individual applications and
   # Selkies hardware video encoding is configured independently.
-  if [ "${NVIDIA_PRESENT}" = "true" ] && { [ "${PIXELFLUX_WAYLAND:-false}" = "true" ] || [ "${NVIDIA_X11_ZINK:-true}" = "false" ]; }; then
+  if [ "${NVIDIA_X11_ZINK_ACTIVE}" = "true" ]; then
+    unset MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER LIBGL_KOPPER_DRI2
+    unset __GLX_VENDOR_LIBRARY_NAME __NV_PRIME_RENDER_OFFLOAD
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export KWIN_COMPOSE=O2
+  elif [ "${NVIDIA_PRESENT}" = "true" ]; then
     unset __GLX_VENDOR_LIBRARY_NAME __NV_PRIME_RENDER_OFFLOAD
   fi
+
+  if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    eval "$(dbus-launch --sh-syntax)"
+  fi
   echo "Starting KDE Plasma with native X server rendering"
-  /usr/bin/dbus-launch --exit-with-session /usr/bin/startplasma-x11 > /tmp/startwm.log 2>&1 &
+  /usr/bin/startplasma-x11 > /tmp/startwm.log 2>&1 &
+  PLASMA_SESSION_PID=$!
+
+  if [ "${NVIDIA_X11_ZINK_ACTIVE}" = "true" ]; then
+    for _ in $(seq 1 100); do
+      if pgrep -u "$(id -u)" -x kwin_x11 >/dev/null && pgrep -u "$(id -u)" -x plasmashell >/dev/null; then
+        break
+      fi
+      sleep 0.1
+    done
+
+    export LIBGL_KOPPER_DRI2=1
+    export MESA_LOADER_DRIVER_OVERRIDE=zink
+    export GALLIUM_DRIVER=zink
+    export __GLX_VENDOR_LIBRARY_NAME=mesa
+    export LIBGL_ALWAYS_SOFTWARE=0
+    if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+      dbus-update-activation-environment \
+        LIBGL_KOPPER_DRI2 MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER \
+        __GLX_VENDOR_LIBRARY_NAME LIBGL_ALWAYS_SOFTWARE 2>/dev/null || true
+    fi
+    if pgrep -u "$(id -u)" -x plasmashell >/dev/null; then
+      /usr/bin/plasmashell --replace > /dev/shm/plasmashell-zink.log 2>&1 &
+    fi
+  fi
 
   # Start fcitx5 or fcitx if installed
   if which fcitx5 > /dev/null 2>&1; then
