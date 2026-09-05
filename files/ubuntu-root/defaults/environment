@@ -15,3 +15,12 @@ ELECTRON_OZONE_PLATFORM_HINT=auto
 
 # Java/SWT settings
 SWT_GTK3=1
+
+# Mesa's implicit Vulkan device-selection layer currently crashes KDE workers
+# while probing the WSL adapter. This profile deliberately uses OpenGL/D3D12,
+# so expose no Vulkan ICD and disable implicit Vulkan layers. These settings do
+# not change EGL/OpenGL, D3D12, or VA-API and never select software rendering.
+NODEVICE_SELECT=1
+VK_LOADER_LAYERS_DISABLE="~implicit~"
+VK_DRIVER_FILES=/dev/null
+VK_ICD_FILENAMES=/dev/null

@@ -1,0 +1,163 @@
+diff --git a/pixelflux/src/encoders/vaapi.rs b/pixelflux/src/encoders/vaapi.rs
+index 2600e53..6d062a9 100644
+--- a/pixelflux/src/encoders/vaapi.rs
++++ b/pixelflux/src/encoders/vaapi.rs
+@@ -299,7 +299,9 @@ impl VaapiEncoder {
+
+         unsafe {
+             let mut drm_device_ctx: *mut ff::AVBufferRef = ptr::null_mut();
+-            let render_node = if settings.encode_node_index >= 0 {
++            let render_node = if !settings.encode_node_path.is_empty() {
++                settings.encode_node_path.clone()
++            } else if settings.encode_node_index >= 0 {
+                 format!("/dev/dri/renderD{}", 128 + settings.encode_node_index)
+             } else {
+                 "/dev/dri/renderD128".to_string()
+@@ -406,8 +408,8 @@ impl VaapiEncoder {
+             (*encoder_ctx).hw_device_ctx = ff::av_buffer_ref(hw_device_ctx);
+             (*encoder_ctx).hw_frames_ctx = ff::av_buffer_ref(enc_frames_ref);
+             (*encoder_ctx).max_b_frames = 0;
+-            (*encoder_ctx).gop_size = std::ffi::c_int::MAX;
+-            (*encoder_ctx).slices = 4;
++            (*encoder_ctx).gop_size = 65_535;
++            (*encoder_ctx).slices = 1;
+             (*encoder_ctx).compression_level = 6;
+
+             ff::av_buffer_unref(&mut enc_frames_ref);
+@@ -421,16 +423,27 @@ impl VaapiEncoder {
+
+             if settings.video_cbr_mode {
+                 let bps = (settings.video_bitrate_kbps.max(0) as i64).saturating_mul(1000);
++                let rc_mode = std::env::var("PIXELFLUX_VAAPI_RATE_CONTROL")
++                    .unwrap_or_else(|_| "CBR".to_string()).to_ascii_uppercase();
++                let max_bps = if rc_mode == "VBR" {
++                    std::env::var("PIXELFLUX_VAAPI_MAX_BITRATE_KBPS")
++                        .ok().and_then(|v| v.parse::<i64>().ok())
++                        .unwrap_or(settings.video_bitrate_kbps.max(0) as i64)
++                        .max(settings.video_bitrate_kbps.max(0) as i64)
++                        .saturating_mul(1000)
++                } else {
++                    bps
++                };
+                 let vbv = crate::encoders::vbv_bits(
+-                    bps.min(u32::MAX as i64) as u32,
++                    max_bps.min(u32::MAX as i64) as u32,
+                     settings.target_fps,
+                     settings.keyframe_interval_s,
+                     settings.video_vbv_multiplier,
+                 );
+                 (*encoder_ctx).bit_rate = bps;
+-                (*encoder_ctx).rc_max_rate = bps;
++                (*encoder_ctx).rc_max_rate = max_bps;
+                 (*encoder_ctx).rc_buffer_size = vbv.min(i32::MAX as u32) as i32;
+-                set_opt(&mut opts, "rc_mode", "CBR");
++                set_opt(&mut opts, "rc_mode", if rc_mode == "VBR" { "VBR" } else { "CBR" });
+             } else {
+                 set_opt(&mut opts, "rc_mode", "CQP");
+                 set_opt(&mut opts, "qp", &settings.video_crf.to_string());
+@@ -671,8 +684,8 @@ impl VaapiEncoder {
+         (*self.encoder_ctx).hw_device_ctx = ff::av_buffer_ref(self.hw_device_ctx);
+         (*self.encoder_ctx).hw_frames_ctx = ff::av_buffer_ref(self.enc_frames_ctx);
+         (*self.encoder_ctx).max_b_frames = 0;
+-        (*self.encoder_ctx).gop_size = std::ffi::c_int::MAX;
+-        (*self.encoder_ctx).slices = 4;
++        (*self.encoder_ctx).gop_size = 65_535;
++        (*self.encoder_ctx).slices = 1;
+         (*self.encoder_ctx).compression_level = 6;
+
+         let mut opts: *mut ff::AVDictionary = ptr::null_mut();
+@@ -684,16 +697,27 @@ impl VaapiEncoder {
+
+         if self.cbr_mode {
+             let bps = (self.current_bitrate_kbps.max(0) as i64).saturating_mul(1000);
++            let rc_mode = std::env::var("PIXELFLUX_VAAPI_RATE_CONTROL")
++                .unwrap_or_else(|_| "CBR".to_string()).to_ascii_uppercase();
++            let max_bps = if rc_mode == "VBR" {
++                std::env::var("PIXELFLUX_VAAPI_MAX_BITRATE_KBPS")
++                    .ok().and_then(|v| v.parse::<i64>().ok())
++                    .unwrap_or(self.current_bitrate_kbps.max(0) as i64)
++                    .max(self.current_bitrate_kbps.max(0) as i64)
++                    .saturating_mul(1000)
++            } else {
++                bps
++            };
+             let vbv = crate::encoders::vbv_bits(
+-                bps.min(u32::MAX as i64) as u32,
++                max_bps.min(u32::MAX as i64) as u32,
+                 self.fps.max(1) as f64,
+                 self.current_kf_s,
+                 self.current_vbv_mult,
+             );
+             (*self.encoder_ctx).bit_rate = bps;
+-            (*self.encoder_ctx).rc_max_rate = bps;
++            (*self.encoder_ctx).rc_max_rate = max_bps;
+             (*self.encoder_ctx).rc_buffer_size = vbv.min(i32::MAX as u32) as i32;
+-            set_opt(&mut opts, "rc_mode", "CBR");
++            set_opt(&mut opts, "rc_mode", if rc_mode == "VBR" { "VBR" } else { "CBR" });
+         } else {
+             set_opt(&mut opts, "rc_mode", "CQP");
+             set_opt(&mut opts, "qp", &qp.to_string());
+diff --git a/pixelflux/src/lib.rs b/pixelflux/src/lib.rs
+index 7ca8e2b..9712e1a 100644
+--- a/pixelflux/src/lib.rs
++++ b/pixelflux/src/lib.rs
+@@ -299,6 +299,10 @@ pub struct RustCaptureSettings {
+     pub watermark_path: String,
+     pub watermark_location_enum: i32,
+     pub encode_node_index: i32,
++    /// Exact DRM node used by the encoder. This is required by WSL's D3D12
++    /// VA-API path, where the primary node (`card0`) cannot be represented by
++    /// the legacy renderD index.
++    pub encode_node_path: String,
+     pub use_cpu: bool,
+     pub use_openh264: bool,
+     pub debug_logging: bool,
+@@ -402,6 +406,7 @@ impl Default for RustCaptureSettings {
+             watermark_path: String::new(),
+             watermark_location_enum: 0,
+             encode_node_index: -2,
++            encode_node_path: String::new(),
+             use_cpu: false,
+             use_openh264: false,
+             debug_logging: false,
+@@ -480,6 +485,11 @@ pub(crate) fn extract_settings(settings: &Bound<'_, PyAny>) -> PyResult<RustCapt
+         watermark_path,
+         watermark_location_enum: settings.getattr("watermark_location_enum")?.extract()?,
+         encode_node_index: settings.getattr("encode_node_index")?.extract()?,
++        encode_node_path: settings
++            .getattr("encode_node_path")
++            .ok()
++            .and_then(|v| v.extract::<String>().ok())
++            .unwrap_or_default(),
+         use_cpu: settings.getattr("use_cpu")?.extract()?,
+         use_openh264: settings
+             .getattr("use_openh264")
+@@ -1825,10 +1835,25 @@ fn run_wayland_thread(
+                     let mut different_gpu = false;
+                     if gpu_intent {
+                         let encode_node_idx = settings.encode_node_index.max(0);
+-                        if !state.render_node_path.is_empty()
+-                            && !state.render_node_path.contains(&format!("renderD{}", 128 + encode_node_idx))
+-                        {
+-                            different_gpu = true;
++                        let encode_node_path = if settings.encode_node_path.is_empty() {
++                            format!("/dev/dri/renderD{}", 128 + encode_node_idx)
++                        } else {
++                            settings.encode_node_path.clone()
++                        };
++                        if !state.render_node_path.is_empty() {
++                            let render_name = std::path::Path::new(&state.render_node_path)
++                                .file_name().and_then(|v| v.to_str()).unwrap_or("");
++                            let encode_name = std::path::Path::new(&encode_node_path)
++                                .file_name().and_then(|v| v.to_str()).unwrap_or("");
++                            let render_device = std::fs::canonicalize(
++                                format!("/sys/class/drm/{render_name}/device"));
++                            let encode_device = std::fs::canonicalize(
++                                format!("/sys/class/drm/{encode_name}/device"));
++                            different_gpu = state.render_node_path != encode_node_path
++                                && match (render_device, encode_device) {
++                                    (Ok(render), Ok(encode)) => render != encode,
++                                    _ => true,
++                                };
+                         }
+                     }

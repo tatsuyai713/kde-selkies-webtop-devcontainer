@@ -1,0 +1,73 @@
+#!/bin/bash
+set -e
+
+# Running with the desktop user's HOME as root makes Chrome replace profile
+# settings with root-owned mode-0600 files, breaking the next desktop launch.
+if (( EUID == 0 )); then
+  echo "Do not start Chrome as root. Run this wrapper as the desktop user (docker exec --user <desktop-user> ...)." >&2
+  exit 1
+fi
+
+CHROME_BIN=/usr/bin/google-chrome-stable
+export XMODIFIERS="@im=fcitx"
+export INPUT_METHOD=fcitx
+
+GPU_FLAGS=()
+WSL_PROFILE="${ENCODER:-${GPU_VENDOR:-}}"
+case "${WSL_PROFILE}" in
+  intel-wsl|nvidia-wsl|amd-wsl) WSL_D3D12_PROFILE=true ;;
+  *) WSL_D3D12_PROFILE=false ;;
+esac
+if [ "${WSL_ENVIRONMENT:-false}" = "true" ] && [ "${WSL_D3D12_PROFILE}" = "true" ]; then
+  # Native Wayland's virtual GBM/dmabuf synchronization is extremely slow in
+  # this nested WSL compositor. XWayland logs a harmless vgem DRI3 failure,
+  # then ANGLE initializes Mesa D3D12 directly (verified OpenGL 4.1 on Intel).
+  unset LD_PRELOAD WSL_D3D12_COMPOSITOR_ONLY
+  unset LIBGL_ALWAYS_SOFTWARE MESA_LOADER_DRIVER_OVERRIDE
+  # The Qt6 shim selected below has the installed Wayland platform plugin.
+  export QT_QPA_PLATFORM=xcb
+  export GALLIUM_DRIVER=d3d12
+  case "${WSL_PROFILE}" in
+    intel-wsl)  WSL_ADAPTER=Intel ;;
+    nvidia-wsl) WSL_ADAPTER=NVIDIA ;;
+    amd-wsl)    WSL_ADAPTER=Radeon ;;
+  esac
+  export MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-${WSL_ADAPTER}}"
+
+  # Use D3D12 VA-API for browser video acceleration. Intel needs its isolated
+  # compatibility driver; NVIDIA and AMD keep the system Mesa driver.
+  export LIBVA_DRIVER_NAME=d3d12
+  if [ "${WSL_PROFILE}" = "intel-wsl" ]; then
+    export LIBVA_DRIVERS_PATH=/opt/wsl-vaapi-legacy
+    export LD_LIBRARY_PATH="/opt/wsl-vaapi-legacy:/usr/lib/wsl/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  else
+    unset LIBVA_DRIVERS_PATH
+    export LD_LIBRARY_PATH="/usr/lib/wsl/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  fi
+
+  # Ubuntu's unrelated native Vulkan ICDs probe devices that do not exist in
+  # WSL and have crashed Chrome before ANGLE reaches its OpenGL backend. Keep
+  # Vulkan off for Chrome; OpenGL, raster, decode and encode remain on Intel.
+  export NODEVICE_SELECT=1
+  export VK_DRIVER_FILES=/dev/null
+  export VK_ICD_FILENAMES=/dev/null
+  GPU_FLAGS=(
+    --ozone-platform=x11
+    --qt-version=6
+    --enable-gpu-rasterization
+    --disable-lcd-text
+    --disable-webgpu
+    --use-gl=angle
+    --use-angle=gl
+    --use-vulkan=disabled
+    --enable-features=AcceleratedVideoEncoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,VaapiIgnoreDriverChecks
+    --disable-features=WebGPU,WebGPUService,WebGPUBlobCache,Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,SkiaGraphite
+  )
+elif [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ]; then
+  GPU_FLAGS=(--ozone-platform=wayland)
+else
+  GPU_FLAGS=(--ozone-platform=x11)
+fi
+
+EXTRA_FLAGS=(${CHROME_EXTRA_FLAGS:-})
+exec "${CHROME_BIN}" --password-store=basic "${GPU_FLAGS[@]}" --no-sandbox "${EXTRA_FLAGS[@]}" "$@"

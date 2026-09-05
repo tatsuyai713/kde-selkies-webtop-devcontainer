@@ -2,6 +2,11 @@
 
 TARGET_USER="${CUSTOM_USER:-${USER_NAME:-root}}"
 
+# The image removes this activation file, but also enforce it for upgraded or
+# persisted containers. obexd loops while requesting an unavailable Evolution
+# source registry and can consume an entire CPU core through the session bus.
+rm -f /usr/share/dbus-1/services/org.bluez.obex.service
+
 # ensure runtime dir for DBus/Qt
 TARGET_UID=$(id -u "${TARGET_USER}" 2>/dev/null || true)
 if [ -n "${TARGET_UID}" ]; then

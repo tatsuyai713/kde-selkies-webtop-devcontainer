@@ -106,8 +106,8 @@ This is a fork of [linuxserver/docker-webtop](https://github.com/linuxserver/doc
 
 **WSL2 + Intel / AMD**
 ```bash
-sudo modprobe vgem                        # DRM render node for GPU compositing / VA-API (offered by the scripts too)
-./start-container.sh --encoder intel-wsl  # or: --encoder amd-wsl
+sudo modprobe vgem                        # Virtual DRM render node (also offered by the scripts)
+./start-container.sh --encoder intel-wsl  # Select no Docker GPU; do not add --all
 ```
 
 ### VS Code Dev Container
@@ -199,7 +199,139 @@ Mounting host directories (e.g. `$HOME`) requires matching file ownership. Witho
 
 ## Intel/AMD GPU Host Setup
 
-Required only for Intel/AMD hardware encoding (VA-API). NVIDIA GPUs do not need this.
+Native Linux and WSL2 expose GPUs differently. Docker's `--gpus` option (and this project's
+`--all` / `--num`) is for NVIDIA Container Toolkit. Do not use it on an Intel/AMD-only host.
+
+### WSL2 + Intel preflight
+
+Install a current Intel graphics driver on Windows, run `wsl --update` and `wsl --shutdown`
+from PowerShell, then restart WSL. Do not install a Linux Intel kernel driver inside WSL;
+the GPU is exposed through the Windows WDDM driver. Check the Windows adapter and driver with:
+
+```powershell
+Get-CimInstance Win32_VideoController |
+  Select-Object Name, DriverVersion, Status
+```
+
+```bash
+uname -r | grep -i microsoft
+test -c /dev/dxg && echo "OK: /dev/dxg"
+test -f /usr/lib/wsl/lib/libd3d12.so && echo "OK: libd3d12.so"
+test -f /usr/lib/wsl/lib/libdxcore.so && echo "OK: libdxcore.so"
+sudo modprobe vgem
+ls -l /dev/dri/renderD128
+docker version
+docker info
+df -h /var/lib/docker
+```
+
+`/dev/dri/renderD128` is a virtual node created by `vgem`, not the Intel GPU itself. The real
+GPU is accessed through `/dev/dxg` and `/usr/lib/wsl` by Mesa D3D12. Consequently, a failing
+host-side `vainfo` alone does not prove that WSL cannot see the GPU; test inside the container.
+
+```bash
+./start-container.sh --encoder intel-wsl   # no --all or --gpu
+./check-wsl-gpu.sh linuxserver-kde-$(whoami)
+```
+
+Following Microsoft's WSLg container guidance, D3D12 VA-API uses `/dev/dri/card0`, not
+`renderD128`, and `MESA_LOADER_DRIVER_OVERRIDE` must be unset for the VA frontend.
+
+```bash
+docker exec linuxserver-kde-$(whoami) bash -lc \
+  'env -u MESA_LOADER_DRIVER_OVERRIDE LIBVA_DRIVER_NAME=d3d12 GALLIUM_DRIVER=d3d12 \
+   vainfo --display drm --device /dev/dri/card0'
+```
+
+Run the combined diagnostic below. It checks the Windows driver, WSL devices, the container's
+Intel D3D12 OpenGL renderer and VA-API capabilities, then performs a real one-second H.264 encode
+and counts decoded frames. This distinguishes a working encoder from a misleading `vainfo` result.
+
+```bash
+./check-wsl-gpu.sh linuxserver-kde-$(whoami)
+```
+
+`intel-wsl` defaults to `WSL_GPU_MODE=full`: KWin, Plasma/Qt Quick, applications
+and Pixelflux's Wayland renderer use Mesa D3D12 on Intel. H.264 encoding uses Mesa 25.2.8's
+D3D12 VA driver and the `wsl-vaapi-serialize` synchronization shim in a dedicated FFmpeg child
+process, while desktop OpenGL keeps the current Mesa version. This process boundary is required:
+loading the OpenGL and VA-API D3D12 stacks into Pixelflux together made `vaCreateSurfaces` fail
+and later faulted in Intel's `libigd12dxva64.so`, taking the parent Wayland compositor and Plasma
+down with it. Frame readback is a data transfer; H.264 compression remains Intel GPU VA-API.
+The default rate is VBR 4 Mbps with a hard 8 Mbps ceiling (CBR compatibility mode is also capped
+at 8 Mbps). See [validation and limitations](files/pixelflux/README.md#intel-wsl-va-api-synchronization).
+`WSL_GPU_MODE=applications` and `software` remain explicit diagnostic modes, not automatic fixes.
+
+Pixelflux 2.0 set VA-API's `gop_size` to `INT_MAX`, causing FFmpeg to emit
+`log2_max_frame_num_minus4=27` in the SPS although H.264 permits at most 12. FFmpeg itself rejected
+the captured stream, not just Edge. Selkies also omitted the framerate argument and described the
+actual I420 High@4.1 stream as High 4:2:2 @ Level 6.2. Google Meet used Intel decode because Edge and
+the driver were healthy; these two sender-side defects were specific to this raw WebCodecs path.
+
+On Ubuntu 26.04 amd64 the image installs the included Pixelflux 2.0 wheel built against system FFmpeg
+8 with a standards-compliant GOP, one slice, and the out-of-process Intel encoder. The frontend
+supplies `avc1.640C29` (High 4:2:0, constraint byte `0x0c`, Level 4.1), requests `prefer-hardware`, and uses cache-busted
+assets. The hardware-decode patch is re-applied by `init-nginx` after it refreshes the dashboard,
+so a container restart cannot silently restore `prefer-software`.
+
+With the animated desktop foregrounded, the Edge GPU process measured 5.4% peak (4.8% average) on
+Intel `engtype_VideoDecode` and 5.81% peak on `3D`. The WSL VM simultaneously reached 17% on its Intel
+video engine and 14.09% on D3D12 3D. The verified path is now **Intel GPU OpenGL desktop + Intel GPU
+VA-API encode + Edge Intel GPU decode**. WebCodecs acceleration remains a hint by specification, so
+verify `edge://gpu` on a different host.
+
+Confirm full GPU desktop effects with KWin support information:
+
+```bash
+docker exec linuxserver-kde-$(whoami) bash -lc \
+  's6-setuidgid "$USER_NAME" qdbus6 org.kde.KWin /KWin supportInformation' \
+  | grep -E 'Compositing Type|OpenGL renderer string'
+```
+
+If this produces a black screen with `Failed to allocate GBM buffer`, `Could not find a suitable
+render format`, or `D3D12: Removing Device`, first use `wsl_gpu_mode: "applications"`; this keeps
+application and capture rendering on Intel while KWin uses QPainter. `software` is the final fallback.
+
+The encode workaround follows independently reproduced WSL results: Microsoft documents D3D12 VA-API
+H.264 encode, a WSL issue reports Mesa 24.0.9 failing and the exact pipeline working again after a
+downgrade to Mesa 23.2.1, and a Frigate user reports a successful WSL Ubuntu 22.04 FFmpeg
+VP9-to-H.264 VA-API transcode. This machine reproduces that boundary: Mesa 23.2.1 generated a
+1,169,109-byte, 30-frame 1280x720 stream; Mesa 26 generated no video frames. Do not replace the whole
+graphics stack with Jammy packages—the image bundles the legacy VA driver only for Selkies.
+
+Official references and reproduced reports:
+
+- [Microsoft: Containerizing GUI applications with WSLg](https://github.com/microsoft/wslg/blob/main/samples/container/Containers.md)
+- [Microsoft WSLg: selecting Intel, NVIDIA or AMD for Mesa D3D12](https://github.com/microsoft/wslg/wiki/GPU-selection-in-WSLg)
+- [Microsoft: Run Linux GUI apps with WSL](https://learn.microsoft.com/windows/wsl/tutorials/gui-apps)
+- [Intel: Iris Xe Graphics Family drivers](https://www.intel.com/content/www/us/en/support/products/211012/graphics/processor-graphics/intel-iris-xe-graphics-family.html)
+- [Intel: Configure WSL2 for GPU workflows](https://www.intel.com/content/www/us/en/docs/oneapi/installation-guide-linux/2025-1/configure-wsl-2-for-gpu-workflows.html)
+- [Selkies: capture and encoder implementation](https://github.com/selkies-project/selkies/blob/main/docs/component.md)
+- [Mesa: D3D12 driver](https://docs.mesa3d.org/drivers/d3d12.html)
+- [Mesa 26.2.2 release notes](https://docs.mesa3d.org/relnotes/26.2.2.html)
+- [Microsoft: D3D12 video encoding](https://learn.microsoft.com/windows-hardware/drivers/display/video-encoding-d3d12)
+- [Microsoft: D3D12 GPU video acceleration in WSL (working encode examples)](https://devblogs.microsoft.com/commandline/d3d12-gpu-video-acceleration-in-the-windows-subsystem-for-linux-now-available/)
+- [Microsoft WSL issue #11838: Mesa 23.2.1 restores the working encoder](https://github.com/microsoft/WSL/issues/11838)
+- [Frigate discussion #11133: successful WSL Ubuntu 22.04 VA-API transcode](https://github.com/blakeblackshear/frigate/discussions/11133#discussioncomment-9241829)
+- [Microsoft WSLg issue #1458: Intel D3D12 VA-API/TDR report](https://github.com/microsoft/wslg/issues/1458)
+- [Microsoft WSLg issue #1492: NVIDIA D3D12/Dozen `vkCreateDevice` crash](https://github.com/microsoft/wslg/issues/1492)
+- [NVIDIA: FFmpeg GPU acceleration on WSL (NVENC/NVDEC)](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.1/ffmpeg-with-nvidia-gpu/index.html)
+- [Pixelflux: VA-API/Wayland encoder implementation](https://github.com/linuxserver/pixelflux/blob/master/pixelflux/src/encoders/vaapi.rs)
+- [Microsoft: verify H.264 decoding in Edge](https://learn.microsoft.com/en-us/troubleshoot/microsoft-edge/development/video-playback-issues)
+- [W3C WebCodecs: HardwareAcceleration preference](https://w3c.github.io/webcodecs/#enumdef-hardwareacceleration)
+
+If startup fails with `failed to discover GPU vendor from CDI: no known GPU vendor found`, an
+NVIDIA-only `docker_gpus: "all"` setting was applied. Clear it in `configs/<container>.yml`, remove
+only the failed container in `Created` state, and start again.
+
+```bash
+docker rm linuxserver-kde-$(whoami)
+./start-container.sh
+```
+
+### Native Linux Intel/AMD
+
+The following applies to a native Linux host where the physical GPU is directly exposed in `/dev/dri`.
 
 ### 1. Add user to video/render groups
 
@@ -223,7 +355,7 @@ sudo apt update && sudo apt install vainfo mesa-va-drivers
 vainfo  # should show VAProfileH264Main : VAEntrypointEncSlice
 ```
 
-> If VA-API works on the host, it automatically works inside the container.
+> On native Linux, working host VA-API can be passed into the container through the same `/dev/dri` devices.
 
 ---
 
@@ -296,6 +428,8 @@ container name, Ubuntu version, architecture, docker mode (`dind`/`dood`), encod
 
 **Container notes:**
 - Containers persist after stop (restart or commit anytime)
+- `start-container.sh` sets `--restart unless-stopped`, so it returns after Docker/WSL restarts unless explicitly stopped
+- `/config` is a Docker volume; the home directory and `/mnt` are host bind mounts, so normal restarts retain data
 - Hostname: `Docker-$(hostname)`
 - Host home mounted at `~/host_home`
 - Host `/mnt` mounted at `~/host_mnt` (Linux/WSL2 only, skipped on macOS)
@@ -629,14 +763,29 @@ Check browser audio permissions and use HTTPS (some browsers block audio over HT
 - `--encoder nvidia-wsl`, `intel-wsl` and `amd-wsl` all pass `/dev/dxg`, the vgem render node and the WSLg libraries (`/usr/lib/wsl`) into the container, enabling GPU OpenGL through Mesa D3D12 for every vendor; the Windows (WDDM) driver does the rendering
 - `MESA_D3D12_DEFAULT_ADAPTER_NAME` selects the D3D12 adapter by name substring and defaults to `NVIDIA`, `Intel` or `Radeon` depending on the profile; on hybrid systems set it to a substring of the preferred adapter name
 - `nvidia-wsl` encodes with NVENC, independently from the OpenGL rendering path
-- `intel-wsl` / `amd-wsl` encode with VA-API through Mesa's `d3d12` VA driver (`LIBVA_DRIVER_NAME=d3d12`), i.e. the Windows driver's D3D12 Video Encode API. Whether H.264 encode is available depends on the Windows GPU driver; pixelflux falls back to x264 software encoding when it is not (check `vainfo` inside the container)
-- Mesa's d3d12 VA driver only initialises through its vgem path, which requires `MESA_LOADER_DRIVER_OVERRIDE` to be unset and `GALLIUM_DRIVER=d3d12`; `svc-selkies` arranges that for pixelflux (with the override set, `vaInitialize failed with error code 2`). Verified on the NVIDIA adapter (H.264/HEVC decodable). On Intel (driver 32.0.101.8517) the D3D12 encoder ignores `FrameStartOffset` (SPS/PPS overwritten) and returns `EncodedBitstreamWrittenBytesCount=0`, so `intel-wsl` encodes with x264 unless `WSL_INTEL_VAAPI=1`; `amd-wsl` uses VA-API (untested)
-- On Intel GPUs, GPU rendering through Mesa d3d12 hangs the Windows driver under load (Qt Quick within a minute, GL clients as load rises). Windows resets the adapter (`LiveKernelEvent 141`, repeated: `124`), which also blacks out or freezes the *host* desktop; in the container Mesa prints `D3D12: Removing Device.`, pixelflux loses its D3D12 device and the stream stays black. `intel-wsl` therefore does not use the GPU at all: the container runs GL on llvmpipe (`GALLIUM_DRIVER=llvmpipe`, pixelflux included), encodes with x264, and `startwm_wayland.sh` applies `WSL_GPU_MODE` (`software` by default for `intel-wsl`: QPainter compositing, apps on llvmpipe; `compositor`: only `kwin_wayland` uses D3D12, every other process is forced to llvmpipe by the constructor in `kwin-d3d12-noscanout.c`; `full` = everything on the GPU, the `nvidia-wsl` / `amd-wsl` default). Qt Quick renders in software outside `full` mode and, on `intel-wsl`, in `full` mode too unless `WSL_QTQUICK_GPU=1`. `svc-de` restarts `svc-selkies` automatically when KWin logs `create_immed failed and produced an invalid wl_buffer`
+- `intel-wsl` / `amd-wsl` can encode through Mesa's `d3d12` VA driver (`LIBVA_DRIVER_NAME=d3d12`), i.e. the Windows driver's D3D12 Video Encode API. Pixelflux 2 receives WSL's `/dev/dri/card0` through its path-based API; use `check-wsl-gpu.sh`, not `vainfo` alone, to verify real output
+- Mesa's d3d12 VA driver requires `MESA_LOADER_DRIVER_OVERRIDE` and `LIBGL_ALWAYS_SOFTWARE` to be unset, with `GALLIUM_DRIVER=d3d12`; `svc-selkies` arranges that for Pixelflux. Intel WSL encoding uses pinned Mesa 25.2.8 under `/opt/wsl-vaapi` and the VA-API synchronization shim. Modern system Mesa remains active for OpenGL.
+- All three WSL GPU profiles default to `full`. KWin, Plasma/Qt Quick and applications use Mesa D3D12 on the selected Intel, NVIDIA or AMD adapter; CPU rendering modes are explicit diagnostic options. Qt Quick is pinned to its threaded OpenGL RHI and grayscale GPU distance-field text material on these profiles, avoiding both a Vulkan probe and physical-subpixel assumptions.
+- Intel WSL VA-API previously faulted in `libigd12dxva64.so` on the `wl-encode` thread under load. The Intel encoder now runs in a dedicated FFmpeg process, so it no longer shares Mesa/Intel D3D12 state with Pixelflux's OpenGL compositor. It uses VBR 4 Mbps with an 8 Mbps hard maximum, `async_depth=1`, and the VA synchronization shim.
+- The Chrome/Chromium wrappers remove Plasma's protective `GALLIUM_DRIVER=llvmpipe` policy, then explicitly select Mesa D3D12, the profile's adapter, ANGLE OpenGL and GPU rasterization for the browser only. `--enable-zero-copy` and `mesa_glthread=true` are intentionally not forced: with WSL D3D12 they caused stale browser surfaces, including missing omnibox text. Besides `chrome://gpu`, actual use can be confirmed by `libd3d12.so` and the selected vendor UMD in the GPU process's `/proc/<pid>/maps`.
+- The failed same-process zero-copy candidate remains disabled. The included wheel renders with Intel D3D12 OpenGL, reads back NV12, then uploads and encodes it through Intel VA-API in a separate FFmpeg process. An 18-second live regression delivered 471 video frames (about 26 fps) at 1992x1248 with no CPU-codec fallback or SIGSEGV; a preceding 45-second run delivered 1,095 frames. The base image builds the synchronization shim and its thread-exclusion regression test.
+- On `intel-wsl`, `nvidia-wsl`, and `amd-wsl`, Chrome/Chromium use XWayland for window presentation while ANGLE still renders through Mesa D3D12 on the adapter selected by the profile. Native Ozone/Wayland's virtual GBM/dmabuf synchronization made browser surfaces extremely slow and could delay omnibox updates even though GPU rendering was enabled. The X11 Ozone path avoids that presentation bottleneck; a live Intel `SystemInfo.getInfo` check reported Iris Xe, OpenGL 4.1, GPU compositing/rasterization and hardware video encode/decode enabled, with no software renderer mapped. The common browser policy also disables the unstable/unneeded WSL D3D12 Vulkan path. It is not applied to ordinary Linux `intel`, `amd`, or `nvidia` profiles.
+- Adapter selection and D3D12 OpenGL are common to all three WSL GPU vendors: `MESA_D3D12_DEFAULT_ADAPTER_NAME` defaults to `Intel`, `NVIDIA`, or `Radeon`. The pinned `/opt/wsl-vaapi-legacy` VA-API driver and serialized external FFmpeg encoder remain exclusive to `intel-wsl`; NVIDIA uses NVENC for the Selkies stream, while AMD uses the system D3D12 VA-API driver. Do not copy the Intel legacy video stack into NVIDIA/AMD profiles.
+- Chrome/Chromium launch wrappers reject root execution. Diagnostics must also use `docker exec --user <desktop-user> <container> /usr/local/bin/google-chrome-wrapped ...`. Opening the desktop profile as root can replace settings with root-owned mode-0600 files and cause a profile loading error. If this happens, close the browser, inspect ownership within that profile, and restore only the incorrectly root-owned entries to the desktop user. Do not delete the profile or use `chmod 777`. Use a separate `--user-data-dir` for stress tests, never the user's normal profile.
+- A session watchdog restarts `plasmashell` after `kwin_wayland_wrapper` recovers from a D3D12 device reset, restoring the bottom panel and desktop icons
+- The Wayland startup script now terminates the private D-Bus daemon it created when a desktop session ends. This prevents old portal/session buses from accumulating CPU load after compositor recovery.
+- WSL webtop images disable BlueZ OBEX D-Bus activation. Without an Evolution source-registry executable, `obexd` repeatedly requested the missing service and kept the session bus busy; this was a separate cause of slow Chrome/Plasma interaction.
+- WSL GPU sessions disable Vulkan ICD/device-select probing for Plasma, KIO, Chrome and Chromium while retaining Mesa D3D12 OpenGL. The browser wrappers deliberately do not use `--ignore-gpu-blocklist`: Chromium 152 otherwise re-enables WebGPU-on-Vulkan-via-GL interop for WSL's Microsoft adapter identity and performs a failing Vulkan initialization at every start. On the tested Intel host `kioworker` also repeatedly faulted in `libVkLayer_MESA_device_select.so`; the desktop Folder View worker then disappeared, taking icon labels with it. Chrome/Chromium disable WebGPU/Graphite and LCD/subpixel text but keep Canvas, compositing, raster, OpenGL/WebGL and video encode/decode GPU-accelerated. X11 uses `Xft.rgba: none`, fontconfig selects `10-sub-pixel-none.conf`, and Qt receives an empty `QT_SUBPIXEL_AA_TYPE` (which Qt interprets as no physical subpixel layout). Qt Quick additionally uses `QSG_DISTANCEFIELD_ANTIALIASING=gray`: this selects Qt's GPU A8 gray-alpha distance-field material instead of the A32 subpixel material that produced yellow/transparent glyphs through Mesa D3D12.
+- KWin/Wayland already advertises the output scale calculated from `DPI`. The launch scripts therefore do not synthesize `--force-device-scale-factor`; doing so made Chromium apply 1.5 twice and render at DPR 2.25. The wrapper also ignores that stale argument when inherited from an older persistent container.
+- If both pinned VA drivers return `vaInitialize ... resource allocation failed` after all container GPU processes have stopped, `/dev/dxg` is faulted in the WSL VM. A Docker restart cannot reset that host device. From Windows PowerShell run `wsl --shutdown`, start the distribution again, then run `./check-wsl-gpu.sh`; do not rebuild or recreate the persistent container for this condition.
 - Without vgem (`sudo modprobe vgem` on the host) there is no `/dev/dri` node: KWin composites in software and `intel-wsl` / `amd-wsl` fall back to software encoding
-- Vulkan depends on whether the WSL/Mesa Dozen (`dzn`) driver is available; it is not required for accelerated OpenGL/WebGL
+- Vulkan is disabled for WSL GPU desktop profiles because it is not required for accelerated OpenGL/WebGL and the device-select/Dozen path has faulted on tested Intel and NVIDIA WSL stacks
+- Controlled testing reproduced the missing Plasma text only with GPU Qt Quick; disabling Folder View's `DropShadow` FBO and selecting `Text.NativeRendering` did not fix it. The fault is therefore at the Qt Quick text-texture/Mesa D3D12 boundary, not in the QML setting alone. Ubuntu Mesa 26.0.8 omits dzn, and an isolated test of Kisak 26.2.2 dzn also crashed in the Intel UMD during `vkCreateDevice`, so Vulkan RHI is not selected at present
 - **GPU compositing (desktop effects) needs a DRM render node.** WSL2 exposes the GPU only as `/dev/dxg` and creates no `/dev/dri`; without it pixelflux cannot advertise linux-dmabuf and KWin falls back to QPainter (no OpenGL effects, CPU-bound WebGL, high host load). Load `vgem` on the host (`sudo modprobe vgem`, persist with `echo vgem | sudo tee /etc/modules-load.d/vgem.conf`, or `[boot] command = modprobe vgem` in `/etc/wsl.conf` without systemd). `start-container.sh` / `create-devcontainer-config.sh` detect the missing node and offer to load it. The node must exist **before** the container config is generated, since `/dev/dri` is only passed through when present.
 - **KWin 6.6 + Mesa d3d12 needs the `kwin-d3d12-noscanout` shim** ([source](files/ubuntu-root/usr/local/src/kwin-d3d12-noscanout.c)). KWin allocates gbm buffers with `GBM_BO_USE_SCANOUT`, which the d3d12 driver rejects, so with a render node present KWin picked OpenGL and failed every frame (`Could not find a suitable render format` → black screen). The user image builds the shim, strips `cap_sys_nice` from `kwin_wayland` (glibc ignores `LD_PRELOAD` otherwise), and `startwm_wayland.sh` uses `KWIN_COMPOSE=O2` + `LD_PRELOAD` when both `/dev/dri/renderD128` and the shim exist, `KWIN_COMPOSE=Q` otherwise.
-- Check the result with `qdbus6 org.kde.KWin /KWin org.kde.KWin.supportInformation` inside the session: `Compositing Type: OpenGL` / `OpenGL renderer string: D3D12 (NVIDIA ...)` means GPU compositing; `QPainter` means vgem or the shim is missing.
+- Check the result with `qdbus6 org.kde.KWin /KWin supportInformation` inside the session: `Compositing Type: OpenGL` / `OpenGL renderer string: D3D12 (Intel ...)` means GPU compositing; `QPainter` means vgem or the shim is missing.
+- Selkies captures audio from PipeWire-Pulse's `output.monitor`. A `python3` recording stream targeting it in `pactl list short source-outputs` confirms server-side audio encoding. `PULSE_SERVER` and `PIPEWIRE_REMOTE` point at canonical `/run/user/<uid>` sockets even though Plasma uses a private runtime directory for nested Wayland.
+- At non-100% browser zoom/DPR, sizing the Canvas from its parent can form a feedback loop because the Canvas enlarges that parent, cropping the bottom of the desktop (including Plasma's panel). Primary Canvas layout is therefore constrained to `window.visualViewport`.
 
 ---
 

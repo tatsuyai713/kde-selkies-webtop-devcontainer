@@ -20,6 +20,7 @@ ROOT = Path("/usr/share/selkies")
 LEGACY_MARKER = "selkies-stream-scale-ui-fix"
 BUILD_PATCH_MARKER = "__selkiesPrimaryStreamResolution"
 PRIMARY_DECODER_REINIT_MARKER = "Primary mode: Reinitializing decoder for stream resolution change."
+VISUAL_VIEWPORT_MARKER = "window.visualViewport"
 
 LEGACY_SCRIPT_RE = re.compile(
     rf"<script>\s*//\s*{re.escape(LEGACY_MARKER)}.*?</script>",
@@ -109,6 +110,48 @@ def patch_primary_decoder_reinit(frontend_roots: list[Path]) -> bool:
     return changed
 
 
+def patch_primary_visual_viewport(frontend_roots: list[Path]) -> bool:
+    """Keep the primary canvas inside the real browser viewport.
+
+    The canvas can enlarge its parent. Measuring that parent feeds the old
+    canvas size back into resetCanvasStyle, cropping the bottom of the remote
+    desktop (including Plasma's panel) when browser zoom/DPR is not 100%.
+    """
+    changed = False
+    candidates: list[Path] = []
+    for frontend_root in frontend_roots:
+        candidates.extend(frontend_root.glob("assets/selkies-core-*.js"))
+        src_js = frontend_root / "src" / "selkies-core.js"
+        if src_js.is_file():
+            candidates.append(src_js)
+
+    replacements = [
+        (
+            'const _=o.parentElement,I=_&&_.clientWidth>0?_.clientWidth:i,U=_&&_.clientHeight>0?_.clientHeight:r;',
+            'const _=window.visualViewport,I=_&&_.width>0?_.width:window.innerWidth,U=_&&_.height>0?_.height:window.innerHeight;',
+        ),
+        (
+            'const te=t&&t.parentElement?t.parentElement:document.querySelector(".video-container");let Ie,Oe;if(te){const oe=te.getBoundingClientRect();Ie=Y(oe.width),Oe=Y(oe.height)}else Ie=Y(window.innerWidth),Oe=Y(window.innerHeight);',
+            'const te=window.visualViewport;let Ie,Oe;if(te){Ie=Y(te.width),Oe=Y(te.height)}else Ie=Y(window.innerWidth),Oe=Y(window.innerHeight);',
+        ),
+        (
+            'const ne=o&&o.parentElement?o.parentElement:document.querySelector(".video-container");let ee,he;if(ne){const rt=ne.getBoundingClientRect();ee=W(rt.width),he=W(rt.height)}else ee=W(window.innerWidth),he=W(window.innerHeight);',
+            'const ne=window.visualViewport;let ee,he;if(ne){ee=W(ne.width),he=W(ne.height)}else ee=W(window.innerWidth),he=W(window.innerHeight);',
+        ),
+    ]
+
+    for js_path in dict.fromkeys(candidates):
+        content = js_path.read_text()
+        updated = content
+        for old, new in replacements:
+            updated = updated.replace(old, new)
+        if updated != content:
+            js_path.write_text(updated)
+            changed = True
+            print(f"  [OK]   Patched visual viewport sizing in {js_path}")
+    return changed
+
+
 def discover_frontend_roots() -> list[Path]:
     web_root = ROOT / "web"
     if web_root.is_dir():
@@ -132,6 +175,7 @@ def main() -> int:
 
     remove_legacy_scripts(frontend_roots)
     patch_primary_decoder_reinit(frontend_roots)
+    patch_primary_visual_viewport(frontend_roots)
 
     if verify_build_patch(frontend_roots):
         print("  [OK]   Build-time STREAM_SCALE UI patch is present.")

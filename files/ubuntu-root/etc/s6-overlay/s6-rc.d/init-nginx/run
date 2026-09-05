@@ -62,6 +62,15 @@ cp -a \
   /usr/share/selkies/$DASHBOARD \
   /usr/share/selkies/web
 
+# The runtime dashboard copy above replaces the build-time patched web tree.
+# Re-apply the WebCodecs policy to the files nginx actually serves, otherwise
+# every container start silently restores `prefer-software` and host-side
+# Edge/Chrome decode never reaches the GPU.
+if [ -f /usr/local/bin/patch-selkies-hardware-decode.py ]; then
+  chmod +x /usr/local/bin/patch-selkies-hardware-decode.py
+  python3 /usr/local/bin/patch-selkies-hardware-decode.py
+fi
+
 # Ensure Safari keyboard fix is applied after runtime copy
 if [ -f /usr/local/bin/patch-selkies-safari-keyboard.py ]; then
   chmod +x /usr/local/bin/patch-selkies-safari-keyboard.py

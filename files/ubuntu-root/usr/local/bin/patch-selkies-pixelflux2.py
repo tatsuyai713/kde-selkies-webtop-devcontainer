@@ -7,6 +7,11 @@ which enables NVENC on the Wayland backend), dropped the StripeCallback
 wrapper in favour of plain callables receiving a StripeFrame, and swapped
 the start_capture argument order to (callback, settings).
 
+On WSL2 Mesa's d3d12 VA driver may need the primary DRM node (`card0`),
+which cannot be represented by the legacy renderD128-based integer API.
+PIXELFLUX_ENCODE_NODE_PATH therefore takes precedence and is passed through
+to pixelflux 2's native encode_node_path setting.
+
 The patch keeps selkies working with pixelflux 1.6.x unchanged: every
 new code path is guarded by a PIXELFLUX_V2 flag derived from the import.
 Idempotent: exits successfully if the patch is already applied.
@@ -28,6 +33,50 @@ def main():
         print("patch-selkies-pixelflux2: selkies.py not found; skipping")
         return 0
     s = open(path).read()
+    # Selkies imports stream_server before its pixelflux block. stream_server
+    # imports PyAV, whose wheel carries a second, newer FFmpeg build. If PyAV
+    # wins the ELF global-symbol order, pixelflux's FFmpeg-8.0 bindings call
+    # into PyAV's private FFmpeg-8.1 libraries and VAHWFramesContext setup is
+    # corrupted. Load pixelflux first for the affected WSL profile so each
+    # extension remains bound to the FFmpeg ABI it was built against.
+    early_binding_changed = False
+    early_binding_marker = "_pixelflux_early_ffmpeg_binding"
+    if early_binding_marker not in s:
+        import_anchor = "import os\n"
+        early_binding = '''import os
+
+if os.environ.get("ENCODER", os.environ.get("GPU_VENDOR", "")) == "intel-wsl":
+    try:
+        import pixelflux as _pixelflux_early_ffmpeg_binding
+    except ImportError:
+        _pixelflux_early_ffmpeg_binding = None
+'''
+        assert import_anchor in s, "top-level os import anchor not found"
+        s = s.replace(import_anchor, early_binding, 1)
+        early_binding_changed = True
+    cpu_selection = '''            if display_state["encoder"] in ["jpeg", "x264enc-striped"]:
+                display_state["use_cpu"] = True
+                data_logger.info(f"Forcing use_cpu=True because encoder is '{display_state['encoder']}'")
+            else:
+                display_state["use_cpu"] = sanitize_value("use_cpu", settings.get("use_cpu"))'''
+    forced_hardware_selection = '''            if (os.environ.get("SELKIES_FORCE_HARDWARE_ENCODING") == "1"
+                    and display_state["encoder"] in ["x264enc", "x264enc-striped"]):
+                # Browser localStorage can retain the old CPU/striped choice
+                # after the server is switched to a working VA-API backend.
+                # Keep the server-side GPU profile authoritative.
+                display_state["encoder"] = "x264enc"
+                display_state["use_cpu"] = False
+                data_logger.info("Forcing use_cpu=False for the configured hardware encoder")
+            elif display_state["encoder"] in ["jpeg", "x264enc-striped"]:
+                display_state["use_cpu"] = True
+                data_logger.info(f"Forcing use_cpu=True because encoder is '{display_state['encoder']}'")
+            else:
+                display_state["use_cpu"] = sanitize_value("use_cpu", settings.get("use_cpu"))'''
+    hardware_policy_changed = early_binding_changed
+    if "SELKIES_FORCE_HARDWARE_ENCODING" not in s:
+        assert cpu_selection in s, "client CPU encoder selection anchor not found"
+        s = s.replace(cpu_selection, forced_hardware_selection, 1)
+        hardware_policy_changed = True
     old_wayland_bootstrap = "            _pf_v2_module.ensure_wayland_display()"
     gpu_wayland_bootstrap = '''            _pf_render_node = _pf_os.environ.get("DRI_NODE", "")
             _pf_auto_gpu = _pf_os.environ.get("SELKIES_AUTO_GPU", "")
@@ -38,15 +87,33 @@ def main():
                 auto_gpu=_pf_auto_gpu,
             )'''
 
+    old_index_compat = '''            if key == 'vaapi_render_node_index':
+                inner.encode_node_index = -2 if value == -1 else value
+                return'''
+    path_compat = '''            if key == 'vaapi_render_node_index':
+                encode_node_path = _pf_os.environ.get("PIXELFLUX_ENCODE_NODE_PATH", "")
+                if encode_node_path:
+                    inner.encode_node_path = encode_node_path
+                    inner.encode_node_index = -2
+                else:
+                    inner.encode_node_index = -2 if value == -1 else value
+                return'''
+
     if "_CSCompat" in s:
+        changed = hardware_policy_changed
         if old_wayland_bootstrap in s:
             s = s.replace(old_wayland_bootstrap, gpu_wayland_bootstrap, 1)
+            changed = True
+        if old_index_compat in s:
+            s = s.replace(old_index_compat, path_compat, 1)
+            changed = True
+        if changed:
             open(path, "w").write(s)
             import py_compile
             py_compile.compile(path, doraise=True)
-            print("patch-selkies-pixelflux2: upgraded Wayland bootstrap in", path)
+            print("patch-selkies-pixelflux2: upgraded compatibility layer in", path)
             return 0
-        if "_pf_render_node" in s:
+        if "_pf_render_node" in s and "PIXELFLUX_ENCODE_NODE_PATH" in s:
             print("patch-selkies-pixelflux2: already applied")
             return 0
         raise RuntimeError("existing pixelflux2 patch has an unsupported Wayland bootstrap")
@@ -89,7 +156,12 @@ def main():
         def __setattr__(self, key, value):
             inner = object.__getattribute__(self, '_inner')
             if key == 'vaapi_render_node_index':
-                inner.encode_node_index = -2 if value == -1 else value
+                encode_node_path = _pf_os.environ.get("PIXELFLUX_ENCODE_NODE_PATH", "")
+                if encode_node_path:
+                    inner.encode_node_path = encode_node_path
+                    inner.encode_node_index = -2
+                else:
+                    inner.encode_node_index = -2 if value == -1 else value
                 return
             setattr(inner, self._MAP.get(key, key), value)
         def __getattr__(self, key):

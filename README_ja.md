@@ -106,8 +106,8 @@
 
 **WSL2 + Intel / AMD**
 ```bash
-sudo modprobe vgem                        # GPU 合成 / VA-API 用の DRM レンダーノード（各スクリプトも対話的に提案）
-./start-container.sh --encoder intel-wsl  # または --encoder amd-wsl
+sudo modprobe vgem                        # 仮想 DRM レンダーノード（各スクリプトも対話的に提案）
+./start-container.sh --encoder intel-wsl  # Docker GPU は「None」。--all は指定しない
 ```
 
 ### VS Code Dev Container
@@ -199,7 +199,150 @@ sudo modprobe vgem                        # GPU 合成 / VA-API 用の DRM レ�
 
 ## Intel/AMD GPU ホストセットアップ
 
-Intel/AMD ハードウェアエンコード（VA-API）を使用する場合のみ必要。NVIDIA GPU では不要。
+通常LinuxとWSL2ではGPUの渡し方が異なります。Dockerの `--gpus` / 本プロジェクトの
+`--all`・`--num` はNVIDIA Container Toolkit用です。Intel/AMDだけの環境では指定しないでください。
+
+### WSL2 + Intel の事前確認
+
+1. Windows側で最新のIntelグラフィックスドライバーを導入し、PowerShellで `wsl --update`、
+   続いて `wsl --shutdown` を実行してWSLを再起動します。WSL内にLinux用Intelカーネル
+   ドライバーを追加する必要はありません。GPUはWindowsのWDDMドライバーを通じて公開されます。
+   Windowsが認識しているアダプターとドライバーバージョンは次で確認できます。
+
+```powershell
+Get-CimInstance Win32_VideoController |
+  Select-Object Name, DriverVersion, Status
+```
+
+2. WSL内で次を確認します。
+
+```bash
+# WSL2カーネルであること
+uname -r | grep -i microsoft
+
+# Windows GPUへの入口とWSLgのD3D12ライブラリ
+test -c /dev/dxg && echo "OK: /dev/dxg"
+test -f /usr/lib/wsl/lib/libd3d12.so && echo "OK: libd3d12.so"
+test -f /usr/lib/wsl/lib/libdxcore.so && echo "OK: libdxcore.so"
+
+# vgemとDRMノード。再起動後も必要なら /etc/modules-load.d/vgem.conf に vgem を記載
+sudo modprobe vgem
+ls -l /dev/dri/renderD128
+
+# Docker daemonと容量
+docker version
+docker info
+df -h /var/lib/docker
+```
+
+`/dev/dri/renderD128` はIntel GPUそのものではなく、`vgem` が作る仮想DRMノードです。
+実GPUは `/dev/dxg` + `/usr/lib/wsl` を介してMesa D3D12から利用します。そのため、WSLホストで
+`vainfo` を単独実行して失敗しても、それだけではGPU非検出とは判断できません。コンテナ起動後の
+確認を優先してください。
+
+```bash
+./start-container.sh --encoder intel-wsl   # --all / --gpu は付けない
+./check-wsl-gpu.sh linuxserver-kde-$(whoami)
+```
+
+Microsoft公式のWSLgコンテナ手順に従い、D3D12 VA-APIのデバイスには `/dev/dri/card0` を使います。
+`renderD128` ではなくcard0を使い、かつ `MESA_LOADER_DRIVER_OVERRIDE` を外す必要があります。
+
+```bash
+docker exec linuxserver-kde-$(whoami) bash -lc \
+  'env -u MESA_LOADER_DRIVER_OVERRIDE LIBVA_DRIVER_NAME=d3d12 GALLIUM_DRIVER=d3d12 \
+   vainfo --display drm --device /dev/dri/card0'
+```
+
+一括診断には次を使います。Windowsドライバー、WSLのデバイス、コンテナのIntel D3D12
+OpenGLレンダラー、VA-API列挙に加え、1秒のH.264を実際にエンコードしてフレーム数まで検証します。
+`vainfo` が成功しても実データが0 bytesなら警告になるため、見かけだけの対応を判別できます。
+
+```bash
+./check-wsl-gpu.sh linuxserver-kde-$(whoami)
+```
+
+`intel-wsl` の既定は `WSL_GPU_MODE=full` です。KWin、Plasma/Qt Quick、アプリケーションと
+PixelfluxのWayland描画を、選択したIntel GPU上のMesa D3D12で実行します。H.264 Encodeは
+専用FFmpeg子プロセス内でMesa 25.2.8 D3D12 VAドライバーと`wsl-vaapi-serialize`同期シムを使い、
+デスクトップOpenGLは現行Mesaのままです。このプロセス分離は必須です。同一Pixelfluxプロセスへ
+OpenGLとVA-APIのD3D12スタックをロードすると`vaCreateSurfaces`が失敗し、その後Intelの
+`libigd12dxva64.so`内でfaultして親WaylandとPlasmaまで落ちました。frame readbackはデータ転送で、
+H.264圧縮はIntel GPU VA-APIのままです。既定はVBR目標4 Mbps・最大8 Mbpsで、CBR互換時も8 Mbpsを
+超えません。
+[試験結果と制約](files/pixelflux/README.md#intel-wsl-va-api-synchronization)も参照してください。
+`applications`と`software`は明示的な診断用に残していますが、自動回避策としては使いません。
+
+Pixelflux 2.0はVA-APIの`gop_size`を`INT_MAX`にしていたため、FFmpegがSPSへ
+`log2_max_frame_num_minus4=27`を出力していました。H.264仕様の上限は12なので、Edgeだけでなく
+FFmpegもこのStreamを復号できません。さらにSelkies側はフレームレート引数を渡さず、I420
+High@4.1の実映像を`High 4:2:2 @ Level 6.2`と誤申告していました。Google MeetでIntel Decodeが
+動くのにこの画面だけ失敗したのは、EdgeやIntelドライバーではなく、この2つの配信側不具合が原因です。
+
+Ubuntu 26.04 amd64ではPixelflux 2.0をsystem FFmpeg 8に対してビルドし、合法なGOP、1 slice、
+Intel外部Encoderを含む同梱wheelを使います。フロントエンドは実SPSに合う`avc1.640C29`
+（High 4:2:0、constraint byte `0x0c`、Level 4.1）と`prefer-hardware`を指定します。`init-nginx`がdashboardを更新した直後にも
+hardware-decode patchを再適用するため、コンテナ再起動で`prefer-software`へ戻りません。
+
+動きのあるデスクトップをEdgeで前面表示した実測では、Edge GPUプロセスのIntel
+`engtype_VideoDecode`が最大5.4%（平均4.8%）、`3D`が最大5.81%でした。コンテナ側でもIntel
+Video Engine最大17%、D3D12 3D最大14.09%を確認しています。したがって現在の確認結果は
+**Intel GPU OpenGLデスクトップ + Intel GPU VA-API Encode + Edge Intel GPU Decode**です。
+WebCodecsの`hardwareAcceleration`自体は仕様上ヒントなので、別ホストでは`edge://gpu`も確認してください。
+
+KWinのGPUデスクトップ効果は次で確認できます。
+
+```bash
+WSL_GPU_MODE=full ./start-container.sh --encoder intel-wsl
+docker exec linuxserver-kde-$(whoami) bash -lc \
+  's6-setuidgid "$USER_NAME" qdbus6 org.kde.KWin /KWin supportInformation' \
+  | grep -E 'Compositing Type|OpenGL renderer string'
+```
+
+黒画面になりログに `Failed to allocate GBM buffer`、`Could not find a suitable render format`、
+または `D3D12: Removing Device` が出る場合は、まず `wsl_gpu_mode: "applications"` にします。
+アプリとキャプチャはIntel GPUのまま、KWinだけQPainterになります。最終復旧手段が`software`です。
+
+Encode回避は複数のWSL成功報告と一致します。Microsoft公式はD3D12 VA-API H.264 Encodeを説明し、
+WSL issueではMesa 24.0.9で失敗した同じパイプラインがMesa 23.2.1への変更後に再び成功、
+Frigate利用者もWSL Ubuntu 22.04でFFmpegのVP9→H.264 VA-API変換成功を報告しています。
+この実機でもMesa 23.2.1は1280x720・30フレーム・1,169,109 bytesを生成し、Mesa 26は0フレームでした。
+Jammyのグラフィックス一式を混在させず、イメージ内ではSelkies Encodeだけに旧VAドライバーを隔離します。
+`wsl_intel_vaapi: ""` のままにし、`"1"`へ変更しないでください。
+
+公式資料・再現報告:
+
+- [Microsoft: Containerizing GUI applications with WSLg](https://github.com/microsoft/wslg/blob/main/samples/container/Containers.md)
+- [Microsoft WSLg: Mesa D3D12でIntel/NVIDIA/AMDを選択する方法](https://github.com/microsoft/wslg/wiki/GPU-selection-in-WSLg)
+- [Microsoft: Run Linux GUI apps with WSL（vGPU/OpenGL）](https://learn.microsoft.com/windows/wsl/tutorials/gui-apps)
+- [Intel: Iris Xe Graphics Family drivers](https://www.intel.com/content/www/us/en/support/products/211012/graphics/processor-graphics/intel-iris-xe-graphics-family.html)
+- [Intel: Configure WSL2 for GPU workflows](https://www.intel.com/content/www/us/en/docs/oneapi/installation-guide-linux/2025-1/configure-wsl-2-for-gpu-workflows.html)
+- [Selkies: capture and encoder implementation](https://github.com/selkies-project/selkies/blob/main/docs/component.md)
+- [Mesa: D3D12 driver](https://docs.mesa3d.org/drivers/d3d12.html)
+- [Mesa 26.2.2 release notes](https://docs.mesa3d.org/relnotes/26.2.2.html)
+- [Microsoft: D3D12 video encoding](https://learn.microsoft.com/windows-hardware/drivers/display/video-encoding-d3d12)
+- [Microsoft: WSLのD3D12 GPU動画アクセラレーション（Encode成功例）](https://devblogs.microsoft.com/commandline/d3d12-gpu-video-acceleration-in-the-windows-subsystem-for-linux-now-available/)
+- [Microsoft WSL issue #11838: Mesa 23.2.1でEncode復旧](https://github.com/microsoft/WSL/issues/11838)
+- [Frigate discussion #11133: WSL Ubuntu 22.04でVA-API変換成功](https://github.com/blakeblackshear/frigate/discussions/11133#discussioncomment-9241829)
+- [Microsoft WSLg issue #1458: Intel D3D12 VA-API/TDR report](https://github.com/microsoft/wslg/issues/1458)
+- [Microsoft WSLg issue #1492: NVIDIA D3D12/Dozenの`vkCreateDevice` crash](https://github.com/microsoft/wslg/issues/1492)
+- [NVIDIA: WSL上のFFmpeg GPU acceleration（NVENC/NVDEC）](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.1/ffmpeg-with-nvidia-gpu/index.html)
+- [Pixelflux: VA-API/Wayland encoder implementation](https://github.com/linuxserver/pixelflux/blob/master/pixelflux/src/encoders/vaapi.rs)
+- [Microsoft: EdgeのH.264 Decode確認方法](https://learn.microsoft.com/en-us/troubleshoot/microsoft-edge/development/video-playback-issues)
+- [W3C WebCodecs: HardwareAcceleration preference](https://w3c.github.io/webcodecs/#enumdef-hardwareacceleration)
+
+`failed to discover GPU vendor from CDI: no known GPU vendor found` で起動しない場合は、Intel用設定に
+NVIDIA専用の `docker_gpus: "all"` が残っています。`configs/<コンテナ名>.yml` の値を空文字列にし、
+作成途中のコンテナを削除してから再実行します。
+
+```bash
+docker rm linuxserver-kde-$(whoami)  # Status が Created の作成失敗コンテナだけを対象にする
+./start-container.sh
+```
+
+### 通常LinuxのIntel/AMD
+
+以下はWSL2ではなく、GPUが `/dev/dri` に直接公開されるLinuxホスト向けです。
 
 ### 1. ユーザーを video/render グループに追加
 
@@ -223,7 +366,7 @@ sudo apt update && sudo apt install vainfo mesa-va-drivers
 vainfo  # VAProfileH264Main : VAEntrypointEncSlice が表示されること
 ```
 
-> ホストで VA-API が正しく動作すれば、コンテナ内でも自動的に動作します。
+> 通常Linuxでは、ホストでVA-APIが正しく動作し、同じ `/dev/dri` を渡せればコンテナでも利用できます。
 
 ---
 
@@ -296,6 +439,8 @@ USER_PASSWORD=yourpass ./build-user-image.sh
 
 **コンテナの特徴:**
 - 停止してもコンテナは削除されない（再起動や commit がいつでも可能）
+- `start-container.sh` は `--restart unless-stopped` を設定するため、明示停止しない限りDocker/WSL再起動後も自動復帰
+- `/config` はDocker volume、ホームと`/mnt`はホストbind mountのため、通常の再起動ではデータを保持
 - ホスト名: `Docker-$(hostname)`
 - ホストホーム: `~/host_home` でマウント
 - ホスト `/mnt`: `~/host_mnt` でマウント（Linux/WSL2 のみ、macOS ではスキップ）
@@ -585,14 +730,29 @@ docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pact
 - `--encoder nvidia-wsl` / `intel-wsl` / `amd-wsl` はいずれも `/dev/dxg`・vgem レンダーノード・WSLg ライブラリ（`/usr/lib/wsl`）をコンテナへ渡し、Mesa D3D12 で OpenGL を GPU 実行。描画そのものは Windows（WDDM）ドライバが担うためベンダー非依存
 - `MESA_D3D12_DEFAULT_ADAPTER_NAME` は D3D12 アダプターを名前の部分文字列で選択。デフォルトはプロファイルに応じて `NVIDIA` / `Intel` / `Radeon`。ハイブリッド GPU では使用したいアダプター名の部分文字列に変更可能
 - `nvidia-wsl` のハードウェアエンコード（NVENC）は OpenGL とは独立して Pixelflux から使用
-- `intel-wsl` / `amd-wsl` は Mesa の `d3d12` VA ドライバ（`LIBVA_DRIVER_NAME=d3d12`）経由の VA-API、つまり Windows ドライバの D3D12 Video Encode API でエンコード。H.264 エンコードの可否は Windows 側 GPU ドライバに依存し、非対応の場合 Pixelflux は自動的に x264 ソフトウェアエンコードへフォールバック（コンテナ内で `vainfo` で確認可能）
-- Mesa の d3d12 VA ドライバは vgem 専用経路でしか初期化できず、`MESA_LOADER_DRIVER_OVERRIDE` を外して `GALLIUM_DRIVER=d3d12` にする必要がある（override があると `vaInitialize failed with error code 2`）。`svc-selkies` が pixelflux 向けにこれを設定する。NVIDIA アダプタで H.264/HEVC のデコード可能な出力を確認済み。Intel（ドライバ 32.0.101.8517）では D3D12 エンコーダが `FrameStartOffset` を無視して SPS/PPS を上書きし、さらに `EncodedBitstreamWrittenBytesCount=0` を返すため、`intel-wsl` は `WSL_INTEL_VAAPI=1` を付けない限り x264。`amd-wsl` は VA-API を使う（未検証）
-- Intel GPU では Mesa d3d12 経由の GPU 描画が負荷時に Windows ドライバの GPU ハングを起こす（Qt Quick は起動後 1 分以内、GL クライアントは負荷上昇時）。Windows はアダプタをリセットし（`LiveKernelEvent 141`、連続すると `124`）、*ホスト側* の画面も黒くなる／固まる。コンテナ側では Mesa が `D3D12: Removing Device.` を出し、pixelflux の D3D12 デバイスも失われて黒画面が固定化する。そのため `intel-wsl` は GPU を一切使わない：コンテナの GL は llvmpipe（`GALLIUM_DRIVER=llvmpipe`、pixelflux 含む）、エンコードは x264。`startwm_wayland.sh` は `WSL_GPU_MODE` を適用する（`intel-wsl` の既定は `software`：QPainter 合成・アプリは llvmpipe。`compositor`：D3D12 を使うのは `kwin_wayland` のみで、他のプロセスは `kwin-d3d12-noscanout.c` のコンストラクタにより llvmpipe 描画。`full`：全プロセス GPU で `nvidia-wsl` / `amd-wsl` の既定）。Qt Quick は `full` 以外では常にソフトウェア描画、`intel-wsl` では `full` でも `WSL_QTQUICK_GPU=1` を付けない限りソフトウェア描画。`svc-de` は KWin ログの `create_immed failed and produced an invalid wl_buffer` を検出すると `svc-selkies` を自動再起動する
+- `intel-wsl` / `amd-wsl` は Mesa の `d3d12` VA ドライバ（`LIBVA_DRIVER_NAME=d3d12`）、つまりWindowsドライバーのD3D12 Video Encode APIを利用可能。Pixelflux 2にはWSLの`/dev/dri/card0`をパスAPIで直接渡す。実動作は`vainfo`だけでなく`check-wsl-gpu.sh`で確認する
+- Mesaのd3d12 VAドライバーは`MESA_LOADER_DRIVER_OVERRIDE`と`LIBGL_ALWAYS_SOFTWARE`を外し、`GALLIUM_DRIVER=d3d12`にする。`svc-selkies`が設定する。Intel WSL Encodeは`/opt/wsl-vaapi`のMesa 25.2.8とVA-API同期シムを使用し、OpenGLには現行のsystem Mesaを維持する。
+- 3つのWSL GPU profileはいずれも既定が`full`で、KWin、Plasma/Qt Quick、アプリは選択したIntel/NVIDIA/AMD adapter上のMesa D3D12を使う。CPU描画モードは明示的な診断用。Qt Quickは3profile共通でthreaded OpenGL RHIとGPU grayscale distance-field文字materialへ固定し、Vulkan probeと物理subpixel配列への依存を避ける。
+- Intel WSLのVA-API Encodeは負荷時にWindows UMDの`libigd12dxva64.so`でSIGSEGVしていた。現在はIntel Encoderを専用FFmpegプロセスへ分離し、PixelfluxのOpenGL compositorとMesa/Intel D3D12状態を共有しない。VBR目標4 Mbps・最大8 Mbps、`async_depth=1`、VA同期シムで動作する。
+- Chrome/ChromiumラッパーはPlasma保護用の`GALLIUM_DRIVER=llvmpipe`ポリシーを外し、ブラウザだけprofileのadapter、ANGLE OpenGL、GPU rasterizationを明示する。`--enable-zero-copy`と`mesa_glthread=true`はWSL D3D12で古いsurfaceを表示し続け、アドレスバーの入力文字まで欠けたため強制しない。`chrome://gpu`に加え、GPU processの`/proc/<pid>/maps`へ`libd3d12.so`と選択vendorのUMDがロードされていることでも実使用を確認できる。
+- 同一プロセスzero-copy試作版は無効のままです。同梱wheelはIntel D3D12 OpenGLで描画し、NV12をreadback後、別FFmpegプロセスでIntel VA-API upload/Encodeします。1992x1248の実配信試験は18秒で471 frame（約26 fps）、直前の45秒試験は1,095 frameを配信し、CPU codecへのfallbackとSIGSEGVはありませんでした。
+- `intel-wsl`、`nvidia-wsl`、`amd-wsl`ではChrome/Chromiumのwindow表示だけをXWaylandへ切り替え、描画は引き続きANGLEからMesa D3D12経由で各profileが選んだGPUを使う。native Ozone/Waylandの仮想GBM/dmabuf同期は、GPU描画が有効でもbrowser surfaceを極端に遅くし、アドレスバーの更新まで遅延させていた。X11 Ozone経路はこの表示bottleneckを回避する。Intel実機の`SystemInfo.getInfo`ではIris Xe、OpenGL 4.1、GPU compositing/rasterization、hardware video encode/decodeが有効で、software rendererが読み込まれていないことを確認した。不要かつ不安定なWSL D3D12 Vulkan経路も3profile共通で無効化する。通常Linuxの`intel`、`amd`、`nvidia`にはこのpolicyを適用しない。
+- Adapter選択とD3D12 OpenGLは3つのWSL GPU vendorで共通で、`MESA_D3D12_DEFAULT_ADAPTER_NAME`の既定を`Intel`、`NVIDIA`、`Radeon`に分ける。一方、固定版`/opt/wsl-vaapi-legacy` VA-API driverと直列化した外部FFmpeg Encoderは`intel-wsl`専用のままにする。Selkies配信ではNVIDIAはNVENC、AMDはsystem D3D12 VA-API driverを使うため、Intel旧video stackをNVIDIA/AMDへ流用しない。
+- Chrome/Chromiumの起動ラッパーはroot実行を拒否する。診断時も`docker exec --user <デスクトップのユーザー名> <コンテナ名> /usr/local/bin/google-chrome-wrapped ...`を使う。rootでデスクトップユーザーのプロファイルを開くと設定がroot所有・権限600で置き換わり、「プロフィール読み込みエラー」になる。発生時はブラウザを終了して対象プロファイル内の所有者を確認し、誤ってroot所有になった項目だけを本来のユーザーに戻す。プロファイル削除や`chmod 777`は不要。負荷試験では別の`--user-data-dir`を指定し、普段のプロファイルを使わない。
+- KWinのD3D12デバイスがリセットされた場合、`kwin_wayland_wrapper`の復帰後に`plasmashell`を再起動する監視をセッション内で行う。これにより下部パネルとデスクトップアイコンも復帰する
+- Wayland session終了時は、そのsessionが作成したprivate D-Bus daemonも終了する。compositor復旧のたびに古いportal/session busが残ってCPUを消費する問題を防ぐ
+- WSL webtopではBlueZ OBEXのD-Bus自動起動を無効化する。Evolution source-registry実体がない状態で`obexd`が欠落serviceを再要求し続け、Chrome/Plasma操作を遅くしていた別の高負荷ループを止める
+- WSL GPU sessionではMesa D3D12 OpenGLを維持したまま、Plasma、KIO、Chrome、ChromiumのVulkan ICD/device-select probeを無効化する。ブラウザでは`--ignore-gpu-blocklist`を使わない。Chromium 152ではこれを指定するとWSLのMicrosoft adapter identityに対してWebGPU-on-Vulkan-via-GL interopまで再有効化され、起動ごとにVulkan初期化へ失敗していた。Intel実機では`kioworker`も`libVkLayer_MESA_device_select.so`内で繰り返しSIGSEGVし、Folder View workerとデスクトップアイコン文字が消えていた。Chrome/ChromiumはWebGPU/GraphiteとLCD/subpixel textを無効化するが、Canvas、compositing、raster、OpenGL/WebGL、video encode/decodeはGPUのまま維持する。X11は`Xft.rgba: none`、fontconfigは`10-sub-pixel-none.conf`、Qtは空の`QT_SUBPIXEL_AA_TYPE`（Qtでは物理subpixel配列なし）を使う。Qt Quickはさらに`QSG_DISTANCEFIELD_ANTIALIASING=gray`を指定し、Mesa D3D12で黄・透明になったA32 subpixel materialではなく、GPU上のA8 gray-alpha distance-field materialを使う。
+- KWin/Waylandは`DPI`から計算した出力scaleを既にアプリへ通知するため、起動スクリプトは`--force-device-scale-factor`を自動生成しない。これを併用するとChromiumで1.5倍を二重適用しDPR 2.25になっていた。古い永続コンテナから同引数を継承した場合もwrapper側で無視する。
+- 全GPUプロセス停止後も両方のVAドライバーが`vaInitialize ... resource allocation failed`になる場合、WSL VMの`/dev/dxg`がfault状態にある。Docker再起動ではホストデバイスをresetできない。Windows PowerShellで`wsl --shutdown`を実行し、distributionを起動し直してから`./check-wsl-gpu.sh`を実行する。この状態で永続コンテナの再作成やイメージ再buildは不要。
 - vgem 未ロード（ホストで `sudo modprobe vgem`）の場合は `/dev/dri` が無いため、KWin はソフトウェア合成となり `intel-wsl` / `amd-wsl` もソフトウェアエンコードにフォールバック
-- VulkanはWSL/MesaのDozen（dzn）ドライバー提供状況に依存。OpenGL/WebGLのD3D12高速化には不要
+- WSL GPUデスクトップでは、OpenGL/WebGLのD3D12高速化に不要で、検証済みIntel/NVIDIA WSL stackのdevice-select/Dozen経路でfault報告があるためVulkanを無効化する
+- Plasma文字消失のA/B試験では、GPU版Qt Quickだけで再現し、Folder Viewの`DropShadow` FBO無効化と`Text.NativeRendering`でも改善しなかった。Qt Quickの文字テクスチャとMesa D3D12間の問題であり、QML単体の修正ではない。Ubuntu標準Mesa 26.0.8はdznを同梱せず、Kisak 26.2.2のdznを隔離試験した場合もIntel UMD内の`vkCreateDevice`でSIGSEGVしたため、Vulkan RHIへの切替も現在は採用しない
 - **GPU 合成（デスクトップエフェクト）には DRM レンダーノードが必要。** WSL2 は GPU を `/dev/dxg` としてのみ公開し `/dev/dri` を作らないため、そのままでは pixelflux が linux-dmabuf を公開できず KWin は QPainter（ソフトウェア合成：OpenGL エフェクト無効、WebGL は CPU 描画、ホスト負荷が高い）に落ちる。ホストで `vgem` を読み込む（`sudo modprobe vgem`。永続化は `echo vgem | sudo tee /etc/modules-load.d/vgem.conf`、systemd 無しなら `/etc/wsl.conf` に `[boot] command = modprobe vgem`）。`start-container.sh` / `create-devcontainer-config.sh` は未読み込みを検出すると対話的に提案する。`/dev/dri` は存在する場合のみコンテナへ渡されるので、**コンテナ設定を生成する前に**ノードが必要
 - **KWin 6.6 + Mesa d3d12 には `kwin-d3d12-noscanout` シムが必要**（[ソース](files/ubuntu-root/usr/local/src/kwin-d3d12-noscanout.c)）。KWin は gbm バッファを `GBM_BO_USE_SCANOUT` 付きで確保するが d3d12 ドライバはこれを拒否するため、レンダーノードがあると KWin は OpenGL を選んだ後に毎フレーム失敗していた（`Could not find a suitable render format` → 黒画面）。ユーザーイメージでシムをビルドし、`kwin_wayland` の `cap_sys_nice` を外し（glibc が `LD_PRELOAD` を無視するため）、`startwm_wayland.sh` は `/dev/dri/renderD128` とシムが揃えば `KWIN_COMPOSE=O2` + `LD_PRELOAD`、揃わなければ `KWIN_COMPOSE=Q` を使う
-- 確認はセッション内で `qdbus6 org.kde.KWin /KWin org.kde.KWin.supportInformation`。`Compositing Type: OpenGL` / `OpenGL renderer string: D3D12 (NVIDIA ...)` なら GPU 合成、`QPainter` なら vgem かシムが欠けている
+- 確認はセッション内で `qdbus6 org.kde.KWin /KWin supportInformation`。`Compositing Type: OpenGL` / `OpenGL renderer string: D3D12 (Intel ...)` なら GPU 合成、`QPainter` なら vgem かシムが欠けている
+- 音声はPipeWire-Pulseの`output.monitor`をSelkiesが取り込む。`pactl list short source-outputs`に`output.monitor`向けの`python3`録音ストリームがあればサーバー側の音声Encodeは動作中。Plasmaのprivate `XDG_RUNTIME_DIR`とは別に`PULSE_SERVER`/`PIPEWIRE_REMOTE`を標準の`/run/user/<uid>`へ固定する
+- ブラウザズーム/DPRが100%以外の場合、Canvasが親要素を拡大し、その親サイズを再利用するフィードバックで画面下端（Plasmaパネルを含む）が切れることがある。primary Canvasは親要素でなく`window.visualViewport`へ合わせる
 
 ---
 

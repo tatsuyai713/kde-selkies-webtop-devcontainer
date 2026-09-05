@@ -35,7 +35,7 @@ Environment overrides:
   SSL: SSL_DIR
   Container: CONTAINER_NAME, CONTAINER_HOSTNAME
   Image: IMAGE_BASE, IMAGE_TAG
-  WSL2 GPU policy: WSL_GPU_MODE (full|compositor|software), WSL_QTQUICK_GPU, WSL_INTEL_VAAPI
+  WSL2 GPU policy: WSL_GPU_MODE (full|compositor|applications|software), WSL_QTQUICK_GPU, WSL_INTEL_VAAPI
 EOF
 }
 
@@ -346,11 +346,9 @@ HEIGHT=${RESOLUTION#*x}
 SCALE_FACTOR=$(awk "BEGIN { printf \"%.2f\", ${DPI} / 96 }")
 FORCE_DEVICE_SCALE_FACTOR="${SCALE_FACTOR}"
 ORIG_CHROMIUM_FLAGS="${CHROMIUM_FLAGS:-}"
-if [ -n "${ORIG_CHROMIUM_FLAGS}" ]; then
-    CHROMIUM_FLAGS="--force-device-scale-factor=${SCALE_FACTOR} ${ORIG_CHROMIUM_FLAGS}"
-else
-CHROMIUM_FLAGS="--force-device-scale-factor=${SCALE_FACTOR}"
-fi
+# KWin/Wayland supplies the output scale to Chromium.  Keep only flags the
+# user explicitly requested; a forced device scale would be applied twice.
+CHROMIUM_FLAGS="${ORIG_CHROMIUM_FLAGS}"
 
 case "${TIMEZONE}" in
     Asia/Tokyo)
@@ -402,13 +400,12 @@ RUNTIME_NVIDIA_VISIBLE_DEVICES=""
 GPU_DEVICES=""
 WSL_ENVIRONMENT="false"
 # WSL2 GPU policy for the desktop session (see startwm_wayland.sh): full |
-# compositor | software. Empty = per-profile default (nvidia-wsl / amd-wsl:
-# full, intel-wsl: software). WSL_QTQUICK_GPU=1 re-enables GPU Qt Quick in
-# "full" mode on intel-wsl.
+# compositor | applications | software. Empty defaults to full for every WSL
+# GPU profile. WSL_QTQUICK_GPU=0 disables only Qt Quick as a recovery option.
 WSL_GPU_MODE="${WSL_GPU_MODE:-}"
 WSL_QTQUICK_GPU="${WSL_QTQUICK_GPU:-}"
-# WSL_INTEL_VAAPI=1: let pixelflux try Mesa d3d12 VA-API encoding on intel-wsl
-# (broken with Intel driver 32.0.101.8517: empty frames; x264 otherwise).
+# WSL_INTEL_VAAPI=1 forces the system Mesa VA driver when the bundled
+# pinned Mesa 25.2.8 encode driver is unavailable (diagnostic opt-in).
 WSL_INTEL_VAAPI="${WSL_INTEL_VAAPI:-}"
 DISABLE_ZINK="false"
 RUNTIME_XDG_RUNTIME_DIR=""
@@ -436,11 +433,7 @@ fi
 # name substring differs, which is what $1 supplies as the default.
 # $2 is the gallium driver for the container-level (non-session) processes,
 # i.e. pixelflux's EGL renderer: "d3d12" renders on the GPU, "llvmpipe" keeps
-# the GPU untouched. intel-wsl passes llvmpipe: the Intel Windows driver hangs
-# under Mesa d3d12 load (the TDR takes the host display down) and its D3D12
-# video encoder returns empty frames, so the Intel GPU is not used at all
-# unless WSL_INTEL_VAAPI=1 (svc-selkies then switches pixelflux to d3d12 for
-# VA-API). The desktop session's own policy is WSL_GPU_MODE.
+# the GPU untouched. The desktop session's own policy is WSL_GPU_MODE.
 configure_wsl_d3d12_runtime() {
     local default_adapter="$1"
     local gallium_driver="${2:-d3d12}"
@@ -491,9 +484,8 @@ case "${GPU_VENDOR}" in
         configure_wsl_d3d12_runtime "NVIDIA"
         ;;
     intel-wsl)
-        # DXCore reports Intel adapters as "Intel(R) ...". No GPU use by
-        # default (see configure_wsl_d3d12_runtime / WSL_GPU_MODE).
-        configure_wsl_d3d12_runtime "Intel" "llvmpipe"
+        # DXCore reports Intel adapters as "Intel(R) ...".
+        configure_wsl_d3d12_runtime "Intel" "d3d12"
         ;;
     amd-wsl)
         # DXCore reports AMD adapters as "AMD Radeon ..." or "Radeon ...", so

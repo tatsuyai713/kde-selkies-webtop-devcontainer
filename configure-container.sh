@@ -30,6 +30,9 @@ GPU_ALL=false
 GPU_NUMS=""
 DOCKER_GPUS=""
 DRI_NODE=""
+WSL_GPU_MODE=${WSL_GPU_MODE:-}
+WSL_QTQUICK_GPU=${WSL_QTQUICK_GPU:-}
+WSL_INTEL_VAAPI=${WSL_INTEL_VAAPI:-}
 DOCKER_MODE=${DOCKER_MODE:-dind}
 SSL_DIR=${SSL_DIR:-}
 
@@ -94,6 +97,9 @@ load_yaml_config() {
   val=$(yaml_get "${file}" "encoder");        [[ -n "${val}" ]] && ENCODER="${val}"
   val=$(yaml_get "${file}" "docker_gpus");    DOCKER_GPUS="${val}"
   val=$(yaml_get "${file}" "dri_node");       DRI_NODE="${val}"
+  val=$(yaml_get "${file}" "wsl_gpu_mode");  [[ -n "${val}" ]] && WSL_GPU_MODE="${val}"
+  val=$(yaml_get "${file}" "wsl_qtquick_gpu"); [[ -n "${val}" ]] && WSL_QTQUICK_GPU="${val}"
+  val=$(yaml_get "${file}" "wsl_intel_vaapi"); [[ -n "${val}" ]] && WSL_INTEL_VAAPI="${val}"
   val=$(yaml_get "${file}" "docker_mode");    [[ -n "${val}" ]] && DOCKER_MODE="${val}"
   val=$(yaml_get "${file}" "ssl_dir");        SSL_DIR="${val}"
   val=$(yaml_get "${file}" "is_mac");         [[ -n "${val}" ]] && IS_MAC="${val}"
@@ -159,6 +165,9 @@ timezone: "${TIMEZONE}"
 encoder: "${ENCODER}"
 docker_gpus: "${DOCKER_GPUS:-}"
 dri_node: "${DRI_NODE:-}"
+wsl_gpu_mode: "${WSL_GPU_MODE:-}"
+wsl_qtquick_gpu: "${WSL_QTQUICK_GPU:-}"
+wsl_intel_vaapi: "${WSL_INTEL_VAAPI:-}"
 docker_mode: "${DOCKER_MODE}"
 ssl_dir: "${SSL_DIR:-}"
 is_mac: "${IS_MAC}"

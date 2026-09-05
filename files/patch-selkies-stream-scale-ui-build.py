@@ -55,9 +55,12 @@ RESET_NEW = """\
       canvas.height = __pBufH;
       console.log(`Canvas internal buffer reset to scaled stream resolution: ${__pBufW}x${__pBufH}`);
     }
-    const __pContainer = canvas.parentElement;
-    const __pAvailW = __pContainer && __pContainer.clientWidth > 0 ? __pContainer.clientWidth : streamWidth;
-    const __pAvailH = __pContainer && __pContainer.clientHeight > 0 ? __pContainer.clientHeight : streamHeight;
+    // The canvas can enlarge its parent, so the parent is not a safe viewport
+    // measurement. That feedback loop crops the bottom panel at browser zoom
+    // levels other than 100%. visualViewport is independent of canvas layout.
+    const __pViewport = window.visualViewport;
+    const __pAvailW = __pViewport && __pViewport.width > 0 ? __pViewport.width : window.innerWidth;
+    const __pAvailH = __pViewport && __pViewport.height > 0 ? __pViewport.height : window.innerHeight;
     if (__pAvailW > 0 && __pAvailH > 0) {
       canvas.style.position = 'absolute';
       canvas.style.width = `${__pAvailW}px`;
@@ -123,12 +126,11 @@ STREAM_NEW = """\
                const __pLW = __pRW / __pDpr;
                const __pLH = __pRH / __pDpr;
                window.__selkiesPrimaryStreamResolution = { width: __pLW, height: __pLH };
-               const __pViewNode = canvas && canvas.parentElement ? canvas.parentElement : document.querySelector('.video-container');
+               const __pViewNode = window.visualViewport;
                let __pVW, __pVH;
                if (__pViewNode) {
-                 const __pVRect = __pViewNode.getBoundingClientRect();
-                 __pVW = roundDownToEven(__pVRect.width);
-                 __pVH = roundDownToEven(__pVRect.height);
+                 __pVW = roundDownToEven(__pViewNode.width);
+                 __pVH = roundDownToEven(__pViewNode.height);
                } else {
                  __pVW = roundDownToEven(window.innerWidth);
                  __pVH = roundDownToEven(window.innerHeight);

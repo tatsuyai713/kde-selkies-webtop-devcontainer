@@ -1,0 +1,85 @@
+#!/bin/bash
+set -e
+
+# Protect the desktop profile even if a diagnostic command inherits its HOME.
+if (( EUID == 0 )); then
+  echo "Do not start Chromium as root. Run this wrapper as the desktop user (docker exec --user <desktop-user> ...)." >&2
+  exit 1
+fi
+
+if [ -x /usr/lib/chromium/chromium ]; then
+  BIN=/usr/lib/chromium/chromium
+elif [ -x /usr/lib/chromium-browser/chromium-browser ]; then
+  BIN=/usr/lib/chromium-browser/chromium-browser
+elif [ -x /usr/bin/chromium.distrib ]; then
+  BIN=/usr/bin/chromium.distrib
+else
+  BIN=/usr/bin/chromium
+fi
+export XMODIFIERS="@im=fcitx"
+export INPUT_METHOD=fcitx
+export GTK_IM_MODULE=fcitx
+export QT_IM_MODULE=fcitx
+
+GPU_FLAGS=()
+WSL_PROFILE="${ENCODER:-${GPU_VENDOR:-}}"
+case "${WSL_PROFILE}" in
+  intel-wsl|nvidia-wsl|amd-wsl) WSL_D3D12_PROFILE=true ;;
+  *) WSL_D3D12_PROFILE=false ;;
+esac
+if [ "${WSL_ENVIRONMENT:-false}" = "true" ] && [ "${WSL_D3D12_PROFILE}" = "true" ]; then
+  unset LD_PRELOAD WSL_D3D12_COMPOSITOR_ONLY
+  unset LIBGL_ALWAYS_SOFTWARE MESA_LOADER_DRIVER_OVERRIDE
+  # Chromium's native Wayland path performs very slowly with WSL's virtual
+  # GBM/dmabuf synchronization. XWayland still reaches the selected D3D12
+  # adapter through ANGLE, but avoids that Wayland surface path.
+  export QT_QPA_PLATFORM=xcb
+  export GALLIUM_DRIVER=d3d12
+  case "${WSL_PROFILE}" in
+    intel-wsl)  WSL_ADAPTER=Intel ;;
+    nvidia-wsl) WSL_ADAPTER=NVIDIA ;;
+    amd-wsl)    WSL_ADAPTER=Radeon ;;
+  esac
+  export MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-${WSL_ADAPTER}}"
+  export LIBVA_DRIVER_NAME=d3d12
+  if [ "${WSL_PROFILE}" = "intel-wsl" ]; then
+    export LIBVA_DRIVERS_PATH=/opt/wsl-vaapi-legacy
+    export LD_LIBRARY_PATH="/opt/wsl-vaapi-legacy:/usr/lib/wsl/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  else
+    unset LIBVA_DRIVERS_PATH
+    export LD_LIBRARY_PATH="/usr/lib/wsl/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  fi
+  export NODEVICE_SELECT=1
+  export VK_DRIVER_FILES=/dev/null
+  export VK_ICD_FILENAMES=/dev/null
+  GPU_FLAGS=(
+    --ozone-platform=x11
+    --qt-version=6
+    --enable-gpu-rasterization
+    --disable-lcd-text
+    --disable-webgpu
+    --use-gl=angle
+    --use-angle=gl
+    --use-vulkan=disabled
+    --enable-features=AcceleratedVideoEncoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,VaapiIgnoreDriverChecks
+    --disable-features=WebGPU,WebGPUService,WebGPUBlobCache,Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,SkiaGraphite
+  )
+elif [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ]; then
+  GPU_FLAGS=(--ozone-platform=wayland)
+else
+  GPU_FLAGS=(--ozone-platform=x11)
+fi
+
+if ! pgrep chromium >/dev/null; then
+  rm -f "${HOME}/.config/chromium/Singleton"* 2>/dev/null || true
+fi
+EXTRA_FLAGS=()
+for flag in ${CHROMIUM_FLAGS:-} "$@"; do
+  # Old persistent containers may still export the pre-fix value.  Wayland
+  # already applies the KDE output scale, so accepting it here double-scales.
+  case "${flag}" in
+    --force-device-scale-factor=*) ;;
+    *) EXTRA_FLAGS+=("${flag}") ;;
+  esac
+done
+exec "${BIN}" --password-store=basic "${GPU_FLAGS[@]}" --no-sandbox "${EXTRA_FLAGS[@]}"

@@ -45,6 +45,9 @@ GPU_ALL=false
 GPU_NUMS=""
 DOCKER_GPUS=""
 DRI_NODE=""
+WSL_GPU_MODE=${WSL_GPU_MODE:-}
+WSL_QTQUICK_GPU=${WSL_QTQUICK_GPU:-}
+WSL_INTEL_VAAPI=${WSL_INTEL_VAAPI:-}
 
 DOCKER_MODE=${DOCKER_MODE:-dind}      # dind|dood
 IMAGE_TAG_SET=false
@@ -113,9 +116,7 @@ Encoder examples:
   --encoder amd
   --encoder nvidia
   --encoder nvidia-wsl
-  --encoder intel-wsl      (WSL2 + Intel GPU: rendering and encoding on the CPU by default, the Intel
-                            driver hangs / encodes nothing through Mesa d3d12; WSL_GPU_MODE and
-                            WSL_INTEL_VAAPI override, see README)
+  --encoder intel-wsl      (WSL2 + Intel GPU: D3D12 OpenGL plus isolated Mesa 25.2.8 VA-API encode)
   --encoder amd-wsl        (WSL2 + AMD GPU: OpenGL and VA-API through Mesa D3D12)
 
 Docker GPU examples (optional):
@@ -280,6 +281,9 @@ load_yaml_config() {
   val=$(yaml_get "${file}" "encoder");        [[ -n "${val}" ]] && ENCODER="${val}"
   val=$(yaml_get "${file}" "docker_gpus");    DOCKER_GPUS="${val}"
   val=$(yaml_get "${file}" "dri_node");       DRI_NODE="${val}"
+  val=$(yaml_get "${file}" "wsl_gpu_mode");  [[ -n "${val}" ]] && WSL_GPU_MODE="${val}"
+  val=$(yaml_get "${file}" "wsl_qtquick_gpu"); [[ -n "${val}" ]] && WSL_QTQUICK_GPU="${val}"
+  val=$(yaml_get "${file}" "wsl_intel_vaapi"); [[ -n "${val}" ]] && WSL_INTEL_VAAPI="${val}"
   val=$(yaml_get "${file}" "docker_mode");    [[ -n "${val}" ]] && DOCKER_MODE="${val}"
   val=$(yaml_get "${file}" "ssl_dir");        SSL_DIR="${val}"
   val=$(yaml_get "${file}" "is_mac");         [[ -n "${val}" ]] && IS_MAC="${val}"
@@ -630,7 +634,9 @@ fi
 WIDTH=${RESOLUTION%x*}
 HEIGHT=${RESOLUTION#*x}
 SCALE_FACTOR=$(awk "BEGIN { printf \"%.2f\", ${DPI} / 96 }")
-CHROMIUM_FLAGS_COMBINED="--force-device-scale-factor=${SCALE_FACTOR} ${CHROMIUM_FLAGS:-}"
+# The Wayland compositor already advertises its output scale.  Passing the
+# same value to Chromium applies it a second time (DPI=144 became 2.25x).
+CHROMIUM_FLAGS_COMBINED="${CHROMIUM_FLAGS:-}"
 
 HOST_PORT_SSL=${PORT_SSL_OVERRIDE:-$((HOST_UID + 30000))}
 HOST_PORT_HTTP=${PORT_HTTP_OVERRIDE:-$((HOST_UID + 40000))}
@@ -745,10 +751,7 @@ list_detected_gpus() {
 # Windows (WDDM) driver's Linux user-mode library under /usr/lib/wsl/drivers
 # does the actual work for NVIDIA, Intel and AMD alike. Only the DXCore adapter
 # name substring differs, which is what $1 supplies as the default.
-# $2: gallium driver for container-level processes (pixelflux). intel-wsl
-# passes "llvmpipe" so the Intel GPU is not used at all by default (its Windows
-# driver hangs under Mesa d3d12 load, and its D3D12 video encoder returns empty
-# frames); WSL_INTEL_VAAPI=1 lets svc-selkies try VA-API anyway. See README.
+# $2: gallium driver for container-level processes (pixelflux).
 add_wsl_d3d12_flags() {
   local default_adapter="$1"
   local gallium_driver="${2:-d3d12}"
@@ -920,8 +923,8 @@ case "${GPU_VENDOR}" in
       GPU_ENV_VARS+=(-e ENABLE_NVIDIA=false)
     fi
     if [ "${GPU_VENDOR}" = "intel-wsl" ]; then
-      # DXCore reports Intel adapters as "Intel(R) ...". No GPU use by default.
-      add_wsl_d3d12_flags "Intel" "llvmpipe"
+      # DXCore reports Intel adapters as "Intel(R) ...".
+      add_wsl_d3d12_flags "Intel" "d3d12"
     else
       # DXCore reports AMD adapters as "AMD Radeon ..." or "Radeon ...".
       add_wsl_d3d12_flags "Radeon"
@@ -929,8 +932,10 @@ case "${GPU_VENDOR}" in
     # The vgem node doubles as the VA-API device (LIBVA_DRIVER_NAME=d3d12 and
     # MESA_LOADER_DRIVER_OVERRIDE=d3d12 route any DRM fd to the d3d12 driver).
     WSL_VA_NODE="${DRI_NODE:-}"
-    if [ -z "${WSL_VA_NODE}" ] && [ -e "/dev/dri/renderD128" ]; then
-      WSL_VA_NODE="/dev/dri/renderD128"
+    if [ -z "${WSL_VA_NODE}" ] && [ -e "/dev/dri/card0" ]; then
+      # Microsoft WSLg's container guidance uses card0 for D3D12 VA-API.
+      # renderD128 initializes OpenGL but the d3d12 VA driver fails there.
+      WSL_VA_NODE="/dev/dri/card0"
     fi
     if [ -n "${WSL_VA_NODE}" ]; then
       GPU_ENV_VARS+=(-e DRI_NODE="${WSL_VA_NODE}")
@@ -1044,12 +1049,13 @@ fi
 echo "Using tmpfs for /dev/shm: ${SHM_TMPFS_OPTS}"
 
 echo "Starting: name=${NAME}, image=${IMAGE}, resolution=${RESOLUTION}, dpi=${DPI}, stream-scale=${STREAM_SCALE}, framerate=${FRAMERATE}, timezone=${TIMEZONE}, encoder=${ENCODER}, docker-gpus=${DOCKER_GPUS:-none}, docker-mode=${DOCKER_MODE}, ports https=${HOST_PORT_SSL}->3001 http=${HOST_PORT_HTTP}->3000"
-echo "Chromium scale: ${SCALE_FACTOR} (CHROMIUM_FLAGS=${CHROMIUM_FLAGS_COMBINED})"
+echo "Wayland scale: ${SCALE_FACTOR} (extra CHROMIUM_FLAGS=${CHROMIUM_FLAGS_COMBINED:-none})"
 
 docker run -d \
   ${PLATFORM_FLAGS[@]+"${PLATFORM_FLAGS[@]}"} \
   ${GPU_FLAGS[@]+"${GPU_FLAGS[@]}"} \
   ${GROUP_FLAGS[@]+"${GROUP_FLAGS[@]}"} \
+  --restart unless-stopped \
   --name "$NAME" \
   --hostname "${HOSTNAME_VAL}" \
   -e HOSTNAME="${HOSTNAME_VAL}" \

@@ -263,29 +263,38 @@ shared_collect_interactive_settings() {
     DOCKER_GPUS=""
     echo ""
 
-    echo "Docker GPU Selection"
-    echo "--------------------"
-    echo "Select Docker GPU attachment (independent from encoder):"
-    echo "  1) None"
-    echo "  2) All GPUs (--gpus all)"
-    echo "  3) Specific devices (--gpus device=...)"
-    shared_prompt_choice_default gpu_choice "Select [1-3]" "${default_gpu_choice}" '^[1-3]$'
-    case "${gpu_choice}" in
-        2)
-            GPU_ALL="true"
-            DOCKER_GPUS="all"
-            ;;
-        3)
-            if [[ -n "${existing_gpu_nums}" ]]; then
-                shared_prompt_text_default GPU_NUMS "Enter GPU device numbers (comma-separated, e.g. 0,1)" "${existing_gpu_nums}"
-            else
-                shared_prompt_required_text GPU_NUMS "Enter GPU device numbers (comma-separated, e.g. 0,1)"
-            fi
-            DOCKER_GPUS="device=${GPU_NUMS}"
-            ;;
-        *)
-            ;;
-    esac
+    if [[ "${ENCODER}" == "nvidia" || "${ENCODER}" == "nvidia-wsl" ]]; then
+        echo "NVIDIA Docker GPU Selection"
+        echo "---------------------------"
+        echo "Docker's --gpus option requires an NVIDIA GPU and NVIDIA Container Toolkit:"
+        echo "  1) None"
+        echo "  2) All NVIDIA GPUs (--gpus all)"
+        echo "  3) Specific NVIDIA devices (--gpus device=...)"
+        shared_prompt_choice_default gpu_choice "Select [1-3]" "${default_gpu_choice}" '^[1-3]$'
+        case "${gpu_choice}" in
+            2)
+                GPU_ALL="true"
+                DOCKER_GPUS="all"
+                ;;
+            3)
+                if [[ -n "${existing_gpu_nums}" ]]; then
+                    shared_prompt_text_default GPU_NUMS "Enter GPU device numbers (comma-separated, e.g. 0,1)" "${existing_gpu_nums}"
+                else
+                    shared_prompt_required_text GPU_NUMS "Enter GPU device numbers (comma-separated, e.g. 0,1)"
+                fi
+                DOCKER_GPUS="device=${GPU_NUMS}"
+                ;;
+            *)
+                ;;
+        esac
+    else
+        echo "Docker GPU Selection"
+        echo "--------------------"
+        echo "Not using Docker --gpus: Intel/AMD use /dev/dri (Linux) or /dev/dxg (WSL2)."
+        echo "The --gpus option is NVIDIA-specific and can prevent the container from starting"
+        echo "when NVIDIA Container Toolkit/CDI is not installed. Mixed-GPU users can still"
+        echo "request an NVIDIA device with the start-container.sh --gpu option."
+    fi
     echo ""
 
     echo "3. Display Settings"

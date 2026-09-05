@@ -19,6 +19,19 @@ fi
 ENCODER="${ENCODER:-}"
 GPU_VENDOR="${ENCODER:-${GPU_VENDOR:-software}}"
 
+# The official pixelflux 2 wheel bundles a compatible FFmpeg.  Select its
+# one-slice binary only for Intel WSL; all other profiles retain the exact
+# vendor module prepared during the image build.
+if [ -x /usr/local/bin/patch-pixelflux-intel-wsl-slices.py ]; then
+  PIXELFLUX_VARIANT=default
+  if [ "${GPU_VENDOR}" = "intel-wsl" ]; then
+    PIXELFLUX_VARIANT=intel-wsl
+  fi
+  /opt/selkies-env/bin/python3 \
+    /usr/local/bin/patch-pixelflux-intel-wsl-slices.py \
+    --select "${PIXELFLUX_VARIANT}"
+fi
+
 # Check if running in WSL environment
 WSL_ENVIRONMENT="${WSL_ENVIRONMENT:-false}"
 
@@ -107,23 +120,55 @@ elif [ "${GPU_VENDOR}" = "intel-wsl" ] || [ "${GPU_VENDOR}" = "amd-wsl" ]; then
   # profile used to fall back to x264 unconditionally. GL via gbm reaches the
   # same d3d12 screen through the kms_swrast fallback, so pixelflux's own
   # renderer is unaffected by dropping the override.
-  unset MESA_LOADER_DRIVER_OVERRIDE
-  # Intel (driver 32.0.101.8517, Arc Pro 140T): D3D12 video encode returns
-  # frames with EncodedBitstreamWrittenBytesCount=0 (and ignores
-  # FrameStartOffset, clobbering the SPS/PPS when it does write), so pixelflux
-  # would stream nothing usable. Keep intel-wsl on x264 (and, together with
-  # the container-level GALLIUM_DRIVER=llvmpipe, off the Intel GPU entirely)
-  # unless WSL_INTEL_VAAPI=1 asks to try VA-API anyway.
+  unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_ALWAYS_SOFTWARE
+  # Mesa 23.2.1 crashes in Intel's EncodeFrame path under desktop activity.
+  # 26.0.8 returns empty H.264 packets on this host; 25.2.8 produces actual
+  # coded frames. Isolate the video driver, leaving desktop OpenGL unchanged.
   WSL_TRY_VAAPI=true
-  if [ "${GPU_VENDOR}" = "intel-wsl" ] && [ "${WSL_INTEL_VAAPI:-0}" != "1" ]; then
-    WSL_TRY_VAAPI=false
-    echo "[svc-selkies] GPU_VENDOR=intel-wsl: Intel D3D12 video encode is not usable through Mesa (empty frames); using x264 software encoding. Set WSL_INTEL_VAAPI=1 to try VA-API anyway."
+  WSL_VAAPI_DIR="${WSL_VAAPI_DIR:-/opt/wsl-vaapi}"
+  if [ "${GPU_VENDOR}" = "intel-wsl" ] && [ -f "${WSL_VAAPI_DIR}/d3d12_drv_video.so" ]; then
+    export LIBVA_DRIVERS_PATH="${WSL_VAAPI_DIR}"
+    export LD_LIBRARY_PATH="${WSL_VAAPI_DIR}:${LD_LIBRARY_PATH}"
+    export GALLIUM_DRIVER=d3d12
+    export SELKIES_FORCE_HARDWARE_ENCODING=1
+    # Intel's WSL D3D12 UMD is not safe when the Wayland OpenGL renderer and
+    # VA-API encoder share one process.  Pixelflux keeps rendering on the GPU,
+    # reads back NV12, and runs only FFmpeg/VA-API in a clean child process.
+    export PIXELFLUX_VAAPI_EXTERNAL_PROCESS=1
+    # Serialize VA completion waits against concurrent buffer submission.
+    # Queue/VBV tuning alone did not fix the UMD crash; leave their defaults.
+    unset D3D12_VIDEO_ENC_ASYNC_DEPTH D3D12_VIDEO_ENC_CBR_FORCE_VBV_EQUAL_BITRATE
+    WSL_VAAPI_GATE=/usr/local/lib/wsl-vaapi-serialize.so
+    if [ ! -r "${WSL_VAAPI_GATE}" ]; then
+      echo "[svc-selkies] Missing Intel WSL VA-API synchronization shim: ${WSL_VAAPI_GATE}" >&2
+      exit 1
+    fi
+    export LD_PRELOAD="${WSL_VAAPI_GATE}${LD_PRELOAD:+:${LD_PRELOAD}}"
+    echo "[svc-selkies] GPU_VENDOR=intel-wsl: using isolated D3D12 VA-API driver from ${WSL_VAAPI_DIR}"
+  elif [ "${GPU_VENDOR}" = "intel-wsl" ] && [ "${WSL_INTEL_VAAPI:-0}" != "1" ]; then
+    echo "[svc-selkies] Intel GPU encoder driver missing from ${WSL_VAAPI_DIR}; refusing CPU fallback. Rebuild the base image." >&2
+    exit 1
   else
     export GALLIUM_DRIVER=d3d12
   fi
+  # Encoding and display rendering are independent. Even while x264 remains
+  # selected, run pixelflux's Wayland renderer on D3D12 in every GPU display
+  # mode. This removes the expensive llvmpipe framebuffer/readback path that
+  # otherwise makes a high-resolution desktop visibly stutter.
+  case "${WSL_GPU_MODE:-software}" in
+    full|compositor|applications) export GALLIUM_DRIVER=d3d12 ;;
+  esac
   VAAPI_INDEX=""
-  WSL_VA_NODE="${DRI_NODE:-}"
-  if [ -z "${WSL_VA_NODE}" ]; then
+  # Microsoft documents card0 for accelerated video in WSL containers. Keep
+  # the exact path for pixelflux 2 instead of forcing it through the legacy
+  # renderD128-based integer API. Older pixelflux releases retain the index
+  # fallback below.
+  WSL_VA_NODE=""
+  if [ -e "/dev/dri/card0" ]; then
+    WSL_VA_NODE="/dev/dri/card0"
+  elif [ -n "${DRI_NODE:-}" ]; then
+    WSL_VA_NODE="${DRI_NODE}"
+  else
     for renderD in /dev/dri/renderD*; do
       if [ -e "$renderD" ]; then
         WSL_VA_NODE="$renderD"
@@ -133,12 +178,18 @@ elif [ "${GPU_VENDOR}" = "intel-wsl" ] || [ "${GPU_VENDOR}" = "amd-wsl" ]; then
   fi
   RENDER_NUM=""
   if [ "${WSL_TRY_VAAPI}" = "true" ] && [ -n "${WSL_VA_NODE}" ]; then
+    export PIXELFLUX_ENCODE_NODE_PATH="${WSL_VA_NODE}"
     RENDER_NUM=$(echo "${WSL_VA_NODE}" | grep -oP 'renderD\K[0-9]+')
   fi
-  if [ -n "${RENDER_NUM}" ]; then
-    VAAPI_INDEX=$((RENDER_NUM - 128))
+  if [ "${WSL_TRY_VAAPI}" = "true" ] && [ -n "${WSL_VA_NODE}" ]; then
+    # The index is only meaningful for a renderD node. -1 lets pixelflux 2
+    # consume PIXELFLUX_ENCODE_NODE_PATH directly for card0.
+    VAAPI_INDEX="-1"
+    if [ -n "${RENDER_NUM}" ]; then
+      VAAPI_INDEX=$((RENDER_NUM - 128))
+    fi
     export PIXELFLUX_VAAPI_RENDER_NODE_INDEX="${VAAPI_INDEX}"
-    echo "[svc-selkies] GPU_VENDOR=${GPU_VENDOR}: pixelflux will use VA-API via Mesa d3d12 on ${WSL_VA_NODE} (index ${VAAPI_INDEX}, adapter '${MESA_D3D12_DEFAULT_ADAPTER_NAME:-default}')"
+    echo "[svc-selkies] GPU_VENDOR=${GPU_VENDOR}: pixelflux will use VA-API via Mesa d3d12 on ${WSL_VA_NODE} (legacy index ${VAAPI_INDEX}, adapter '${MESA_D3D12_DEFAULT_ADAPTER_NAME:-default}')"
   elif [ "${WSL_TRY_VAAPI}" = "true" ]; then
     export PIXELFLUX_VAAPI_RENDER_NODE_INDEX="-1"
     echo "[svc-selkies] GPU_VENDOR=${GPU_VENDOR}: no /dev/dri render node (run 'sudo modprobe vgem' on the WSL2 host), falling back to software encoding"
@@ -171,7 +222,7 @@ elif [ "${GPU_VENDOR}" = "intel" ] || [ "${GPU_VENDOR}" = "amd" ]; then
     fi
   done
   
-  if [ -n "${VAAPI_INDEX}" ]; then
+  if [ -n "${VAAPI_INDEX}" ] && [ "${VAAPI_INDEX}" -ge 0 ] 2>/dev/null; then
     export PIXELFLUX_VAAPI_RENDER_NODE_INDEX="${VAAPI_INDEX}"
     echo "[svc-selkies] GPU_VENDOR=${GPU_VENDOR}: pixelflux will use VA-API hardware encoding (index ${VAAPI_INDEX})"
   elif [ -n "${DRI_NODE}" ]; then
@@ -275,8 +326,45 @@ SELKIES_H264_CRF="${SELKIES_H264_CRF:-25}"
 CMD_OPTS+=(--h264-crf="${SELKIES_H264_CRF}")
 echo "[svc-selkies] H.264 CRF set to: ${SELKIES_H264_CRF}"
 
+if [[ "${GPU_VENDOR}" == "intel-wsl" ]]; then
+  # Stay in Pixelflux's bitrate-controlled hardware branch to avoid CQP
+  # paint-over reopens. The isolated encoder supports VBR safely; retain an
+  # 8 Mbps maximum and use 8 Mbps CBR only when explicitly requested.
+  export SELKIES_FORCE_HARDWARE_CBR=1
+  export PIXELFLUX_VAAPI_RATE_CONTROL="${PIXELFLUX_VAAPI_RATE_CONTROL:-VBR}"
+  SELKIES_INTEL_VBR_TARGET_MBPS="${SELKIES_INTEL_VBR_TARGET_MBPS:-4}"
+  SELKIES_INTEL_VBR_MAX_MBPS="${SELKIES_INTEL_VBR_MAX_MBPS:-8}"
+  # Old compose environments may still carry the former 12 Mbps value. Never
+  # exceed 8 Mbps on Intel WSL, for either VBR maximum or CBR compatibility.
+  (( SELKIES_INTEL_VBR_MAX_MBPS > 8 )) && SELKIES_INTEL_VBR_MAX_MBPS=8
+  (( SELKIES_INTEL_VBR_TARGET_MBPS > SELKIES_INTEL_VBR_MAX_MBPS )) && \
+    SELKIES_INTEL_VBR_TARGET_MBPS="${SELKIES_INTEL_VBR_MAX_MBPS}"
+  export PIXELFLUX_VAAPI_TARGET_BITRATE_KBPS="$((SELKIES_INTEL_VBR_TARGET_MBPS * 1000))"
+  export PIXELFLUX_VAAPI_MAX_BITRATE_KBPS="$((SELKIES_INTEL_VBR_MAX_MBPS * 1000))"
+  SELKIES_INTEL_CBR_MBPS="${SELKIES_INTEL_CBR_MBPS:-8}"
+  (( SELKIES_INTEL_CBR_MBPS > 8 )) && SELKIES_INTEL_CBR_MBPS=8
+  CMD_OPTS+=(--rate-control-mode=cbr)
+  if [ "${PIXELFLUX_VAAPI_RATE_CONTROL^^}" = "VBR" ]; then
+    CMD_OPTS+=(--video-bitrate="${SELKIES_INTEL_VBR_TARGET_MBPS}")
+    echo "[svc-selkies] Intel WSL: VA-API VBR target ${SELKIES_INTEL_VBR_TARGET_MBPS} Mbps, maximum ${SELKIES_INTEL_VBR_MAX_MBPS} Mbps"
+  else
+    CMD_OPTS+=(--video-bitrate="${SELKIES_INTEL_CBR_MBPS}")
+    echo "[svc-selkies] Intel WSL: VA-API CBR compatibility mode at ${SELKIES_INTEL_CBR_MBPS} Mbps"
+  fi
+fi
+
 # Paint-over CRF for static scenes (higher quality when not moving)
 SELKIES_H264_PAINTOVER_CRF="${SELKIES_H264_PAINTOVER_CRF:-20}"
+if [[ "${GPU_VENDOR}" == "intel-wsl" ]]; then
+  # Pixelflux applies CQP paint-over changes by closing and reopening avcodec.
+  # Intel's Windows D3D12 video UMD can segfault on the wl-encode thread when
+  # motion follows a static paint-over. Keep one GPU encoder session/config.
+  export SELKIES_DISABLE_HARDWARE_PAINTOVER=1
+  SELKIES_H264_PAINTOVER_CRF="${SELKIES_H264_CRF}"
+  CMD_OPTS+=(--use-paint-over-quality=false)
+  CMD_OPTS+=(--h264-paintover-burst-frames=0)
+  echo "[svc-selkies] Intel WSL: H.264 paint-over reconfiguration disabled for encoder stability"
+fi
 CMD_OPTS+=(--h264-paintover-crf="${SELKIES_H264_PAINTOVER_CRF}")
 echo "[svc-selkies] H.264 Paint-over CRF set to: ${SELKIES_H264_PAINTOVER_CRF}"
 

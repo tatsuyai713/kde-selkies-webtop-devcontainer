@@ -157,11 +157,14 @@ RUN --mount=type=secret,id=user_password \
   # reset sudoers to require password \
   sed -i 's/^%sudo\tALL=(ALL:ALL) NOPASSWD: ALL/%sudo\tALL=(ALL:ALL) ALL/' /etc/sudoers; \
   if ! grep -q "^%sudo\s\+ALL=(ALL:ALL)\s\+ALL" /etc/sudoers; then echo "%sudo ALL=(ALL:ALL) ALL" >> /etc/sudoers; fi; \
-  # disable PackageKit/UDisks2 autostart and D-Bus activation (prevents permission-denied spam) \
+  # Disable services unavailable/useless in a WSL webtop. BlueZ OBEX otherwise \
+  # repeatedly activates a missing Evolution source registry and saturates the \
+  # private session bus, which makes Plasma and Chrome appear frozen. \
   rm -f \
     /etc/xdg/autostart/packagekitd.desktop \
     /usr/share/dbus-1/system-services/org.freedesktop.PackageKit.service \
-    /usr/share/dbus-1/system-services/org.freedesktop.UDisks2.service; \
+    /usr/share/dbus-1/system-services/org.freedesktop.UDisks2.service \
+    /usr/share/dbus-1/services/org.bluez.obex.service; \
   install -d -m 755 /etc/dbus-1/system.d; \
   printf '%s\n' \
     '<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"' \
@@ -516,7 +519,24 @@ export XMODIFIERS="@im=fcitx"
 export INPUT_METHOD=fcitx
 export GTK_IM_MODULE=fcitx
 export QT_IM_MODULE=fcitx
-if [ -n "${WAYLAND_DISPLAY}" ] && [ -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ]; then
+if [ "${WSL_ENVIRONMENT:-false}" = "true" ] && [ "${ENCODER:-${GPU_VENDOR:-}}" = "intel-wsl" ]; then
+  # Keep rendering and Linux VA-API decode/encode on the Intel D3D12 adapter.
+  unset LD_PRELOAD WSL_D3D12_COMPOSITOR_ONLY LIBGL_ALWAYS_SOFTWARE
+  unset MESA_LOADER_DRIVER_OVERRIDE
+  export GALLIUM_DRIVER=d3d12
+  export MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-Intel}"
+  export LIBVA_DRIVER_NAME=d3d12
+  export LIBVA_DRIVERS_PATH=/opt/wsl-vaapi-legacy
+  export LD_LIBRARY_PATH="/opt/wsl-vaapi-legacy:/usr/lib/wsl/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  WSL_GPU_FLAGS="--ozone-platform=x11 --qt-version=6 --enable-gpu-rasterization --disable-webgpu --use-gl=angle --use-angle=gl --use-vulkan=disabled --enable-features=AcceleratedVideoEncoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,VaapiIgnoreDriverChecks --disable-features=WebGPU,WebGPUService,WebGPUBlobCache,Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,SkiaGraphite"
+  WSL_GPU_X11=1
+else
+  WSL_GPU_FLAGS=""
+  WSL_GPU_X11=0
+fi
+if [ "${WSL_GPU_X11}" = "1" ]; then
+  DEFAULT_FLAGS="--password-store=basic --ozone-platform=x11"
+elif [ -n "${WAYLAND_DISPLAY}" ] && [ -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ]; then
   DEFAULT_FLAGS="--password-store=basic --ozone-platform=wayland"
 else
   DEFAULT_FLAGS="--password-store=basic --in-process-gpu --ozone-platform=x11"
@@ -529,7 +549,7 @@ if ! pgrep chromium > /dev/null; then
 fi
 
 # Run with --no-sandbox (same as Chrome wrapper)
-exec ${BIN} ${DEFAULT_FLAGS} --no-sandbox "${EXTRA_FLAGS[@]}" "$@"
+exec ${BIN} ${DEFAULT_FLAGS} ${WSL_GPU_FLAGS} --no-sandbox "${EXTRA_FLAGS[@]}" "$@"
 EOF_WRAPPED_CHROMIUM
   chmod 755 /usr/local/bin/wrapped-chromium
 fi
@@ -570,16 +590,32 @@ if [ "${ARCH}" != "arm64" ]; then
 CHROME_BIN="/usr/bin/google-chrome-stable"
 export XMODIFIERS="@im=fcitx"
 export INPUT_METHOD=fcitx
+if [ "${WSL_ENVIRONMENT:-false}" = "true" ] && [ "${ENCODER:-${GPU_VENDOR:-}}" = "intel-wsl" ]; then
+  unset LD_PRELOAD WSL_D3D12_COMPOSITOR_ONLY LIBGL_ALWAYS_SOFTWARE
+  unset MESA_LOADER_DRIVER_OVERRIDE
+  export GALLIUM_DRIVER=d3d12
+  export MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-Intel}"
+  export LIBVA_DRIVER_NAME=d3d12
+  export LIBVA_DRIVERS_PATH=/opt/wsl-vaapi-legacy
+  export LD_LIBRARY_PATH="/opt/wsl-vaapi-legacy:/usr/lib/wsl/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  WSL_GPU_FLAGS="--ozone-platform=x11 --qt-version=6 --enable-gpu-rasterization --disable-webgpu --use-gl=angle --use-angle=gl --use-vulkan=disabled --enable-features=AcceleratedVideoEncoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,VaapiIgnoreDriverChecks --disable-features=WebGPU,WebGPUService,WebGPUBlobCache,Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,SkiaGraphite"
+  WSL_GPU_X11=1
+else
+  WSL_GPU_FLAGS=""
+  WSL_GPU_X11=0
+fi
 # In the KDE Wayland session (Ubuntu 26.04+) run Chrome as a native Wayland
 # client so it renders through kwin's NVIDIA EGL and gets GPU-accelerated
 # compositing, WebGL and NVDEC video decode. On 22.04/24.04, Chrome inherits
 # the session-wide Mesa Zink configuration backed by the NVIDIA Vulkan driver.
-if [ -n "${WAYLAND_DISPLAY}" ] && [ -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ]; then
+if [ "${WSL_GPU_X11}" = "1" ]; then
+  OZONE_FLAGS="--ozone-platform=x11"
+elif [ -n "${WAYLAND_DISPLAY}" ] && [ -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ]; then
   OZONE_FLAGS="--ozone-platform=wayland"
 else
   OZONE_FLAGS="--ozone-platform=x11"
 fi
-exec "${CHROME_BIN}" --password-store=basic ${OZONE_FLAGS} --no-sandbox ${CHROME_EXTRA_FLAGS} "$@"
+exec "${CHROME_BIN}" --password-store=basic ${OZONE_FLAGS} ${WSL_GPU_FLAGS} --no-sandbox ${CHROME_EXTRA_FLAGS} "$@"
 EOF_GCW
     chmod 755 /usr/local/bin/google-chrome-wrapped
     for chrome_bin in google-chrome-beta google-chrome-unstable; do
@@ -631,6 +667,17 @@ EOF_CHROME
   fi
 fi
 EOF
+
+# Replace the inline compatibility wrappers above with the maintained,
+# GPU-only WSL versions. Keeping these as normal files also makes the exact
+# runtime command independently testable.
+COPY --chmod=755 ubuntu-root/usr/local/bin/google-chrome-wrapped /usr/local/bin/google-chrome-wrapped
+COPY --chmod=755 ubuntu-root/usr/local/bin/wrapped-chromium /usr/local/bin/wrapped-chromium
+RUN bash -n /usr/local/bin/google-chrome-wrapped /usr/local/bin/wrapped-chromium && \
+    grep -q 'intel-wsl|nvidia-wsl|amd-wsl' /usr/local/bin/google-chrome-wrapped && \
+    grep -q 'intel-wsl|nvidia-wsl|amd-wsl' /usr/local/bin/wrapped-chromium && \
+    grep -q -- '--ozone-platform=x11' /usr/local/bin/google-chrome-wrapped && \
+    grep -q -- '--ozone-platform=x11' /usr/local/bin/wrapped-chromium
 
 # Keep default USER=root so s6 init can modify system paths.
 

@@ -17,6 +17,7 @@ ARG PACKAGES=alpine-baselayout,alpine-keys,apk-tools,busybox,libc-utils
 RUN \
   apk add --no-cache bash xz
 
+
 # build rootfs
 RUN \
   mkdir -p "${ROOTFS}/etc/apk" && \
@@ -38,6 +39,58 @@ ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLA
 RUN tar -C /root-out -Jxpf /tmp/s6-overlay-symlinks-noarch.tar.xz && unlink /root-out/usr/bin/with-contenv
 ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-symlinks-arch.tar.xz /tmp
 RUN tar -C /root-out -Jxpf /tmp/s6-overlay-symlinks-arch.tar.xz
+
+
+###########################################
+# Stage 1b: legacy WSL2 VA-API browser compatibility driver
+###########################################
+# Retained for the existing browser launchers. Selkies uses the separately
+# pinned 25.2.8 video stack below, not this legacy encoder implementation.
+FROM ubuntu:22.04 AS wsl-vaapi-legacy-stage
+
+ARG TARGETARCH
+RUN set -eux; \
+  mkdir -p /legacy-out; \
+  if [ "${TARGETARCH}" = "amd64" ]; then \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      mesa-va-drivers libllvm15; \
+    cp -L /usr/lib/x86_64-linux-gnu/dri/d3d12_drv_video.so /legacy-out/; \
+    cp -L /usr/lib/x86_64-linux-gnu/libLLVM-15.so.1 /legacy-out/; \
+    cp -L /usr/lib/x86_64-linux-gnu/libxml2.so.2 /legacy-out/; \
+    cp -L /usr/lib/x86_64-linux-gnu/libicuuc.so.70 /legacy-out/; \
+    cp -L /usr/lib/x86_64-linux-gnu/libicudata.so.70 /legacy-out/; \
+  fi
+
+###########################################
+# Stage 1c: Intel WSL encoder and synchronization compatibility gate
+###########################################
+FROM ubuntu:24.04 AS wsl-vaapi-stage
+ARG TARGETARCH
+ARG WSL_VAAPI_MESA_VERSION=25.2.8-0ubuntu0.24.04.2
+COPY ubuntu-root/usr/local/src/wsl-vaapi-serialize.c /tmp/wsl-vaapi-serialize.c
+COPY pixelflux/test-vaapi-serialize.c /tmp/test-vaapi-serialize.c
+RUN set -eux; \
+  mkdir -p /vaapi-out /compat-out; \
+  if [ "${TARGETARCH}" = "amd64" ]; then \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      "mesa-va-drivers=${WSL_VAAPI_MESA_VERSION}" \
+      "mesa-libgallium=${WSL_VAAPI_MESA_VERSION}" libllvm20 libva-dev gcc libc6-dev; \
+    cp -L /usr/lib/x86_64-linux-gnu/dri/d3d12_drv_video.so /vaapi-out/; \
+    cp -L /usr/lib/x86_64-linux-gnu/libLLVM.so.20.1 /vaapi-out/; \
+    cp -L /usr/lib/x86_64-linux-gnu/libxml2.so.2 /vaapi-out/; \
+    cp -L /usr/lib/x86_64-linux-gnu/libicuuc.so.74 /vaapi-out/; \
+    cp -L /usr/lib/x86_64-linux-gnu/libicudata.so.74 /vaapi-out/; \
+    cc -shared -fPIC -O2 -Wall -Wextra -Werror /tmp/wsl-vaapi-serialize.c \
+      -o /compat-out/wsl-vaapi-serialize.so -ldl -lpthread; \
+    cc -DFAKE_VA -shared -fPIC -O2 /tmp/test-vaapi-serialize.c \
+      -o /tmp/libfake-va.so -lpthread; \
+    cc -O2 /tmp/test-vaapi-serialize.c -L/tmp -lfake-va -Wl,-rpath,/tmp \
+      -o /tmp/test-vaapi-serialize -lpthread; \
+    status=0; /tmp/test-vaapi-serialize || status=$?; test "${status}" = 1; \
+    LD_PRELOAD=/compat-out/wsl-vaapi-serialize.so /tmp/test-vaapi-serialize; \
+  fi
 
 
 ###########################################
@@ -184,7 +237,6 @@ RUN \
 
 # add local files for ubuntu base
 COPY ubuntu-root/ /
-
 
 ###########################################
 # Stage 4: Xvfb builder
@@ -487,6 +539,18 @@ RUN \
     test -f "${PIXELFLUX_WHL}" && \
     echo "Installing pixelflux from local wheel for Ubuntu 22.04: ${PIXELFLUX_WHL}" && \
     /opt/selkies-env/bin/pip install --force-reinstall "${PIXELFLUX_WHL}"; \
+  elif [ "$(dpkg --print-architecture)" = "amd64" ] && [ "${UBUNTU_VERSION}" = "26.04" ]; then \
+    # Pixelflux 2.0 upstream uses INT_MAX as VA-API's GOP size. FFmpeg then \
+    # emits log2_max_frame_num_minus4=27 although H.264 permits at most 12, \
+    # and Edge/WebCodecs rejects the first chunk. This wheel is built from \
+    # the pinned source with GOP capped at 65535 and one slice, against the \
+    # system FFmpeg 8 ABI. Intel WSL VA-API runs in a dedicated FFmpeg child \
+    # so its D3D12 video state cannot corrupt the OpenGL compositor process. \
+    PIXELFLUX_WHL="/tmp/pixelflux/pixelflux-2.0.0-cp314-cp314-linux_x86_64.whl" && \
+    test -f "${PIXELFLUX_WHL}" && \
+    echo "6a50fc2fb13c1e3a4b0c4023fff16efb69d2533e5e76ab6cb61cecdb3ba86bb3  ${PIXELFLUX_WHL}" | sha256sum -c - && \
+    echo "Installing H.264-compliant pixelflux wheel for Ubuntu 26.04: ${PIXELFLUX_WHL}" && \
+    /opt/selkies-env/bin/pip install --no-deps --force-reinstall "${PIXELFLUX_WHL}"; \
   elif [ "$(dpkg --print-architecture)" = "arm64" ] && [ "${UBUNTU_VERSION}" = "22.04" ]; then \
     PIXELFLUX_WHL="/tmp/pixelflux-1.4.7-cp310-cp310-manylinux_2_28_aarch64.whl" && \
     PIXELFLUX_URL="https://files.pythonhosted.org/packages/4f/6e/832ed1b22373e0a1b80826b5dab8d38634a7f4db2bf7254b0aaea4dfe928/$(basename "${PIXELFLUX_WHL}")" && \
@@ -687,14 +751,39 @@ RUN \
 # add local files - this will overwrite ubuntu-root files if conflicts exist
 COPY ubuntu-root/ /
 
+# A streamed framebuffer has no physical LCD subpixel order.  Ubuntu enables
+# RGB subpixel antialiasing by default, which becomes coloured fringes after
+# RGBA capture and H.264 4:2:0 conversion.  Keep grayscale antialiasing while
+# leaving the desktop compositor and applications on their GPU backends.
+RUN ln -sfn /usr/share/fontconfig/conf.avail/10-sub-pixel-none.conf \
+      /etc/fonts/conf.d/10-sub-pixel-rgb.conf && \
+    fc-cache -f
+
 # selkies-gstreamer is no longer used; websockets 15.x patch is not needed
 COPY --from=frontend /buildout /usr/share/selkies
 COPY --from=xvfb-builder /build-out/ /
+COPY --from=wsl-vaapi-legacy-stage /legacy-out/ /opt/wsl-vaapi-legacy/
+COPY --from=wsl-vaapi-stage /vaapi-out/ /opt/wsl-vaapi/
+COPY --from=wsl-vaapi-stage /compat-out/ /usr/local/lib/
 
 # Apply Safari keyboard input patch for Selkies web UIs
 RUN if [ -f /usr/local/bin/patch-selkies-safari-keyboard.py ]; then \
       chmod +x /usr/local/bin/patch-selkies-safari-keyboard.py && \
       python3 /usr/local/bin/patch-selkies-safari-keyboard.py; \
+    fi
+
+# Edge/Chrome should decode streamed H.264 frames on the host GPU. Upstream
+# currently requests prefer-software for its WebCodecs VideoDecoder objects.
+RUN if [ -f /usr/local/bin/patch-selkies-hardware-decode.py ]; then \
+      chmod +x /usr/local/bin/patch-selkies-hardware-decode.py && \
+      python3 /usr/local/bin/patch-selkies-hardware-decode.py; \
+    fi
+
+# WSL ships nvidia-smi even on Intel-only systems. GPUtil must not parse its
+# non-zero error output as a GPU record, otherwise every data WebSocket closes.
+RUN if [ -f /usr/local/bin/patch-gputil-nvidia-smi-exit.py ]; then \
+      chmod +x /usr/local/bin/patch-gputil-nvidia-smi-exit.py && \
+      /opt/selkies-env/bin/python3 /usr/local/bin/patch-gputil-nvidia-smi-exit.py; \
     fi
 
 # Patch Selkies frontend assets so primary clients fit scaled streams to the viewport
@@ -719,11 +808,26 @@ RUN if [ -f /usr/local/bin/patch-selkies-stream-scale.py ]; then \
       /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-stream-scale.py; \
     fi
 
+# Ignore tiny viewport-size jitter. Recreating the in-process VA-API encoder
+# for a 1-8 px browser chrome/fractional-scaling change can crash Intel's WSL
+# D3D12 video UMD and take the parent Wayland compositor down with it.
+RUN if [ -f /usr/local/bin/patch-selkies-resize-stability.py ]; then \
+      chmod +x /usr/local/bin/patch-selkies-resize-stability.py && \
+      /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-resize-stability.py; \
+    fi
+
 # Adapt the pinned selkies to the pixelflux 2.x API (enables NVENC on Wayland).
 # No-op when pixelflux 1.x is installed (22.04/24.04).
 RUN if [ -f /usr/local/bin/patch-selkies-pixelflux2.py ]; then \
       chmod +x /usr/local/bin/patch-selkies-pixelflux2.py && \
       /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-pixelflux2.py; \
+    fi
+
+# Keep the vendor pixelflux wheel intact for native/NVIDIA/AMD profiles and
+# prepare an Intel WSL variant whose H.264 output Chromium can consume.
+RUN if [ -f /usr/local/bin/patch-pixelflux-intel-wsl-slices.py ]; then \
+      chmod +x /usr/local/bin/patch-pixelflux-intel-wsl-slices.py && \
+      /opt/selkies-env/bin/python3 /usr/local/bin/patch-pixelflux-intel-wsl-slices.py; \
     fi
 
 # Build selkies' Wayland keysym->scancode table from the session's XKB layout

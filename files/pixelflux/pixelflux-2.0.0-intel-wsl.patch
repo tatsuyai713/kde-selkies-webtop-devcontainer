@@ -1,0 +1,450 @@
+diff --git a/pixelflux/src/encoders/vaapi.rs b/pixelflux/src/encoders/vaapi.rs
+index 2600e53..cadb98e 100644
+--- a/pixelflux/src/encoders/vaapi.rs
++++ b/pixelflux/src/encoders/vaapi.rs
+@@ -13,9 +13,11 @@
+ //! happens on the CPU.
+
+ use std::ffi::{c_char, c_int, c_void, CStr, CString};
++use std::io::{Read, Write};
+ use std::mem;
+ use std::os::fd::AsRawFd;
+ use std::ptr;
++use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+ use std::sync::Once;
+
+ use ffmpeg_sys_next as ff;
+@@ -37,6 +39,122 @@ const AV_DRM_MAX_PLANES: usize = 4;
+ /// apply at once and never wait.
+ const QP_HYSTERESIS_LIMIT: u32 = 60;
+
++/// Runs FFmpeg in a separate address space on WSL.  Mesa's D3D12 OpenGL and
++/// VA-API drivers both load the Windows Intel UMD; keeping them in one process
++/// makes Intel's video path reject surface creation or crash in vaEndPicture.
++/// The child receives NV12 readback frames and performs upload + H.264 encode
++/// on the Intel GPU, while the parent continues to render with D3D12 OpenGL.
++struct ExternalVaapiProcess {
++    child: Child,
++    stdin: ChildStdin,
++    stdout: ChildStdout,
++}
++
++impl Drop for ExternalVaapiProcess {
++    fn drop(&mut self) {
++        let _ = self.child.kill();
++        let _ = self.child.wait();
++    }
++}
++
++impl ExternalVaapiProcess {
++    fn spawn(settings: &RustCaptureSettings) -> Result<Self, String> {
++        let width = settings.width.max(2);
++        let height = settings.height.max(2);
++        let fps = settings.target_fps.max(1.0).round() as i32;
++        let device = if settings.encode_node_path.is_empty() {
++            if settings.encode_node_index >= 0 {
++                format!("/dev/dri/renderD{}", 128 + settings.encode_node_index)
++            } else {
++                "/dev/dri/card0".to_string()
++            }
++        } else {
++            settings.encode_node_path.clone()
++        };
++        let configured_max_kbps = std::env::var("PIXELFLUX_VAAPI_MAX_BITRATE_KBPS")
++            .ok().and_then(|v| v.parse::<i32>().ok())
++            .unwrap_or(8000).clamp(1, 8000);
++        let configured_target_kbps = std::env::var("PIXELFLUX_VAAPI_TARGET_BITRATE_KBPS")
++            .ok().and_then(|v| v.parse::<i32>().ok())
++            .unwrap_or(4000).clamp(1, configured_max_kbps);
++        // Browser local storage can retain the former 12 Mbps value and send
++        // it after the server starts. Honour lower user choices, never values
++        // above the operator's VBR target.
++        let target_kbps = settings.video_bitrate_kbps.clamp(1, configured_target_kbps);
++        let max_kbps = configured_max_kbps.max(target_kbps);
++        let rc_mode = std::env::var("PIXELFLUX_VAAPI_RATE_CONTROL")
++            .unwrap_or_else(|_| "CBR".into()).to_ascii_uppercase();
++        let gop = (fps * settings.keyframe_interval_s.max(1.0).round() as i32)
++            .clamp(fps, 300);
++
++        let mut cmd = Command::new("/usr/bin/ffmpeg");
++        cmd.args([
++            "-hide_banner", "-loglevel", "warning",
++            "-vaapi_device", &device,
++            "-f", "rawvideo", "-pix_fmt", "nv12",
++            "-s", &format!("{}x{}", width, height),
++            "-r", &fps.to_string(), "-i", "pipe:0",
++            "-vf", "hwupload", "-c:v", "h264_vaapi",
++            "-profile:v", "high", "-level:v", "4.1",
++            "-bf", "0", "-g", &gop.to_string(),
++            "-async_depth", "1", "-rc_mode", if rc_mode == "VBR" { "VBR" } else { "CBR" },
++            "-b:v", &format!("{}k", target_kbps),
++            "-maxrate", &format!("{}k", max_kbps),
++            "-bufsize", &format!("{}k", max_kbps),
++            "-f", "h264", "-flush_packets", "1", "pipe:1",
++        ]);
++        let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()
++            .map_err(|e| format!("failed to start external VAAPI FFmpeg: {e}"))?;
++        let stdin = child.stdin.take().ok_or("external VAAPI stdin unavailable")?;
++        let stdout = child.stdout.take().ok_or("external VAAPI stdout unavailable")?;
++        unsafe {
++            let fd = stdout.as_raw_fd();
++            let flags = libc::fcntl(fd, libc::F_GETFL);
++            if flags >= 0 { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK); }
++        }
++        Ok(Self { child, stdin, stdout })
++    }
++
++    fn encode(&mut self, frame: &[u8]) -> Result<Vec<u8>, String> {
++        self.stdin.write_all(frame).map_err(|e| format!("external VAAPI input failed: {e}"))?;
++        self.stdin.flush().map_err(|e| format!("external VAAPI flush failed: {e}"))?;
++
++        let fd = self.stdout.as_raw_fd();
++        let mut output = Vec::new();
++        let mut first_wait = true;
++        loop {
++            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
++            let timeout = if first_wait { 1500 } else { 5 };
++            let ready = unsafe { libc::poll(&mut pfd, 1, timeout) };
++            if ready < 0 { return Err("external VAAPI output poll failed".into()); }
++            if ready == 0 {
++                if output.is_empty() { return Err("external VAAPI output timed out".into()); }
++                break;
++            }
++            first_wait = false;
++            let mut chunk = [0u8; 65536];
++            loop {
++                match self.stdout.read(&mut chunk) {
++                    Ok(0) => return Err("external VAAPI FFmpeg exited".into()),
++                    Ok(n) => output.extend_from_slice(&chunk[..n]),
++                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
++                    Err(e) => return Err(format!("external VAAPI output failed: {e}")),
++                }
++            }
++        }
++        Ok(output)
++    }
++}
++
++fn annexb_has_idr(data: &[u8]) -> bool {
++    (0..data.len().saturating_sub(4)).any(|i| {
++        let start3 = data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1;
++        let start4 = data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1;
++        let nal = if start3 { i + 3 } else if start4 { i + 4 } else { return false; };
++        nal < data.len() && (data[nal] & 0x1f) == 5
++    })
++}
++
+ /// Exists only to mirror FFmpeg's `libavutil/hwcontext_drm.h` ABI so a Wayland dmabuf can be
+ /// handed to the `hwmap` filter without a copy.
+ ///
+@@ -142,6 +260,7 @@ fn ff_err_str(err: i32) -> String {
+ /// the optional Unix-socket H.264 fan-out; `omit_stripe_headers` drops the 10-byte framing when the
+ /// consumer wants a bare Annex-B stream.
+ pub struct VaapiEncoder {
++    external: Option<ExternalVaapiProcess>,
+     encoder_ctx: *mut ff::AVCodecContext,
+     codec: *const ff::AVCodec,
+
+@@ -297,9 +416,31 @@ impl VaapiEncoder {
+         let height = settings.height;
+         let fps = settings.target_fps as i32;
+
++        if !host_input && std::env::var("PIXELFLUX_VAAPI_EXTERNAL_PROCESS").as_deref() == Ok("1") {
++            let external = ExternalVaapiProcess::spawn(settings)?;
++            println!("[Wayland] External-process Intel VAAPI encoder initialized.");
++            return Ok(Self {
++                external: Some(external),
++                encoder_ctx: ptr::null_mut(), codec: ptr::null(),
++                hw_device_ctx: ptr::null_mut(), drm_device_ctx: ptr::null_mut(),
++                drm_frames_ctx: ptr::null_mut(), enc_frames_ctx: ptr::null_mut(),
++                filter_graph: ptr::null_mut(), buffersrc_ctx: ptr::null_mut(),
++                buffersink_ctx: ptr::null_mut(), video_frame: ptr::null_mut(),
++                sw_frame: ptr::null_mut(), hw_frame: ptr::null_mut(), packet: ptr::null_mut(),
++                width, height, fps, current_qp: settings.video_crf as u32,
++                qp_hysteresis_counter: 0, cbr_mode: settings.video_cbr_mode,
++                current_bitrate_kbps: settings.video_bitrate_kbps,
++                current_vbv_mult: settings.video_vbv_multiplier,
++                current_kf_s: settings.keyframe_interval_s,
++                omit_stripe_headers: settings.omit_stripe_headers,
++            });
++        }
++
+         unsafe {
+             let mut drm_device_ctx: *mut ff::AVBufferRef = ptr::null_mut();
+-            let render_node = if settings.encode_node_index >= 0 {
++            let render_node = if !settings.encode_node_path.is_empty() {
++                settings.encode_node_path.clone()
++            } else if settings.encode_node_index >= 0 {
+                 format!("/dev/dri/renderD{}", 128 + settings.encode_node_index)
+             } else {
+                 "/dev/dri/renderD128".to_string()
+@@ -362,9 +503,6 @@ impl VaapiEncoder {
+                 return Err("h264_vaapi encoder not found".into());
+             }
+
+-            let aligned_width = (width + 15) & !15;
+-            let aligned_height = (height + 31) & !31;
+-
+             let mut enc_frames_ref = ff::av_hwframe_ctx_alloc(hw_device_ctx);
+             if enc_frames_ref.is_null() {
+                 ff::av_buffer_unref(&mut drm_frames_ref);
+@@ -375,9 +513,16 @@ impl VaapiEncoder {
+             let enc_frames = (*enc_frames_ref).data as *mut ff::AVHWFramesContext;
+             (*enc_frames).format = ff::AVPixelFormat::AV_PIX_FMT_VAAPI;
+             (*enc_frames).sw_format = ff::AVPixelFormat::AV_PIX_FMT_NV12;
+-            (*enc_frames).width = aligned_width;
+-            (*enc_frames).height = aligned_height;
+-            (*enc_frames).initial_pool_size = 20;
++            // Let the VA driver apply its own internal alignment.  Supplying
++            // a 2000x1280 surface pool to a 1992x1250 codec context is rejected
++            // by Intel's WSL D3D12 backend even though exact-sized surfaces
++            // encode correctly.
++            (*enc_frames).width = width;
++            (*enc_frames).height = height;
++            // Match FFmpeg's working WSL path: let AVHWFramesContext allocate
++            // surfaces on demand. Intel's D3D12 backend can reject any fixed
++            // preallocated pool after repeated encoder sessions.
++            (*enc_frames).initial_pool_size = 0;
+
+             if ff::av_hwframe_ctx_init(enc_frames_ref) < 0 {
+                 ff::av_buffer_unref(&mut enc_frames_ref);
+@@ -406,8 +551,8 @@ impl VaapiEncoder {
+             (*encoder_ctx).hw_device_ctx = ff::av_buffer_ref(hw_device_ctx);
+             (*encoder_ctx).hw_frames_ctx = ff::av_buffer_ref(enc_frames_ref);
+             (*encoder_ctx).max_b_frames = 0;
+-            (*encoder_ctx).gop_size = std::ffi::c_int::MAX;
+-            (*encoder_ctx).slices = 4;
++            (*encoder_ctx).gop_size = 65_535;
++            (*encoder_ctx).slices = 1;
+             (*encoder_ctx).compression_level = 6;
+
+             ff::av_buffer_unref(&mut enc_frames_ref);
+@@ -421,16 +566,27 @@ impl VaapiEncoder {
+
+             if settings.video_cbr_mode {
+                 let bps = (settings.video_bitrate_kbps.max(0) as i64).saturating_mul(1000);
++                let rc_mode = std::env::var("PIXELFLUX_VAAPI_RATE_CONTROL")
++                    .unwrap_or_else(|_| "CBR".to_string()).to_ascii_uppercase();
++                let max_bps = if rc_mode == "VBR" {
++                    std::env::var("PIXELFLUX_VAAPI_MAX_BITRATE_KBPS")
++                        .ok().and_then(|v| v.parse::<i64>().ok())
++                        .unwrap_or(settings.video_bitrate_kbps.max(0) as i64)
++                        .max(settings.video_bitrate_kbps.max(0) as i64)
++                        .saturating_mul(1000)
++                } else {
++                    bps
++                };
+                 let vbv = crate::encoders::vbv_bits(
+-                    bps.min(u32::MAX as i64) as u32,
++                    max_bps.min(u32::MAX as i64) as u32,
+                     settings.target_fps,
+                     settings.keyframe_interval_s,
+                     settings.video_vbv_multiplier,
+                 );
+                 (*encoder_ctx).bit_rate = bps;
+-                (*encoder_ctx).rc_max_rate = bps;
++                (*encoder_ctx).rc_max_rate = max_bps;
+                 (*encoder_ctx).rc_buffer_size = vbv.min(i32::MAX as u32) as i32;
+-                set_opt(&mut opts, "rc_mode", "CBR");
++                set_opt(&mut opts, "rc_mode", if rc_mode == "VBR" { "VBR" } else { "CBR" });
+             } else {
+                 set_opt(&mut opts, "rc_mode", "CQP");
+                 set_opt(&mut opts, "qp", &settings.video_crf.to_string());
+@@ -613,6 +769,7 @@ impl VaapiEncoder {
+             }
+
+             Ok(Self {
++                external: None,
+                 encoder_ctx,
+                 codec,
+                 hw_device_ctx,
+@@ -671,8 +828,8 @@ impl VaapiEncoder {
+         (*self.encoder_ctx).hw_device_ctx = ff::av_buffer_ref(self.hw_device_ctx);
+         (*self.encoder_ctx).hw_frames_ctx = ff::av_buffer_ref(self.enc_frames_ctx);
+         (*self.encoder_ctx).max_b_frames = 0;
+-        (*self.encoder_ctx).gop_size = std::ffi::c_int::MAX;
+-        (*self.encoder_ctx).slices = 4;
++        (*self.encoder_ctx).gop_size = 65_535;
++        (*self.encoder_ctx).slices = 1;
+         (*self.encoder_ctx).compression_level = 6;
+
+         let mut opts: *mut ff::AVDictionary = ptr::null_mut();
+@@ -684,16 +841,27 @@ impl VaapiEncoder {
+
+         if self.cbr_mode {
+             let bps = (self.current_bitrate_kbps.max(0) as i64).saturating_mul(1000);
++            let rc_mode = std::env::var("PIXELFLUX_VAAPI_RATE_CONTROL")
++                .unwrap_or_else(|_| "CBR".to_string()).to_ascii_uppercase();
++            let max_bps = if rc_mode == "VBR" {
++                std::env::var("PIXELFLUX_VAAPI_MAX_BITRATE_KBPS")
++                    .ok().and_then(|v| v.parse::<i64>().ok())
++                    .unwrap_or(self.current_bitrate_kbps.max(0) as i64)
++                    .max(self.current_bitrate_kbps.max(0) as i64)
++                    .saturating_mul(1000)
++            } else {
++                bps
++            };
+             let vbv = crate::encoders::vbv_bits(
+-                bps.min(u32::MAX as i64) as u32,
++                max_bps.min(u32::MAX as i64) as u32,
+                 self.fps.max(1) as f64,
+                 self.current_kf_s,
+                 self.current_vbv_mult,
+             );
+             (*self.encoder_ctx).bit_rate = bps;
+-            (*self.encoder_ctx).rc_max_rate = bps;
++            (*self.encoder_ctx).rc_max_rate = max_bps;
+             (*self.encoder_ctx).rc_buffer_size = vbv.min(i32::MAX as u32) as i32;
+-            set_opt(&mut opts, "rc_mode", "CBR");
++            set_opt(&mut opts, "rc_mode", if rc_mode == "VBR" { "VBR" } else { "CBR" });
+         } else {
+             set_opt(&mut opts, "rc_mode", "CQP");
+             set_opt(&mut opts, "qp", &qp.to_string());
+@@ -764,6 +932,23 @@ impl VaapiEncoder {
+     /// interval and calls `reopen_codec` carrying the **current** QP, so a CQP stream keeps its
+     /// quantizer across the change.
+     pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) {
++        if self.external.is_some() {
++            let new_fps = settings.target_fps.max(1.0) as i32;
++            let changed = settings.video_bitrate_kbps != self.current_bitrate_kbps
++                || settings.video_vbv_multiplier != self.current_vbv_mult
++                || new_fps != self.fps;
++            if changed {
++                match ExternalVaapiProcess::spawn(settings) {
++                    Ok(process) => self.external = Some(process),
++                    Err(e) => eprintln!("[vaapi-external] rate reconfigure failed: {e}"),
++                }
++                self.fps = new_fps;
++                self.current_bitrate_kbps = settings.video_bitrate_kbps;
++                self.current_vbv_mult = settings.video_vbv_multiplier;
++                self.current_kf_s = settings.keyframe_interval_s;
++            }
++            return;
++        }
+         unsafe {
+             let mut changed = false;
+             if self.cbr_mode
+@@ -852,6 +1037,9 @@ impl VaapiEncoder {
+         qp: u32,
+         force_idr: bool,
+     ) -> Result<Vec<u8>, String> {
++        if self.external.is_some() {
++            return Err("external VAAPI requires the readback path".into());
++        }
+         unsafe {
+             self.update_qp(qp)?;
+
+@@ -1040,6 +1228,20 @@ impl VaapiEncoder {
+         qp: u32,
+         force_idr: bool,
+     ) -> Result<Vec<u8>, String> {
++        if let Some(external) = self.external.as_mut() {
++            let payload = external.encode(nv12_pixels)?;
++            let mut output = Vec::with_capacity(payload.len() + if self.omit_stripe_headers { 0 } else { 10 });
++            if !self.omit_stripe_headers {
++                output.push(0x04);
++                output.push(if annexb_has_idr(&payload) { 0x01 } else { 0x00 });
++                output.extend_from_slice(&(frame_number as u16).to_be_bytes());
++                output.extend_from_slice(&0u16.to_be_bytes());
++                output.extend_from_slice(&(self.width as u16).to_be_bytes());
++                output.extend_from_slice(&(self.height as u16).to_be_bytes());
++            }
++            output.extend_from_slice(&payload);
++            return Ok(output);
++        }
+         unsafe {
+             self.update_qp(qp)?;
+
+diff --git a/pixelflux/src/lib.rs b/pixelflux/src/lib.rs
+index 7ca8e2b..49180d8 100644
+--- a/pixelflux/src/lib.rs
++++ b/pixelflux/src/lib.rs
+@@ -299,6 +299,10 @@ pub struct RustCaptureSettings {
+     pub watermark_path: String,
+     pub watermark_location_enum: i32,
+     pub encode_node_index: i32,
++    /// Exact DRM node used by the encoder. This is required by WSL's D3D12
++    /// VA-API path, where the primary node (`card0`) cannot be represented by
++    /// the legacy renderD index.
++    pub encode_node_path: String,
+     pub use_cpu: bool,
+     pub use_openh264: bool,
+     pub debug_logging: bool,
+@@ -402,6 +406,7 @@ impl Default for RustCaptureSettings {
+             watermark_path: String::new(),
+             watermark_location_enum: 0,
+             encode_node_index: -2,
++            encode_node_path: String::new(),
+             use_cpu: false,
+             use_openh264: false,
+             debug_logging: false,
+@@ -480,6 +485,11 @@ pub(crate) fn extract_settings(settings: &Bound<'_, PyAny>) -> PyResult<RustCapt
+         watermark_path,
+         watermark_location_enum: settings.getattr("watermark_location_enum")?.extract()?,
+         encode_node_index: settings.getattr("encode_node_index")?.extract()?,
++        encode_node_path: settings
++            .getattr("encode_node_path")
++            .ok()
++            .and_then(|v| v.extract::<String>().ok())
++            .unwrap_or_default(),
+         use_cpu: settings.getattr("use_cpu")?.extract()?,
+         use_openh264: settings
+             .getattr("use_openh264")
+@@ -1823,16 +1833,33 @@ fn run_wayland_thread(
+                     }
+
+                     let mut different_gpu = false;
++                    let external_vaapi = std::env::var("PIXELFLUX_VAAPI_EXTERNAL_PROCESS")
++                        .as_deref() == Ok("1");
+                     if gpu_intent {
+                         let encode_node_idx = settings.encode_node_index.max(0);
+-                        if !state.render_node_path.is_empty()
+-                            && !state.render_node_path.contains(&format!("renderD{}", 128 + encode_node_idx))
+-                        {
+-                            different_gpu = true;
++                        let encode_node_path = if settings.encode_node_path.is_empty() {
++                            format!("/dev/dri/renderD{}", 128 + encode_node_idx)
++                        } else {
++                            settings.encode_node_path.clone()
++                        };
++                        if !state.render_node_path.is_empty() {
++                            let render_name = std::path::Path::new(&state.render_node_path)
++                                .file_name().and_then(|v| v.to_str()).unwrap_or("");
++                            let encode_name = std::path::Path::new(&encode_node_path)
++                                .file_name().and_then(|v| v.to_str()).unwrap_or("");
++                            let render_device = std::fs::canonicalize(
++                                format!("/sys/class/drm/{render_name}/device"));
++                            let encode_device = std::fs::canonicalize(
++                                format!("/sys/class/drm/{encode_name}/device"));
++                            different_gpu = state.render_node_path != encode_node_path
++                                && match (render_device, encode_device) {
++                                    (Ok(render), Ok(encode)) => render != encode,
++                                    _ => true,
++                                };
+                         }
+                     }
+
+-                    if gpu_intent && state.use_gpu && !different_gpu {
++                    if gpu_intent && state.use_gpu && !different_gpu && !external_vaapi {
+                         let encode_driver = get_gpu_driver(settings.encode_node_index.max(0));
+                         println!(
+                             "[Wayland] Encode Node Index: {} | Driver: {}",
+@@ -1902,6 +1929,9 @@ fn run_wayland_thread(
+                     if different_gpu {
+                         println!("[Wayland] Decision: Rendering and Encoding GPUs differ -> Forcing Readback (CPU path for pixels).");
+                     }
++                    if external_vaapi && gpu_intent {
++                        println!("[Wayland] Decision: Intel VAAPI runs out of process; GPU rendering readback path active.");
++                    }
+                     if state.video_encoder.is_none() {
+                         println!("[Wayland] Decision: Readback path (encode thread) active.");
+                     } else if !different_gpu {
+@@ -2007,7 +2037,7 @@ fn run_wayland_thread(
+                             let cfg = WlEncodeConfig {
+                                 settings: settings.clone(),
+                                 use_gpu: state.use_gpu,
+-                                try_gpu: gpu_intent && (!state.use_gpu || different_gpu),
++                                try_gpu: gpu_intent && (!state.use_gpu || different_gpu || external_vaapi),
+                                 prior: prior_readback_encoder,
+                                 recording_sink: state.recording_sink.clone(),
+                                 deliver_tx: deliver_tx.clone(),
