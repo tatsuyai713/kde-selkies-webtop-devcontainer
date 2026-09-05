@@ -13,6 +13,7 @@ Real window resizes continue to work normally.
 
 import glob
 import os
+import re
 import sys
 
 
@@ -94,11 +95,9 @@ def main():
         content = content.replace(paintover_old, paintover_new, 1)
         changed = True
 
-    cbr_old = """            enable_rate_control, _ = self.cli_args.enable_rate_control
+    cbr_prefix = """            enable_rate_control, _ = self.cli_args.enable_rate_control
             if enable_rate_control:
                 display_state[\"rate_control_mode\"] = sanitize_value(\"rate_control_mode\", settings.get(\"rate_control_mode\"))
-
-            if self.input_handler:
 """
     cbr_new = """            enable_rate_control, _ = self.cli_args.enable_rate_control
             if enable_rate_control:
@@ -116,10 +115,16 @@ def main():
             if self.input_handler:
 """
     if CBR_MARKER not in content:
-        if cbr_old not in content:
+        # The pinned source has carried both an empty line and an
+        # indentation-only line at this boundary. Treat them equivalently so
+        # the safety policy does not depend on trailing whitespace.
+        cbr_pattern = re.compile(
+            re.escape(cbr_prefix) + r"[ \t]*\n            if self\.input_handler:"
+        )
+        if not cbr_pattern.search(content):
             print("patch-selkies-resize-stability: expected rate-control block not found", file=sys.stderr)
             return 1
-        content = content.replace(cbr_old, cbr_new, 1)
+        content = cbr_pattern.sub(cbr_new, content, count=1)
         changed = True
 
     if not changed:

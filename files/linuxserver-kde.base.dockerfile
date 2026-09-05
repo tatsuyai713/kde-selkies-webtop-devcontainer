@@ -808,19 +808,20 @@ RUN if [ -f /usr/local/bin/patch-selkies-stream-scale.py ]; then \
       /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-stream-scale.py; \
     fi
 
+# Adapt the pinned selkies to the pixelflux 2.x API (enables NVENC on Wayland).
+# The resize-stability patch below extends the hardware-policy block installed
+# here, so this compatibility layer must be applied first.
+RUN if [ -f /usr/local/bin/patch-selkies-pixelflux2.py ]; then \
+      chmod +x /usr/local/bin/patch-selkies-pixelflux2.py && \
+      /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-pixelflux2.py; \
+    fi
+
 # Ignore tiny viewport-size jitter. Recreating the in-process VA-API encoder
 # for a 1-8 px browser chrome/fractional-scaling change can crash Intel's WSL
 # D3D12 video UMD and take the parent Wayland compositor down with it.
 RUN if [ -f /usr/local/bin/patch-selkies-resize-stability.py ]; then \
       chmod +x /usr/local/bin/patch-selkies-resize-stability.py && \
       /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-resize-stability.py; \
-    fi
-
-# Adapt the pinned selkies to the pixelflux 2.x API (enables NVENC on Wayland).
-# No-op when pixelflux 1.x is installed (22.04/24.04).
-RUN if [ -f /usr/local/bin/patch-selkies-pixelflux2.py ]; then \
-      chmod +x /usr/local/bin/patch-selkies-pixelflux2.py && \
-      /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-pixelflux2.py; \
     fi
 
 # Keep the vendor pixelflux wheel intact for native/NVIDIA/AMD profiles and
