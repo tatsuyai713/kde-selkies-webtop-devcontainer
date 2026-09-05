@@ -5,8 +5,11 @@ from pathlib import Path
 import re
 
 
-ASSET_DIR = Path("/usr/share/selkies/web/assets")
-INDEX_HTML = Path("/usr/share/selkies/web/index.html")
+WEB_ROOTS = (
+    Path("/usr/share/selkies/web"),
+    Path("/usr/share/selkies/selkies-dashboard"),
+    Path("/usr/share/selkies/selkies-dashboard-wish"),
+)
 OLD = 'hardwareAcceleration:"prefer-software"'
 NEW = 'hardwareAcceleration:"prefer-hardware"'
 SUFFIX = "-intel-hwdecode-avc4-debug"
@@ -48,9 +51,14 @@ ERROR_NEW = (
 )
 
 
-def main() -> None:
+def patch_web_root(web_root: Path) -> tuple[int, bool]:
+    """Patch one built dashboard and cache-bust its Vite entry when needed."""
+    asset_dir = web_root / "assets"
+    index_html = web_root / "index.html"
     replacements = 0
-    assets = list(ASSET_DIR.glob("*.js"))
+    # The classic dashboard bundles selkies-core under assets/.  The wish
+    # dashboard loads the copied core from src/, so both locations matter.
+    assets = list(asset_dir.glob("*.js")) + list((web_root / "src").glob("*.js"))
     for asset in assets:
         source = asset.read_text(encoding="utf-8")
         count = source.count(OLD)
@@ -101,7 +109,7 @@ def main() -> None:
     # then update index.html.  This also makes automatic reconnects fetch the
     # hardware-decoder build without asking users to clear their whole cache.
     decoder_assets = [
-        asset for asset in ASSET_DIR.glob("selkies-core-*.js")
+        asset for asset in asset_dir.glob("selkies-core-*.js")
         if NEW in asset.read_text(encoding="utf-8")
         and "-intel-hwdecode" not in asset.stem
     ]
@@ -112,7 +120,7 @@ def main() -> None:
 
         import_token = f'./{decoder.name}'
         entry_assets = [
-            asset for asset in ASSET_DIR.glob("*.js")
+            asset for asset in asset_dir.glob("*.js")
             if asset != decoder and import_token in asset.read_text(encoding="utf-8")
         ]
         if len(entry_assets) != 1:
@@ -127,14 +135,14 @@ def main() -> None:
         entry_busted = entry.with_name(f"{entry.stem}{SUFFIX}{entry.suffix}")
         entry_busted.write_text(entry_source, encoding="utf-8")
 
-        index_source = INDEX_HTML.read_text(encoding="utf-8")
+        index_source = index_html.read_text(encoding="utf-8")
         entry_refs = re.findall(r'src="(\./assets/[^" ]+\.js)"', index_source)
         if len(entry_refs) != 1:
             raise SystemExit(
                 f"Expected one JavaScript entry in Selkies index, found {len(entry_refs)}"
             )
         index_token = entry_refs[0]
-        INDEX_HTML.write_text(
+        index_html.write_text(
             index_source.replace(index_token, f"./assets/{entry_busted.name}"),
             encoding="utf-8",
         )
@@ -143,11 +151,24 @@ def main() -> None:
             f"{entry_busted.name} -> {decoder_busted.name}"
         )
 
+    already_patched = any(
+        NEW in asset.read_text(encoding="utf-8") for asset in assets
+    )
     if replacements:
-        print(f"Patched {replacements} Selkies WebCodecs decoder preference(s) to hardware")
-    elif any(NEW in asset.read_text(encoding="utf-8") for asset in assets):
-        print("Selkies WebCodecs hardware decode preference is already patched")
-    else:
+        print(
+            f"Patched {replacements} Selkies WebCodecs decoder preference(s) "
+            f"to hardware in {web_root}"
+        )
+    elif already_patched:
+        print(f"Selkies WebCodecs hardware decode is already patched in {web_root}")
+
+    return replacements, already_patched
+
+
+def main() -> None:
+    roots = [root for root in WEB_ROOTS if (root / "index.html").is_file()]
+    results = [patch_web_root(root) for root in roots]
+    if not any(replacements or already for replacements, already in results):
         raise SystemExit("Selkies WebCodecs decoder preference was not found")
 
 
