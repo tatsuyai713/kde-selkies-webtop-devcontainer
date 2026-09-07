@@ -268,28 +268,10 @@ PLASMA_LOG="/dev/shm/startplasma-x11-$(id -u).log"
 /usr/bin/startplasma-x11 >"${PLASMA_LOG}" 2>&1 &
 PLASMA_SESSION_PID=$!
 
-# On Ubuntu 24.04, KWin 5 can create its first decoration textures before the
-# Mesa D3D12 GLX context is fully settled.  The windows are managed and have
-# frame extents, but that first texture set stays transparent, so the complete
-# title bar appears to be missing.  Reinitialize the compositor once after its
-# D-Bus service is ready.  suspend/resume is intentionally back-to-back: it
-# rebuilds the OpenGL scene without selecting a software renderer or leaving
-# compositing disabled.
-refresh_wsl_d3d12_compositor() {
-  [ "${WSL_D3D12_PRESENT}" = "true" ] || return 0
-  command -v qdbus >/dev/null 2>&1 || return 0
-
-  for _ in $(seq 1 100); do
-    if qdbus org.kde.KWin /Compositor org.kde.kwin.Compositing.active >/dev/null 2>&1; then
-      qdbus org.kde.KWin /Compositor suspend >/dev/null 2>&1 || return 0
-      qdbus org.kde.KWin /Compositor resume >/dev/null 2>&1 || true
-      echo "[$(date -Is)] reinitialized the WSL D3D12 OpenGL compositor" >>"${PLASMA_LOG}"
-      return 0
-    fi
-    kill -0 "${PLASMA_SESSION_PID}" 2>/dev/null || return 0
-    sleep 0.1
-  done
-}
+# Do not suspend/resume the compositor as a startup workaround. It emits
+# KWin's "another application suspended desktop effects" notification and
+# does not fix the invalid D3D12 texture view responsible for device removal.
+# A successful D-Bus reply alone does not prove that the scene presents frames.
 
 # startplasma-x11 does not relaunch KWin when a graphics process terminates.
 # Keep window decorations and input management available after a recoverable
@@ -301,12 +283,10 @@ refresh_wsl_d3d12_compositor() {
     pgrep -u "$(id -u)" -x kwin_x11 >/dev/null && break
     sleep 0.1
   done
-  refresh_wsl_d3d12_compositor
   while kill -0 "${PLASMA_SESSION_PID}" 2>/dev/null; do
     if ! pgrep -u "$(id -u)" -x kwin_x11 >/dev/null; then
       echo "[$(date -Is)] kwin_x11 is not running; restarting the GPU window manager" >>"${PLASMA_LOG}"
       /usr/bin/kwin_x11 --replace >>"${PLASMA_LOG}" 2>&1 &
-      refresh_wsl_d3d12_compositor
     fi
     sleep 2
   done

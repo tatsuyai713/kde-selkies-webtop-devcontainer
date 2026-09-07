@@ -80,7 +80,7 @@ index cadb98e..89a3b90 100644
                      Ok(process) => self.external = Some(process),
                      Err(e) => eprintln!("[vaapi-external] rate reconfigure failed: {e}"),
                  }
-@@ -1158,6 +1172,39 @@ impl VaapiEncoder {
+@@ -1158,5 +1172,38 @@ impl VaapiEncoder {
          qp: u32,
          force_idr: bool,
      ) -> Result<Vec<u8>, String> {

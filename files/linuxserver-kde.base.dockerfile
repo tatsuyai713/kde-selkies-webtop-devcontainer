@@ -251,6 +251,7 @@ FROM ubuntu-base-temp AS wsl-d3d12-mesa-stage
 ARG TARGETARCH
 ARG WSL_D3D12_MESA_VERSION=25.2.8-0ubuntu0.24.04.2
 COPY patches/mesa-d3d12-valid-disabled-pso-state.patch /tmp/mesa-d3d12-valid-disabled-pso-state.patch
+COPY patches/mesa-d3d12-bgrx-srv-format.patch /tmp/mesa-d3d12-bgrx-srv-format.patch
 
 RUN set -eux; \
   mkdir -p /mesa-out; \
@@ -264,6 +265,7 @@ RUN set -eux; \
     apt-get source "mesa=${WSL_D3D12_MESA_VERSION}"; \
     cd mesa-*; \
     patch -p0 < /tmp/mesa-d3d12-valid-disabled-pso-state.patch; \
+    patch -p0 < /tmp/mesa-d3d12-bgrx-srv-format.patch; \
     DEB_BUILD_OPTIONS=nocheck debian/rules override_dh_auto_configure; \
     mesa_build_dir="$(find . -maxdepth 1 -type d -name 'obj-*' -print -quit)"; \
     test -n "${mesa_build_dir}"; \

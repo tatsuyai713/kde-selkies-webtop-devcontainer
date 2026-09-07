@@ -201,4 +201,5 @@ CONTAINER_TEST
 fi
 
 printf '\nSummary: %d failure(s), %d warning(s).\n' "${failures}" "${warnings}"
+printf '%s\n' 'These checks do not prove visible desktop updates or host-browser hardware decoding. Verify a fresh user container with screenshots and interactive input as well.'
 if [ "${failures}" -ne 0 ]; then exit 1; fi
