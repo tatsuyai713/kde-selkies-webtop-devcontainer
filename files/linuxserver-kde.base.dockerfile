@@ -239,6 +239,47 @@ RUN \
 COPY ubuntu-root/ /
 
 ###########################################
+# Stage 3b: Ubuntu 24.04 WSL D3D12 graphics compatibility
+###########################################
+# Mesa 25.2.8 leaves ignored blend/depth/stencil enum members zeroed.  Some
+# Intel WSL UMD versions validate those members anyway and reject KWin's PSO
+# with E_INVALIDARG, after which Mesa terminates kwin_x11.  Rebuild only the
+# affected Ubuntu release with valid no-op defaults.  Other releases and
+# architectures produce an empty overlay and continue to use distro Mesa.
+FROM ubuntu-base-temp AS wsl-d3d12-mesa-stage
+
+ARG TARGETARCH
+ARG WSL_D3D12_MESA_VERSION=25.2.8-0ubuntu0.24.04.2
+COPY patches/mesa-d3d12-valid-disabled-pso-state.patch /tmp/mesa-d3d12-valid-disabled-pso-state.patch
+
+RUN set -eux; \
+  mkdir -p /mesa-out; \
+  ubuntu_version="$(. /etc/os-release && printf '%s' "${VERSION_ID}")"; \
+  if [ "${TARGETARCH}" = "amd64" ] && [ "${ubuntu_version}" = "24.04" ]; then \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      devscripts dpkg-dev; \
+    DEBIAN_FRONTEND=noninteractive apt-get build-dep -y mesa; \
+    mkdir -p /tmp/mesa-build && cd /tmp/mesa-build; \
+    apt-get source "mesa=${WSL_D3D12_MESA_VERSION}"; \
+    cd mesa-*; \
+    patch -p0 < /tmp/mesa-d3d12-valid-disabled-pso-state.patch; \
+    DEB_BUILD_OPTIONS=nocheck debian/rules override_dh_auto_configure; \
+    mesa_build_dir="$(find . -maxdepth 1 -type d -name 'obj-*' -print -quit)"; \
+    test -n "${mesa_build_dir}"; \
+    meson configure "${mesa_build_dir}" \
+      -Dgallium-drivers=d3d12 \
+      -Dvulkan-drivers= -Dvulkan-layers= \
+      -Dbuild-tests=false -Dgallium-rusticl=false \
+      -Dgallium-va=disabled -Dgallium-vdpau=disabled; \
+    ninja -C "${mesa_build_dir}" -j"$(nproc)" \
+      "src/gallium/targets/dri/libgallium-${WSL_D3D12_MESA_VERSION}.so"; \
+    install -Dm644 \
+      "${mesa_build_dir}/src/gallium/targets/dri/libgallium-${WSL_D3D12_MESA_VERSION}.so" \
+      "/mesa-out/opt/wsl-d3d12-graphics/libgallium-${WSL_D3D12_MESA_VERSION}.so"; \
+  fi
+
+###########################################
 # Stage 4: Xvfb builder
 ###########################################
 FROM ubuntu-base-temp AS xvfb-builder
@@ -502,7 +543,7 @@ RUN \
     build-essential python3-dev pkg-config cython3 \
     ffmpeg \
     libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
-    libavutil-dev libswresample-dev libswscale-dev && \
+    libavutil-dev libswresample-dev libswscale-dev libva-dev && \
   if ! ffmpeg -version 2>/dev/null | head -n 1 | grep -q "ffmpeg version 7"; then \
     echo "**** build FFmpeg 7 for PyAV ****" && \
     apt-get update && \
@@ -512,7 +553,7 @@ RUN \
     cd /tmp && \
     curl -fsSL https://ffmpeg.org/releases/ffmpeg-7.0.2.tar.xz | tar -xJ && \
     cd ffmpeg-7.0.2 && \
-    ./configure --prefix=/usr/local --enable-shared --disable-static --disable-debug --disable-doc && \
+    ./configure --prefix=/usr/local --enable-shared --disable-static --disable-debug --disable-doc --enable-vaapi && \
     make -j"$(nproc)" && \
     make install && \
     ldconfig && \
@@ -539,6 +580,16 @@ RUN \
     test -f "${PIXELFLUX_WHL}" && \
     echo "Installing pixelflux from local wheel for Ubuntu 22.04: ${PIXELFLUX_WHL}" && \
     /opt/selkies-env/bin/pip install --force-reinstall "${PIXELFLUX_WHL}"; \
+  elif [ "$(dpkg --print-architecture)" = "amd64" ] && [ "${UBUNTU_VERSION}" = "24.04" ]; then \
+    # X11 and Mesa D3D12 VA-API cannot safely share Intel's Windows UMD in \
+    # Pixelflux. This Python 3.12 wheel extends the isolated FFmpeg encoder to \
+    # accept X11 BGRA capture frames and performs upload, BGRA->NV12 conversion \
+    # and H.264 compression on the Intel GPU. \
+    PIXELFLUX_WHL="/tmp/pixelflux/pixelflux-2.0.0-cp312-cp312-linux_x86_64.whl" && \
+    test -f "${PIXELFLUX_WHL}" && \
+    echo "dd7236460a675c679780ca4af6c107848f255c76de1f735930fa4dc79227fdcc  ${PIXELFLUX_WHL}" | sha256sum -c - && \
+    echo "Installing isolated X11 VA-API pixelflux wheel for Ubuntu 24.04: ${PIXELFLUX_WHL}" && \
+    /opt/selkies-env/bin/pip install --no-deps --force-reinstall "${PIXELFLUX_WHL}"; \
   elif [ "$(dpkg --print-architecture)" = "amd64" ] && [ "${UBUNTU_VERSION}" = "26.04" ]; then \
     # Pixelflux 2.0 upstream uses INT_MAX as VA-API's GOP size. FFmpeg then \
     # emits log2_max_frame_num_minus4=27 although H.264 permits at most 12, \
@@ -765,6 +816,7 @@ COPY --from=xvfb-builder /build-out/ /
 COPY --from=wsl-vaapi-legacy-stage /legacy-out/ /opt/wsl-vaapi-legacy/
 COPY --from=wsl-vaapi-stage /vaapi-out/ /opt/wsl-vaapi/
 COPY --from=wsl-vaapi-stage /compat-out/ /usr/local/lib/
+COPY --from=wsl-d3d12-mesa-stage /mesa-out/ /
 
 # Apply Safari keyboard input patch for Selkies web UIs
 RUN if [ -f /usr/local/bin/patch-selkies-safari-keyboard.py ]; then \

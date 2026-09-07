@@ -1,12 +1,20 @@
 # Pixelflux wheels
 
-`pixelflux-2.0.0-cp314-cp314-linux_x86_64.whl` is the Ubuntu 26.04
-amd64 build from upstream commit `9d2caedcfe37ffa35f800625e05d0a61ba23af77`
-plus [the Intel WSL patch](pixelflux-2.0.0-intel-wsl.patch). It links to the
-system FFmpeg 8 ABI (`libavcodec.so.62`, `libavfilter.so.11`,
-`libavutil.so.60`).
+The included Pixelflux 2.0 wheels are release-specific amd64 builds from
+upstream commit `9d2caedcfe37ffa35f800625e05d0a61ba23af77` plus the Intel WSL
+compatibility patches.
 
-- Wheel SHA-256: `6a50fc2fb13c1e3a4b0c4023fff16efb69d2533e5e76ab6cb61cecdb3ba86bb3`
+- `pixelflux-2.0.0-cp312-cp312-linux_x86_64.whl` is the Ubuntu 24.04 X11
+  build. [Its patch](pixelflux-2.0.0-intel-wsl-x11.patch) feeds BGRA capture
+  to the isolated FFmpeg child, where `hwupload` and `scale_vaapi` perform GPU
+  conversion before `h264_vaapi` compression. SHA-256:
+  `dd7236460a675c679780ca4af6c107848f255c76de1f735930fa4dc79227fdcc`.
+- `pixelflux-2.0.0-cp314-cp314-linux_x86_64.whl` is the Ubuntu 26.04 build
+  using [the Wayland patch](pixelflux-2.0.0-intel-wsl.patch). It links to the
+  system FFmpeg 8 ABI (`libavcodec.so.62`, `libavfilter.so.11`,
+  `libavutil.so.60`).
+
+- Ubuntu 26.04 wheel SHA-256: `6a50fc2fb13c1e3a4b0c4023fff16efb69d2533e5e76ab6cb61cecdb3ba86bb3`
 - Native module SHA-256: `b9a25b1a483293a5db1414b68749e2c98e5e2f1817b9fea86c6b10eababd8b0b`
 - H.264 uses a legal bounded GOP, one slice, High Profile Level 4.1 and
   `async_depth=1`.

@@ -1,0 +1,115 @@
+--- src/gallium/drivers/d3d12/d3d12_context_graphics.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_context_graphics.cpp
+@@ -282,6 +282,24 @@ d3d12_create_blend_state(struct pipe_context *pctx,
+    if (!state)
+       return NULL;
+
++   /*
++    * Disabled blend and logic-op members are ignored by the D3D12 spec, but
++    * some WSL Intel UMD versions still validate their enum values.  CALLOC
++    * leaves them at zero, which is not a member of D3D12_BLEND,
++    * D3D12_BLEND_OP, or D3D12_LOGIC_OP and makes
++    * CreateGraphicsPipelineState() return E_INVALIDARG.  Use the canonical
++    * no-op values for every render target even when blending is disabled.
++    */
++   for (unsigned i = 0; i < PIPE_MAX_COLOR_BUFS; ++i) {
++      state->desc.RenderTarget[i].SrcBlend = D3D12_BLEND_ONE;
++      state->desc.RenderTarget[i].DestBlend = D3D12_BLEND_ZERO;
++      state->desc.RenderTarget[i].BlendOp = D3D12_BLEND_OP_ADD;
++      state->desc.RenderTarget[i].SrcBlendAlpha = D3D12_BLEND_ONE;
++      state->desc.RenderTarget[i].DestBlendAlpha = D3D12_BLEND_ZERO;
++      state->desc.RenderTarget[i].BlendOpAlpha = D3D12_BLEND_OP_ADD;
++      state->desc.RenderTarget[i].LogicOp = D3D12_LOGIC_OP_NOOP;
++   }
++
+    if (blend_state->logicop_enable) {
+       state->desc.RenderTarget[0].LogicOpEnable = true;
+       state->desc.RenderTarget[0].LogicOp = logic_op((pipe_logicop) blend_state->logicop_func);
+@@ -395,6 +413,18 @@ d3d12_create_depth_stencil_alpha_state(struct pipe_context *pctx,
+    if (!dsa)
+       return NULL;
+
++   /* Keep disabled depth/stencil state valid for strict WSL D3D12 UMDs. */
++   dsa->desc.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
++   dsa->desc.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
++   dsa->desc.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
++   dsa->desc.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
++   dsa->desc.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
++#ifndef _GAMING_XBOX
++   dsa->desc.FrontFace.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
++   dsa->desc.FrontFace.StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
++#endif
++   dsa->desc.BackFace = dsa->desc.FrontFace;
++
+    if (depth_stencil_alpha->depth_enabled) {
+       dsa->desc.DepthEnable = true;
+       dsa->desc.DepthFunc = compare_op((pipe_compare_func) depth_stencil_alpha->depth_func);
+--- src/gallium/drivers/d3d12/d3d12_pipeline_state.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_pipeline_state.cpp
+@@ -398,16 +398,18 @@ create_gfx_pipeline_state(struct d3d12_context *ctx)
+
+       if (FAILED(hr = screen->dev->CreatePipelineState(&pso_stream_desc,
+                                                        IID_PPV_ARGS(&ret)))) {
+-         std::_Exit(hr);
++         debug_printf("D3D12: rejecting unsupported graphics pipeline (HRESULT 0x%08x)\n",
++                      (unsigned)hr);
+          return NULL;
+       }
+    }
+    else {
+       D3D12_GRAPHICS_PIPELINE_STATE_DESC v0desc = pso_desc.GraphicsDescV0();
+       if (FAILED(hr = screen->dev->CreateGraphicsPipelineState(&v0desc,
+                                                                IID_PPV_ARGS(&ret)))) {
+-         std::_Exit(hr);
++         debug_printf("D3D12: rejecting unsupported graphics pipeline (HRESULT 0x%08x)\n",
++                      (unsigned)hr);
+          return NULL;
+       }
+    }
+
+--- src/gallium/drivers/d3d12/d3d12_draw.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_draw.cpp
+@@ -1036,7 +1036,10 @@ d3d12_draw_vbo(struct pipe_context *pctx,
+    }
+
+    if (!ctx->current_gfx_pso || ctx->state_dirty & D3D12_DIRTY_GFX_PSO) {
+-      ctx->current_gfx_pso = d3d12_get_gfx_pipeline_state(ctx);
++      ID3D12PipelineState *next_pso = d3d12_get_gfx_pipeline_state(ctx);
++      if (!next_pso)
++         return;
++      ctx->current_gfx_pso = next_pso;
+       assert(ctx->current_gfx_pso);
+    }
+
+--- src/gallium/frontends/dri/drisw.c.orig
++++ src/gallium/frontends/dri/drisw.c
+@@ -564,9 +564,16 @@ drisw_update_tex_buffer(struct dri_drawable *drawable,
+
+    map = pipe_texture_map(pipe, res,
+                            0, 0, // level, layer,
+-                           PIPE_MAP_WRITE,
++                           PIPE_MAP_WRITE | PIPE_MAP_DISCARD_RANGE,
+                            x, y, w, h, &transfer);
+
++   /* A failed D3D12 map must not be passed to XGetSubImage as a NULL
++    * destination.  This otherwise terminates KWin while importing an X11
++    * window pixmap on WSL/Xvfb.  Leave the previous texture contents intact
++    * and allow the next frame to retry the GPU transfer. */
++   if (!map || !transfer)
++      return;
++
+    /* Copy the Drawable content to the mapped texture buffer */
+    if (!get_image_shm(drawable, x, y, w, h, res))
+       get_image(drawable, x, y, w, h, map);
+--- src/gallium/drivers/d3d12/d3d12_resource.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_resource.cpp
+@@ -1892,7 +1892,8 @@ d3d12_transfer_map(struct pipe_context *pctx,
+
+       struct d3d12_resource *staging_res = d3d12_resource(trans->staging_res);
+
+-      if ((usage & (PIPE_MAP_DISCARD_RANGE | PIPE_MAP_DISCARD_WHOLE_RESOURCE | TC_TRANSFER_MAP_THREADED_UNSYNC)) == 0) {
++      if ((usage & PIPE_MAP_READ) &&
++          (usage & (PIPE_MAP_DISCARD_RANGE | PIPE_MAP_DISCARD_WHOLE_RESOURCE | TC_TRANSFER_MAP_THREADED_UNSYNC)) == 0) {
+          bool ret = true;
+          if (pres->target == PIPE_BUFFER) {
+             uint64_t src_offset = box->x;

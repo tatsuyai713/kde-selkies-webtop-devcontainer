@@ -1,0 +1,121 @@
+diff --git a/pixelflux/src/encoders/vaapi.rs b/pixelflux/src/encoders/vaapi.rs
+index cadb98e..89a3b90 100644
+--- a/pixelflux/src/encoders/vaapi.rs
++++ b/pixelflux/src/encoders/vaapi.rs
+@@ -48,6 +48,7 @@ struct ExternalVaapiProcess {
+     child: Child,
+     stdin: ChildStdin,
+     stdout: ChildStdout,
++    host_input: bool,
+ }
+
+ impl Drop for ExternalVaapiProcess {
+@@ -58,7 +59,7 @@ impl Drop for ExternalVaapiProcess {
+ }
+
+ impl ExternalVaapiProcess {
+-    fn spawn(settings: &RustCaptureSettings) -> Result<Self, String> {
++    fn spawn(settings: &RustCaptureSettings, host_input: bool) -> Result<Self, String> {
+         let width = settings.width.max(2);
+         let height = settings.height.max(2);
+         let fps = settings.target_fps.max(1.0).round() as i32;
+@@ -87,14 +88,23 @@ impl ExternalVaapiProcess {
+         let gop = (fps * settings.keyframe_interval_s.max(1.0).round() as i32)
+             .clamp(fps, 300);
+
++        let input_format = if host_input { "bgra" } else { "nv12" };
++        let video_filter = if host_input {
++            format!(
++                "hwupload,scale_vaapi=w={}:h={}:format=nv12:out_color_matrix=bt709:out_range=tv",
++                width, height
++            )
++        } else {
++            "hwupload".to_string()
++        };
+         let mut cmd = Command::new("/usr/bin/ffmpeg");
+         cmd.args([
+             "-hide_banner", "-loglevel", "warning",
+             "-vaapi_device", &device,
+-            "-f", "rawvideo", "-pix_fmt", "nv12",
++            "-f", "rawvideo", "-pix_fmt", input_format,
+             "-s", &format!("{}x{}", width, height),
+             "-r", &fps.to_string(), "-i", "pipe:0",
+-            "-vf", "hwupload", "-c:v", "h264_vaapi",
++            "-vf", &video_filter, "-c:v", "h264_vaapi",
+             "-profile:v", "high", "-level:v", "4.1",
+             "-bf", "0", "-g", &gop.to_string(),
+             "-async_depth", "1", "-rc_mode", if rc_mode == "VBR" { "VBR" } else { "CBR" },
+@@ -112,7 +122,7 @@ impl ExternalVaapiProcess {
+             let flags = libc::fcntl(fd, libc::F_GETFL);
+             if flags >= 0 { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK); }
+         }
+-        Ok(Self { child, stdin, stdout })
++        Ok(Self { child, stdin, stdout, host_input })
+     }
+
+     fn encode(&mut self, frame: &[u8]) -> Result<Vec<u8>, String> {
+@@ -416,9 +426,12 @@ impl VaapiEncoder {
+         let height = settings.height;
+         let fps = settings.target_fps as i32;
+
+-        if !host_input && std::env::var("PIXELFLUX_VAAPI_EXTERNAL_PROCESS").as_deref() == Ok("1") {
+-            let external = ExternalVaapiProcess::spawn(settings)?;
+-            println!("[Wayland] External-process Intel VAAPI encoder initialized.");
++        if std::env::var("PIXELFLUX_VAAPI_EXTERNAL_PROCESS").as_deref() == Ok("1") {
++            let external = ExternalVaapiProcess::spawn(settings, host_input)?;
++            println!(
++                "[{}] External-process Intel VAAPI encoder initialized.",
++                if host_input { "x11" } else { "Wayland" }
++            );
+             return Ok(Self {
+                 external: Some(external),
+                 encoder_ctx: ptr::null_mut(), codec: ptr::null(),
+@@ -938,7 +951,8 @@ impl VaapiEncoder {
+                 || settings.video_vbv_multiplier != self.current_vbv_mult
+                 || new_fps != self.fps;
+             if changed {
+-                match ExternalVaapiProcess::spawn(settings) {
++                let host_input = self.external.as_ref().map(|p| p.host_input).unwrap_or(false);
++                match ExternalVaapiProcess::spawn(settings, host_input) {
+                     Ok(process) => self.external = Some(process),
+                     Err(e) => eprintln!("[vaapi-external] rate reconfigure failed: {e}"),
+                 }
+@@ -1158,6 +1172,39 @@ impl VaapiEncoder {
+         qp: u32,
+         force_idr: bool,
+     ) -> Result<Vec<u8>, String> {
++        if self.external.is_some() {
++            let h = self.height as usize;
++            let row_bytes = (self.width as usize)
++                .checked_mul(4)
++                .ok_or("row size overflow")?;
++            let needed = stride.checked_mul(h).ok_or("stride overflow")?;
++            if stride < row_bytes || bgra.len() < needed {
++                return Err("Input buffer too small".into());
++            }
++            let payload = if stride == row_bytes {
++                self.external.as_mut().unwrap().encode(&bgra[..row_bytes * h])?
++            } else {
++                let mut packed = Vec::with_capacity(row_bytes * h);
++                for row in 0..h {
++                    let start = row * stride;
++                    packed.extend_from_slice(&bgra[start..start + row_bytes]);
++                }
++                self.external.as_mut().unwrap().encode(&packed)?
++            };
++            let mut output = Vec::with_capacity(
++                payload.len() + if self.omit_stripe_headers { 0 } else { 10 },
++            );
++            if !self.omit_stripe_headers {
++                output.push(0x04);
++                output.push(if annexb_has_idr(&payload) { 0x01 } else { 0x00 });
++                output.extend_from_slice(&(frame_number as u16).to_be_bytes());
++                output.extend_from_slice(&0u16.to_be_bytes());
++                output.extend_from_slice(&(self.width as u16).to_be_bytes());
++                output.extend_from_slice(&(self.height as u16).to_be_bytes());
++            }
++            output.extend_from_slice(&payload);
++            return Ok(output);
++        }
+         unsafe {
+             self.update_qp(qp)?;

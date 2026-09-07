@@ -87,6 +87,15 @@ fi
 # Set DPI based on environment variable (default 96 for standard displays, use 144 or 192 for HiDPI)
 DPI_VALUE="${DPI:-96}"
 
+# Xvfb owns the DRI3 framebuffer that Pixelflux reads back.  On WSL D3D12 it
+# must use the same patched Gallium library as KWin; applying the compatibility
+# build only to the compositor leaves the displayed GPU pixmap disconnected
+# from XGetImage/XShmGetImage and the encoded stream contains black frames.
+if [ "${WSL_ENVIRONMENT:-false}" = "true" ] && [ -e /dev/dxg ] && \
+   [ -d /opt/wsl-d3d12-graphics ]; then
+  export LD_LIBRARY_PATH="/opt/wsl-d3d12-graphics${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
 # Run Xvfb server with required extensions
 TARGET_USER="${CUSTOM_USER:-${USER_NAME:-root}}"
 exec s6-setuidgid "$TARGET_USER" \

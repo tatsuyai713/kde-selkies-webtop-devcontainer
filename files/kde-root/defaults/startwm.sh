@@ -11,9 +11,57 @@ export QT_SCALE_FACTOR="${SCALE_FACTOR}"
 # 96 DPI to avoid multiplying the requested scale a second time.
 export QT_FONT_DPI=96
 
+# A browser-delivered framebuffer has no physical LCD subpixel order.  Keep
+# Qt/Qt Quick on OpenGL, but select its grayscale A8 glyph material instead of
+# the A32 RGB-subpixel material that Mesa D3D12 can render as yellow or fully
+# transparent text.  This is still GPU texture/shader rendering, not the Qt
+# Quick software backend.
+export QT_SUBPIXEL_AA_TYPE=
+if [ "${WSL_ENVIRONMENT:-false}" = "true" ] && \
+   [[ "${ENCODER:-${GPU_VENDOR:-}}" =~ ^(intel|nvidia|amd)-wsl$ ]]; then
+  export NODEVICE_SELECT=1
+  export VK_DRIVER_FILES=/dev/null
+  export VK_ICD_FILENAMES=/dev/null
+  if [ "${WSL_QTQUICK_GPU:-1}" = "0" ]; then
+    export QT_QUICK_BACKEND=software
+  else
+    unset QT_QUICK_BACKEND
+    export QSG_RHI_BACKEND=opengl
+    export QSG_RENDER_LOOP=threaded
+    export QSG_DISTANCEFIELD_ANTIALIASING=gray
+  fi
+fi
+
+# svc-de creates ~/.Xresources for the selected DPI.  Preserve that DPI while
+# replacing any persisted LCD-subpixel settings with settings suitable for a
+# streamed framebuffer.  Fontconfig is configured the same way in the image.
+touch "${HOME}/.Xresources"
+sed -i \
+  -e '/^Xft\.antialias:/d' \
+  -e '/^Xft\.hinting:/d' \
+  -e '/^Xft\.hintstyle:/d' \
+  -e '/^Xft\.rgba:/d' \
+  -e '/^Xft\.lcdfilter:/d' \
+  "${HOME}/.Xresources"
+printf '%s\n' \
+  'Xft.antialias: 1' \
+  'Xft.hinting: 1' \
+  'Xft.hintstyle: hintfull' \
+  'Xft.rgba: none' \
+  'Xft.lcdfilter: lcddefault' >> "${HOME}/.Xresources"
+xrdb -merge "${HOME}/.Xresources"
+
 # Use KWin's OpenGL compositor. Ubuntu 24.04 runs Plasma on X11/Xvfb, where
 # KWin otherwise inherits the historical software/no-compositing default.
 export KWIN_COMPOSE="${KWIN_COMPOSE:-O2}"
+# Mesa's D3D12 driver advertises persistent buffer storage and buffer-age
+# extensions, but those optional fast paths are not reliable on every WSL UMD.
+# Disabling them does not select software rendering: KWin still uses the
+# OpenGL/D3D12 compositor and the selected physical adapter.
+if [ "${WSL_ENVIRONMENT:-false}" = "true" ]; then
+  export KWIN_PERSISTENT_VBO=0
+  export KWIN_USE_BUFFER_AGE=0
+fi
 
 # GTK needs an integer UI scale and a fractional font adjustment. Their
 # product matches DPI / 96 (for example, 144 DPI => 2 * 0.75 = 1.5).
@@ -36,6 +84,7 @@ if [ -n "${KWRITECONFIG}" ]; then
   # Clear persisted KDE display/font scaling and use the session-wide
   # QT_SCALE_FACTOR above as the single Qt scaling source.
   "${KWRITECONFIG}" --file "${HOME}/.config/kcmfonts" --group General --key forceFontDPI 96
+  "${KWRITECONFIG}" --file "${HOME}/.config/kcmfonts" --group General --key subPixel none
   "${KWRITECONFIG}" --file "${HOME}/.config/kdeglobals" --group KScreen --key ScaleFactor 1
   "${KWRITECONFIG}" --file "${HOME}/.config/kdeglobals" --group KScreen --key ScreenScaleFactors --delete 2>/dev/null || true
 fi
@@ -91,6 +140,20 @@ if ! mkdir -p "${XDG_RUNTIME_DIR}" 2>/dev/null; then
 fi
 chmod 700 "${XDG_RUNTIME_DIR}"
 
+# Qt's generated Plasma theme and shader caches survive in the persistent
+# home.  They can retain the bad subpixel material after an image upgrade or a
+# D3D12 device reset, so rebuild only these generated caches before Plasma
+# starts.  User configuration and icon positions are not touched.
+if [ "${WSL_ENVIRONMENT:-false}" = "true" ] && \
+   [[ "${ENCODER:-${GPU_VENDOR:-}}" =~ ^(intel|nvidia|amd)-wsl$ ]] && \
+   [ "${WSL_PLASMASHELL_GPU:-1}" != "0" ]; then
+  find "${HOME}/.cache/plasmashell" -maxdepth 1 \
+    \( -name '_qt_QGfxShaderBuilder_*' -o -name 'qtpipelinecache-*' \) \
+    -exec rm -rf -- {} + 2>/dev/null || true
+  find "${HOME}/.cache" -maxdepth 1 -type f -name 'plasma_theme_*.kcache' \
+    -delete 2>/dev/null || true
+fi
+
 # Override any stale image/container value with the endpoint selected for this
 # Ubuntu release (PipeWire on 26.04+, PulseAudio on 22.04/24.04).
 . /usr/local/lib/pulse-runtime.sh
@@ -115,10 +178,22 @@ DRI_GPU_PRESENT=false
 WSL_D3D12_PRESENT=false
 if [ "${WSL_ENVIRONMENT:-false}" = "true" ] && [ -e /dev/dxg ]; then
   WSL_D3D12_PRESENT=true
+  if [ -d /opt/wsl-d3d12-graphics ]; then
+    # Ubuntu 24.04 uses a private, D3D12-only libgallium containing the Intel
+    # PSO validation fix. Keep distro Mesa untouched for native Linux GPUs.
+    export LD_LIBRARY_PATH="/opt/wsl-d3d12-graphics${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  fi
   export GALLIUM_DRIVER=d3d12
   export MESA_LOADER_DRIVER_OVERRIDE=d3d12
   export MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-NVIDIA}"
   export LIBGL_ALWAYS_SOFTWARE=0
+  # KWin 5 enables persistent/coherent VBO mappings whenever Mesa advertises
+  # GL_ARB_buffer_storage.  Dozen can invalidate such a mapping after a D3D12
+  # resource reset and return NULL when KWin reallocates the streaming VBO;
+  # KWin 5.27 does not check that result and writes through it.  Use KWin's
+  # supported non-persistent VBO path on WSL only.  Rendering, compositing and
+  # the VBO itself remain OpenGL/D3D12 GPU accelerated.
+  export KWIN_PERSISTENT_VBO=0
   export __GLX_VENDOR_LIBRARY_NAME=mesa
   export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
   unset __NV_PRIME_RENDER_OFFLOAD
@@ -189,8 +264,54 @@ if [ "${NVIDIA_X11_ZINK_ACTIVE}" = "true" ]; then
 fi
 
 echo "Starting KDE Plasma (native X server rendering)"
-/usr/bin/startplasma-x11 > /dev/null 2>&1 &
+PLASMA_LOG="/dev/shm/startplasma-x11-$(id -u).log"
+/usr/bin/startplasma-x11 >"${PLASMA_LOG}" 2>&1 &
 PLASMA_SESSION_PID=$!
+
+# On Ubuntu 24.04, KWin 5 can create its first decoration textures before the
+# Mesa D3D12 GLX context is fully settled.  The windows are managed and have
+# frame extents, but that first texture set stays transparent, so the complete
+# title bar appears to be missing.  Reinitialize the compositor once after its
+# D-Bus service is ready.  suspend/resume is intentionally back-to-back: it
+# rebuilds the OpenGL scene without selecting a software renderer or leaving
+# compositing disabled.
+refresh_wsl_d3d12_compositor() {
+  [ "${WSL_D3D12_PRESENT}" = "true" ] || return 0
+  command -v qdbus >/dev/null 2>&1 || return 0
+
+  for _ in $(seq 1 100); do
+    if qdbus org.kde.KWin /Compositor org.kde.kwin.Compositing.active >/dev/null 2>&1; then
+      qdbus org.kde.KWin /Compositor suspend >/dev/null 2>&1 || return 0
+      qdbus org.kde.KWin /Compositor resume >/dev/null 2>&1 || true
+      echo "[$(date -Is)] reinitialized the WSL D3D12 OpenGL compositor" >>"${PLASMA_LOG}"
+      return 0
+    fi
+    kill -0 "${PLASMA_SESSION_PID}" 2>/dev/null || return 0
+    sleep 0.1
+  done
+}
+
+# startplasma-x11 does not relaunch KWin when a graphics process terminates.
+# Keep window decorations and input management available after a recoverable
+# GPU reset. The Mesa PSO compatibility patch prevents the known Intel/WSL
+# startup failure; this guard handles later host driver resets.
+(
+  for _ in $(seq 1 100); do
+    kill -0 "${PLASMA_SESSION_PID}" 2>/dev/null || exit 0
+    pgrep -u "$(id -u)" -x kwin_x11 >/dev/null && break
+    sleep 0.1
+  done
+  refresh_wsl_d3d12_compositor
+  while kill -0 "${PLASMA_SESSION_PID}" 2>/dev/null; do
+    if ! pgrep -u "$(id -u)" -x kwin_x11 >/dev/null; then
+      echo "[$(date -Is)] kwin_x11 is not running; restarting the GPU window manager" >>"${PLASMA_LOG}"
+      /usr/bin/kwin_x11 --replace >>"${PLASMA_LOG}" 2>&1 &
+      refresh_wsl_d3d12_compositor
+    fi
+    sleep 2
+  done
+) &
+KWIN_WATCHDOG_PID=$!
 
 if [ "${NVIDIA_X11_ZINK_ACTIVE}" = "true" ]; then
   for _ in $(seq 1 100); do
@@ -221,3 +342,4 @@ if [ "${NVIDIA_X11_ZINK_ACTIVE}" = "true" ]; then
 fi
 
 wait "${PLASMA_SESSION_PID}"
+kill "${KWIN_WATCHDOG_PID}" 2>/dev/null || true

@@ -49,6 +49,17 @@ def prepare(module: Path) -> None:
         if vendor.exists() and intel.exists():
             print("pixelflux Intel WSL slice variants are already prepared")
             return
+        new_counts = tuple(source.count(pattern) for pattern in NEW_PATTERNS)
+        if new_counts == (1, 1):
+            # Locally built 24.04/26.04 wheels already contain the validated
+            # one-slice encoder. Keep selectable sidecars so runtime profile
+            # selection cannot replace them with an old PyPI module.
+            shutil.copyfile(module, vendor)
+            shutil.copyfile(module, intel)
+            shutil.copymode(module, vendor)
+            shutil.copymode(module, intel)
+            print("Prepared sidecars from pre-patched one-slice pixelflux module")
+            return
         print(
             "pixelflux binary does not match the validated 2.0 x86_64 wheel; "
             "leaving it unchanged"

@@ -130,6 +130,7 @@ REQUIRED_FILES=(
   "${FILES_DIR}/ubuntu-root"
   "${FILES_DIR}/kde-root"
   "${FILES_DIR}/patches/21-xvfb-dri3.patch"
+  "${FILES_DIR}/patches/mesa-d3d12-valid-disabled-pso-state.patch"
 )
 
 for path in "${REQUIRED_FILES[@]}"; do

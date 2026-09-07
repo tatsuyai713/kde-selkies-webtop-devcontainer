@@ -1,6 +1,8 @@
 #!/usr/bin/with-contenv bash
 
 TARGET_USER="${CUSTOM_USER:-${USER_NAME:-root}}"
+TARGET_HOME="$(getent passwd "${TARGET_USER}" 2>/dev/null | cut -d: -f6)"
+TARGET_HOME="${TARGET_HOME:-${HOME}}"
 
 # The image removes this activation file, but also enforce it for upgraded or
 # persisted containers. obexd loops while requesting an unavailable Evolution
@@ -100,20 +102,33 @@ s6-setuidgid "${TARGET_USER}" xrandr --output screen --mode "$MODELINE_NAME" --d
 
 # Keep persisted Xresources in sync with the container DPI.
 DPI_VALUE="${DPI:-96}"
-if [ -f "${HOME}/.Xresources" ]; then
-  if grep -q '^Xft\.dpi:' "${HOME}/.Xresources"; then
-    sed -i "s/^Xft\.dpi:.*/Xft.dpi: ${DPI_VALUE}/" "${HOME}/.Xresources"
+if [ -f "${TARGET_HOME}/.Xresources" ]; then
+  if grep -q '^Xft\.dpi:' "${TARGET_HOME}/.Xresources"; then
+    sed -i "s/^Xft\.dpi:.*/Xft.dpi: ${DPI_VALUE}/" "${TARGET_HOME}/.Xresources"
   else
-    printf '\nXft.dpi: %s\n' "${DPI_VALUE}" >> "${HOME}/.Xresources"
+    printf '\nXft.dpi: %s\n' "${DPI_VALUE}" >> "${TARGET_HOME}/.Xresources"
   fi
 else
-  printf 'Xcursor.theme: breeze\nXft.dpi: %s\n' "${DPI_VALUE}" > "${HOME}/.Xresources"
+  printf 'Xcursor.theme: breeze\nXft.dpi: %s\n' "${DPI_VALUE}" > "${TARGET_HOME}/.Xresources"
 fi
-xrdb "${HOME}/.Xresources"
+sed -i \
+  -e '/^Xft\.antialias:/d' \
+  -e '/^Xft\.hinting:/d' \
+  -e '/^Xft\.hintstyle:/d' \
+  -e '/^Xft\.rgba:/d' \
+  -e '/^Xft\.lcdfilter:/d' \
+  "${TARGET_HOME}/.Xresources"
+printf '%s\n' \
+  'Xft.antialias: 1' \
+  'Xft.hinting: 1' \
+  'Xft.hintstyle: hintfull' \
+  'Xft.rgba: none' \
+  'Xft.lcdfilter: lcddefault' >> "${TARGET_HOME}/.Xresources"
+xrdb "${TARGET_HOME}/.Xresources"
 if [[ "${LANG:-}" == ja* ]]; then
   setxkbmap -layout jp -model jp106 -option ''
 fi
-chown "${TARGET_USER}:${TARGET_USER}" "${HOME}/.Xresources"
+chown "${TARGET_USER}:${TARGET_USER}" "${TARGET_HOME}/.Xresources"
 chmod 777 /tmp/selkies*
 
 # Harden home ownership for persisted volumes (avoids root-owned files causing black screens)

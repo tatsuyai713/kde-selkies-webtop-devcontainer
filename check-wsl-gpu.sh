@@ -62,10 +62,14 @@ else
   container_uid="${container_uid:-1000}"
   gl_info=$(docker exec -u "${container_uid}" "${container}" bash -lc '
     pid=$(pgrep -u "$(id -u)" -x kwin_wayland | head -1)
+    [ -n "${pid}" ] || pid=$(pgrep -u "$(id -u)" -x kwin_x11 | head -1)
     if [ -n "${pid}" ] && [ -r "/proc/${pid}/environ" ]; then
       export XDG_RUNTIME_DIR=$(tr "\0" "\n" < "/proc/${pid}/environ" | sed -n "s/^XDG_RUNTIME_DIR=//p")
       export DBUS_SESSION_BUS_ADDRESS=$(tr "\0" "\n" < "/proc/${pid}/environ" | sed -n "s/^DBUS_SESSION_BUS_ADDRESS=//p")
-      qdbus6 org.kde.KWin /KWin supportInformation 2>/dev/null \
+      export DISPLAY=$(tr "\0" "\n" < "/proc/${pid}/environ" | sed -n "s/^DISPLAY=//p")
+      qdbus_cmd=$(command -v qdbus6 || command -v qdbus || command -v qdbus-qt5 || true)
+      [ -n "${qdbus_cmd}" ] || exit 0
+      "${qdbus_cmd}" org.kde.KWin /KWin supportInformation 2>/dev/null \
         | grep -E "Compositing Type:|OpenGL vendor string:|OpenGL renderer string:|OpenGL version string:|OpenGL platform interface:"
     fi' 2>&1) || true
   printf '%s\n' "${gl_info}"
@@ -181,7 +185,7 @@ CONTAINER_TEST
   printf '\nLive Selkies GPU policy:\n'
   live_logs=$(docker logs "${container}" 2>&1 || true)
   if grep -q 'External-process Intel VAAPI encoder initialized' <<<"${live_logs}" && \
-     grep -q 'Mode: H264 (VAAPI)' <<<"${live_logs}"; then
+     grep -Eq 'Mode: H264 \(VAAPI\)|Encoder: VAAPI \| Mode: H264' <<<"${live_logs}"; then
     pass 'Pixelflux live stream selected the isolated Intel VA-API encoder'
   else
     warn 'No live isolated-VAAPI stream is in the logs yet; connect a viewer and rerun'
