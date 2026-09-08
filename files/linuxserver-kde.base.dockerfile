@@ -566,6 +566,7 @@ RUN \
   export PKG_CONFIG_PATH="/usr/local/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig:/usr/lib/pkgconfig" && \
   if [ "${UBUNTU_VERSION}" = "22.04" ]; then \
     printf '%s\n' "av==14.4.0" "pcmflux==1.0.8" "pixelflux==1.6.0" > /tmp/selkies-constraints.txt; \
+    /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt .; \
   elif [ "${UBUNTU_VERSION}" = "24.04" ]; then \
     # pixelflux 2.0 (NVENC on X11 and Wayland) via patch-selkies-pixelflux2.py
     printf '%s\n' "av==14.4.0" "pcmflux==1.0.8" "pixelflux==2.0.0" > /tmp/selkies-constraints.txt; \

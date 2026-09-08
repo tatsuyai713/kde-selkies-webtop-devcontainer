@@ -2,14 +2,29 @@
 
 # Apply scaling on every start, including DPI=96, so a previous HiDPI setting
 # cannot remain in the persisted KDE configuration after reconfiguration.
+#
+# This is the Plasma 5 X11 scaling recipe (Ubuntu 22.04/24.04 run Plasma on
+# Xvfb; there is no compositor scaling).  The X font DPI (Xft.dpi, KDE's
+# forceFontDPI) is the single source and carries the whole scale:
+#   - Qt: QT_SCREEN_SCALE_FACTORS scales widgets and divides the logical DPI
+#     by the same factor, so fonts follow Xft.dpi once (QT_SCALE_FACTOR would
+#     multiply on top of the DPI, and QT_FONT_DPI=96 would keep kwin_x11
+#     decorations at 1x because kwin_x11 disables Qt scaling and only follows
+#     the font DPI).
+#   - plasmashell (Plasma 5) disables Qt scaling on X11 and sizes the panel,
+#     icons and desktop from the font DPI.
+#   - GTK (window scale 1), Chromium, Chrome, Electron/VS Code and Firefox
+#     derive their device scale from Xft.dpi/96.  GDK_SCALE=2 must not be set
+#     for fractional scales: Chromium-based applications multiply it with the
+#     font DPI (2 x 1.5 = 3.0 at DPI=144).
 DPI=${DPI:-96}
 SCALE_FACTOR=$(awk "BEGIN { printf \"%.2f\", ${DPI} / 96 }")
 export QT_AUTO_SCREEN_SCALE_FACTOR=0
 export QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough
-export QT_SCALE_FACTOR="${SCALE_FACTOR}"
-# QT_SCALE_FACTOR already scales widgets and fonts. Keep the font baseline at
-# 96 DPI to avoid multiplying the requested scale a second time.
-export QT_FONT_DPI=96
+export QT_SCREEN_SCALE_FACTORS="${SCALE_FACTOR}"
+unset QT_SCALE_FACTOR QT_FONT_DPI QT_DEVICE_PIXEL_RATIO PLASMA_USE_QT_SCALING
+export GDK_SCALE=1
+unset GDK_DPI_SCALE
 
 # A browser-delivered framebuffer has no physical LCD subpixel order.  Keep
 # Qt/Qt Quick on OpenGL, but select its grayscale A8 glyph material instead of
@@ -63,16 +78,6 @@ if [ "${WSL_ENVIRONMENT:-false}" = "true" ]; then
   export KWIN_USE_BUFFER_AGE=0
 fi
 
-# GTK needs an integer UI scale and a fractional font adjustment. Their
-# product matches DPI / 96 (for example, 144 DPI => 2 * 0.75 = 1.5).
-if [ "${DPI}" -ge 120 ]; then
-  export GDK_SCALE=2
-  export GDK_DPI_SCALE=$(awk "BEGIN { printf \"%.3f\", ${SCALE_FACTOR} / 2 }")
-else
-  export GDK_SCALE=1
-  export GDK_DPI_SCALE="${SCALE_FACTOR}"
-fi
-
 KWRITECONFIG=""
 if command -v kwriteconfig6 >/dev/null 2>&1; then
   KWRITECONFIG=kwriteconfig6
@@ -81,9 +86,12 @@ elif command -v kwriteconfig5 >/dev/null 2>&1; then
 fi
 
 if [ -n "${KWRITECONFIG}" ]; then
-  # Clear persisted KDE display/font scaling and use the session-wide
-  # QT_SCALE_FACTOR above as the single Qt scaling source.
-  "${KWRITECONFIG}" --file "${HOME}/.config/kcmfonts" --group General --key forceFontDPI 96
+  # Font DPI is the single scaling source (see the top of this file).
+  # startplasma-x11 applies forceFontDPI to Xft.dpi, and kde-gtk-config
+  # publishes it to GTK through xsettingsd and gtk-3.0/settings.ini.  Keep the
+  # KDE global scale at 1 so GTK keeps window scale 1 and Qt scaling comes
+  # only from QT_SCREEN_SCALE_FACTORS.
+  "${KWRITECONFIG}" --file "${HOME}/.config/kcmfonts" --group General --key forceFontDPI "${DPI}"
   "${KWRITECONFIG}" --file "${HOME}/.config/kcmfonts" --group General --key subPixel none
   "${KWRITECONFIG}" --file "${HOME}/.config/kdeglobals" --group KScreen --key ScaleFactor 1
   "${KWRITECONFIG}" --file "${HOME}/.config/kdeglobals" --group KScreen --key ScreenScaleFactors --delete 2>/dev/null || true
@@ -263,6 +271,32 @@ if [ "${NVIDIA_X11_ZINK_ACTIVE}" = "true" ]; then
   export KWIN_COMPOSE=O2
 fi
 
+# Processes started by startplasma-x11 receive session variables that this
+# script does not have, most importantly XDG_CONFIG_DIRS with
+# ~/.config/kdedefaults prepended.  That directory holds the defaults written
+# by the selected global theme (Plasma theme, color scheme, window decoration).
+# A plasmashell or kwin_x11 started from this script's own environment would
+# ignore the global theme (generic launcher icon, Breeze Light colors) and pass
+# the same incomplete environment to every application it launches.  Run such
+# restarts with the environment of the live session process instead.  Extra
+# VAR=value arguments (e.g. Zink) are applied on top.
+SESSION_ENV_OVERLAY=()
+run_in_session_env() {
+  local pid
+  for name in plasma_session ksmserver kded5 kded6; do
+    pid="$(pgrep -u "$(id -u)" -o -x "${name}" 2>/dev/null || true)"
+    [ -n "${pid}" ] && [ -r "/proc/${pid}/environ" ] && break
+    pid=""
+  done
+  if [ -n "${pid}" ]; then
+    local -a session_env=()
+    mapfile -d '' session_env < "/proc/${pid}/environ"
+    env -i "${session_env[@]}" "${SESSION_ENV_OVERLAY[@]}" "$@"
+  else
+    env "${SESSION_ENV_OVERLAY[@]}" "$@"
+  fi
+}
+
 echo "Starting KDE Plasma (native X server rendering)"
 PLASMA_LOG="/dev/shm/startplasma-x11-$(id -u).log"
 /usr/bin/startplasma-x11 >"${PLASMA_LOG}" 2>&1 &
@@ -286,7 +320,7 @@ PLASMA_SESSION_PID=$!
   while kill -0 "${PLASMA_SESSION_PID}" 2>/dev/null; do
     if ! pgrep -u "$(id -u)" -x kwin_x11 >/dev/null; then
       echo "[$(date -Is)] kwin_x11 is not running; restarting the GPU window manager" >>"${PLASMA_LOG}"
-      /usr/bin/kwin_x11 --replace >>"${PLASMA_LOG}" 2>&1 &
+      run_in_session_env /usr/bin/kwin_x11 --replace >>"${PLASMA_LOG}" 2>&1 &
     fi
     sleep 2
   done
@@ -306,6 +340,13 @@ if [ "${NVIDIA_X11_ZINK_ACTIVE}" = "true" ]; then
   export GALLIUM_DRIVER=zink
   export __GLX_VENDOR_LIBRARY_NAME=mesa
   export LIBGL_ALWAYS_SOFTWARE=0
+  SESSION_ENV_OVERLAY=(
+    LIBGL_KOPPER_DRI2=1
+    MESA_LOADER_DRIVER_OVERRIDE=zink
+    GALLIUM_DRIVER=zink
+    __GLX_VENDOR_LIBRARY_NAME=mesa
+    LIBGL_ALWAYS_SOFTWARE=0
+  )
 
   if command -v dbus-update-activation-environment >/dev/null 2>&1; then
     dbus-update-activation-environment \
@@ -315,11 +356,47 @@ if [ "${NVIDIA_X11_ZINK_ACTIVE}" = "true" ]; then
 
   if pgrep -u "$(id -u)" -x plasmashell >/dev/null; then
     echo "Restarting Plasma Shell with system-wide NVIDIA Zink application acceleration"
-    /usr/bin/plasmashell --replace > /dev/shm/plasmashell-zink.log 2>&1 &
+    # "plasmashell --replace" races with the running instance: it asks the old
+    # shell to quit and immediately registers org.kde.plasmashell.  When the
+    # old process still owns the name, the new shell exits with "another
+    # process owns it already" while the old one honors the quit request, and
+    # the session is left without any shell (black desktop, no panel).  Quit
+    # the old shell explicitly, wait until it has exited, then start a new one.
+    if command -v kquitapp5 >/dev/null 2>&1; then
+      kquitapp5 plasmashell 2>/dev/null || true
+    else
+      pkill -u "$(id -u)" -x plasmashell || true
+    fi
+    for _ in $(seq 1 100); do
+      pgrep -u "$(id -u)" -x plasmashell >/dev/null || break
+      sleep 0.1
+    done
+    pkill -u "$(id -u)" -x plasmashell 2>/dev/null || true
+    run_in_session_env /usr/bin/plasmashell > /dev/shm/plasmashell-zink.log 2>&1 &
   else
     echo "WARNING: plasmashell did not start; Zink environment is configured for later applications." >&2
   fi
 fi
 
+# plasmashell draws the wallpaper and panel.  If it exits for any reason after
+# the session is up, restart it in the current (Zink or default) environment
+# instead of leaving a black desktop.
+(
+  for _ in $(seq 1 300); do
+    kill -0 "${PLASMA_SESSION_PID}" 2>/dev/null || exit 0
+    pgrep -u "$(id -u)" -x plasmashell >/dev/null && break
+    sleep 0.1
+  done
+  while kill -0 "${PLASMA_SESSION_PID}" 2>/dev/null; do
+    if ! pgrep -u "$(id -u)" -x plasmashell >/dev/null; then
+      echo "[$(date -Is)] plasmashell is not running; restarting it" >>"${PLASMA_LOG}"
+      run_in_session_env /usr/bin/plasmashell >>/dev/shm/plasmashell-restart.log 2>&1 &
+      sleep 5
+    fi
+    sleep 2
+  done
+) &
+PLASMASHELL_WATCHDOG_PID=$!
+
 wait "${PLASMA_SESSION_PID}"
-kill "${KWIN_WATCHDOG_PID}" 2>/dev/null || true
+kill "${KWIN_WATCHDOG_PID}" "${PLASMASHELL_WATCHDOG_PID}" 2>/dev/null || true

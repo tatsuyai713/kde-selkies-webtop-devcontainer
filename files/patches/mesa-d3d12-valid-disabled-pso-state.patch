@@ -55,7 +55,7 @@
 +                      (unsigned)hr);
           return NULL;
        }
-    }
+    } 
     else {
        D3D12_GRAPHICS_PIPELINE_STATE_DESC v0desc = pso_desc.GraphicsDescV0();
        if (FAILED(hr = screen->dev->CreateGraphicsPipelineState(&v0desc,

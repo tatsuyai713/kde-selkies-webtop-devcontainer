@@ -7,6 +7,17 @@ if (( EUID == 0 )); then
   exit 1
 fi
 
+# Chromium spawns many helper processes and its Linux proxy-config service
+# opens inotify/fd handles. The container's low open-file soft limit (1024)
+# starves the network service, so every page hangs at "loading". Raise the
+# soft limit to the inherited hard ceiling for this browser process tree.
+_hard_nofile="$(ulimit -Hn 2>/dev/null || true)"
+if [ "${_hard_nofile}" = "unlimited" ]; then
+  ulimit -Sn 1048576 2>/dev/null || true
+elif [ -n "${_hard_nofile}" ]; then
+  ulimit -Sn "${_hard_nofile}" 2>/dev/null || true
+fi
+
 if [ -x /usr/lib/chromium/chromium ]; then
   BIN=/usr/lib/chromium/chromium
 elif [ -x /usr/lib/chromium-browser/chromium-browser ]; then

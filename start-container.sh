@@ -1087,6 +1087,7 @@ docker run -d \
   -e SELKIES_FRAMERATE="${FRAMERATE}" \
   ${WAYLAND_ENV_VARS[@]+"${WAYLAND_ENV_VARS[@]}"} \
   --tmpfs "/dev/shm:${SHM_TMPFS_OPTS}" \
+  --ulimit nofile=65536:524288 \
   --privileged \
   -v "${HOME}":"${HOST_HOME_MOUNT}":rw \
   ${MNT_FLAGS[@]+"${MNT_FLAGS[@]}"} \
