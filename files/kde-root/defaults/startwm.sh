@@ -340,18 +340,27 @@ if [ "${NVIDIA_X11_ZINK_ACTIVE}" = "true" ]; then
   export GALLIUM_DRIVER=zink
   export __GLX_VENDOR_LIBRARY_NAME=mesa
   export LIBGL_ALWAYS_SOFTWARE=0
+  # Qt on X11 uses GLX by default.  With Zink, Plasma's window thumbnails
+  # (task manager tooltips) go through GLX_EXT_texture_from_pixmap, and the
+  # resulting copy crashes inside the NVIDIA Vulkan driver (SIGSEGV in
+  # plasmashell's QSGRenderThread as soon as the pointer rests on a task
+  # button).  With the EGL integration the thumbnail item finds no pixmap
+  # image extension and falls back to the window icon, while plasmashell and
+  # the Qt applications it launches keep rendering through Zink on the GPU.
+  export QT_XCB_GL_INTEGRATION=xcb_egl
   SESSION_ENV_OVERLAY=(
     LIBGL_KOPPER_DRI2=1
     MESA_LOADER_DRIVER_OVERRIDE=zink
     GALLIUM_DRIVER=zink
     __GLX_VENDOR_LIBRARY_NAME=mesa
     LIBGL_ALWAYS_SOFTWARE=0
+    QT_XCB_GL_INTEGRATION=xcb_egl
   )
 
   if command -v dbus-update-activation-environment >/dev/null 2>&1; then
     dbus-update-activation-environment \
       LIBGL_KOPPER_DRI2 MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER \
-      __GLX_VENDOR_LIBRARY_NAME LIBGL_ALWAYS_SOFTWARE 2>/dev/null || true
+      __GLX_VENDOR_LIBRARY_NAME LIBGL_ALWAYS_SOFTWARE QT_XCB_GL_INTEGRATION 2>/dev/null || true
   fi
 
   if pgrep -u "$(id -u)" -x plasmashell >/dev/null; then
@@ -388,6 +397,18 @@ fi
     sleep 0.1
   done
   while kill -0 "${PLASMA_SESSION_PID}" 2>/dev/null; do
+    # A crashed plasmashell stays alive in KCrash's handler (state T, stopped)
+    # while drkonqi waits for input, and its zombie remains after that.  Both
+    # leave a black desktop; treat them as not running.
+    for pid in $(pgrep -u "$(id -u)" -x plasmashell); do
+      case "$(awk '/^State:/ {print $2}' "/proc/${pid}/status" 2>/dev/null)" in
+        T|t|Z)
+          echo "[$(date -Is)] plasmashell ${pid} is stopped or defunct after a crash; terminating it" >>"${PLASMA_LOG}"
+          pkill -u "$(id -u)" -x drkonqi 2>/dev/null || true
+          kill -KILL "${pid}" 2>/dev/null || true
+          ;;
+      esac
+    done
     if ! pgrep -u "$(id -u)" -x plasmashell >/dev/null; then
       echo "[$(date -Is)] plasmashell is not running; restarting it" >>"${PLASMA_LOG}"
       run_in_session_env /usr/bin/plasmashell >>/dev/shm/plasmashell-restart.log 2>&1 &
