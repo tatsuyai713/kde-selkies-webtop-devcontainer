@@ -53,8 +53,17 @@ else
 
   printf '\nContainer GPU policy:\n'
   docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${container}" \
-    | grep -E '^(GPU_VENDOR|WSL_GPU_MODE|GALLIUM_DRIVER|MESA_LOADER_DRIVER_OVERRIDE|MESA_D3D12_DEFAULT_ADAPTER_NAME|LIBVA_DRIVER_NAME|DRI_NODE|WSL_INTEL_VAAPI)=' \
+    | grep -E '^(ENCODER|GPU_VENDOR|WSL_GPU_MODE|GALLIUM_DRIVER|MESA_LOADER_DRIVER_OVERRIDE|MESA_D3D12_DEFAULT_ADAPTER_NAME|LIBVA_DRIVER_NAME|DRI_NODE|WSL_INTEL_VAAPI)=' \
     | sort
+  encoder_profile=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${container}" \
+    | sed -n 's/^ENCODER=//p' | head -1)
+  adapter_name=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${container}" \
+    | sed -n 's/^MESA_D3D12_DEFAULT_ADAPTER_NAME=//p' | head -1)
+  adapter_name="${adapter_name:-Intel}"
+  # intel-wsl encodes with the pinned Mesa build under /opt/wsl-vaapi plus the
+  # VA synchronization shim; amd-wsl uses the system Mesa d3d12 VA driver.
+  use_pinned_va=false
+  if [ "${encoder_profile}" = "intel-wsl" ]; then use_pinned_va=true; fi
 
   printf '\nOpenGL compositor renderer:\n'
   container_uid=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${container}" \
@@ -82,9 +91,51 @@ else
     fail 'KWin did not report OpenGL compositing on a D3D12 renderer'
   fi
 
+  if [ "${encoder_profile}" = "nvidia-wsl" ]; then
+  printf '\nNVENC runtime (CUDA + NvEncodeAPI through /dev/dxg):\n'
+  nvenc_runtime=$(docker exec "${container}" bash -lc \
+    'LD_LIBRARY_PATH=/usr/lib/wsl/lib /opt/selkies-env/bin/python3 -c "
+import ctypes
+cuda = ctypes.CDLL(\"libcuda.so.1\"); enc = ctypes.CDLL(\"libnvidia-encode.so.1\")
+n = ctypes.c_int(0); v = ctypes.c_uint(0)
+assert cuda.cuInit(0) == 0 and cuda.cuDeviceGetCount(ctypes.byref(n)) == 0 and n.value > 0
+assert enc.NvEncodeAPIGetMaxSupportedVersion(ctypes.byref(v)) == 0
+print(f\"status=ready devices={n.value} nvenc_api={v.value >> 4}.{v.value & 15}\")
+"' 2>&1) || true
+  printf '%s\n' "${nvenc_runtime}"
+  if grep -q 'status=ready' <<<"${nvenc_runtime}"; then
+    pass 'libcuda.so.1 and libnvidia-encode.so.1 work inside the container'
+  else
+    fail 'CUDA/NVENC runtime is unavailable inside the container (start with --all / --gpus, update the Windows NVIDIA driver and WSL)'
+  fi
+  if docker exec "${container}" test -r /usr/local/lib/pixelflux-nvenc-wsl.so; then
+    pass 'pixelflux-nvenc-wsl.so is installed (Pixelflux NVENC selection on WSL2)'
+  else
+    fail 'pixelflux-nvenc-wsl.so is missing; rebuild the base image'
+  fi
+
+  printf '\nLive Selkies GPU policy:\n'
+  live_logs=$(docker logs "${container}" 2>&1 || true)
+  if grep -q 'NVENC Encoder initialized successfully' <<<"${live_logs}" && \
+     grep -q 'Mode: H264 (NVENC)' <<<"${live_logs}"; then
+    pass 'Pixelflux live stream selected NVENC'
+  elif grep -q 'CPU encoding selected\|Mode: H264 (CPU)' <<<"${live_logs}"; then
+    fail 'Pixelflux live stream is using CPU x264; check the svc-selkies lines in docker logs'
+  else
+    warn 'No live NVENC stream is in the logs yet; connect a viewer and rerun'
+  fi
+  selkies_maps=$(docker exec "${container}" bash -lc \
+    'pid=$(pgrep -f "python3 -m selkies" | head -1); [ -n "${pid}" ] && grep -oE "libnvidia-encode[^ ]*|libcuda\.so[^ ]*|libx264[^ ]*" "/proc/${pid}/maps" | sort -u' 2>/dev/null || true)
+  printf '%s\n' "${selkies_maps}"
+  if grep -q 'libnvidia-encode' <<<"${selkies_maps}"; then
+    pass 'The Selkies process has libnvidia-encode mapped'
+  else
+    warn 'libnvidia-encode is not mapped in the Selkies process yet (it loads on the first capture)'
+  fi
+  else
   printf '\nVA-API capability query (/dev/dri/card0):\n'
-  va_info=$(docker exec "${container}" bash -lc \
-    'va_dir=${WSL_VAAPI_DIR:-/opt/wsl-vaapi}; if [ -f "$va_dir/d3d12_drv_video.so" ]; then export LIBVA_DRIVERS_PATH="$va_dir"; export LD_LIBRARY_PATH="$va_dir:/usr/lib/wsl/lib"; else export LD_LIBRARY_PATH=/usr/lib/wsl/lib; fi; env -u LIBGL_ALWAYS_SOFTWARE -u MESA_LOADER_DRIVER_OVERRIDE LIBVA_DRIVER_NAME=d3d12 GALLIUM_DRIVER=d3d12 vainfo --display drm --device /dev/dri/card0 2>&1' 2>&1) || true
+  va_info=$(docker exec -e WSL_CHECK_PINNED="${use_pinned_va}" -e WSL_CHECK_ADAPTER="${adapter_name}" "${container}" bash -lc \
+    'va_dir=${WSL_VAAPI_DIR:-/opt/wsl-vaapi}; if [ "$WSL_CHECK_PINNED" = true ] && [ -f "$va_dir/d3d12_drv_video.so" ]; then export LIBVA_DRIVERS_PATH="$va_dir"; export LD_LIBRARY_PATH="$va_dir:/usr/lib/wsl/lib"; else unset LIBVA_DRIVERS_PATH; export LD_LIBRARY_PATH=/usr/lib/wsl/lib; fi; env -u LIBGL_ALWAYS_SOFTWARE -u MESA_LOADER_DRIVER_OVERRIDE LIBVA_DRIVER_NAME=d3d12 GALLIUM_DRIVER=d3d12 MESA_D3D12_DEFAULT_ADAPTER_NAME="$WSL_CHECK_ADAPTER" vainfo --display drm --device /dev/dri/card0 2>&1' 2>&1) || true
   printf '%s\n' "${va_info}" | grep -E 'Driver version:|VAProfileH264.*EncSlice|vaInitialize failed' || true
   if grep -q 'VAProfileH264.*VAEntrypointEncSlice' <<<"${va_info}"; then
     pass 'The driver advertises H.264 VA-API encoding'
@@ -96,15 +147,22 @@ else
   # Mesa's WSL D3D12 VA-API path may expose only one reliable encode session.
   # Starting this probe while Pixelflux owns that session can fail with
   # VA_STATUS_ERROR_ALLOCATION_FAILED even though the live encoder is healthy.
-  # Prefer proving that the existing h264_vaapi child is loading Intel's UMD
-  # and actively consuming/producing bytes; run the isolated sample only when
-  # no production encoder exists.
-  live_encode_result=$(docker exec "${container}" bash -lc '
+  # Prefer proving that the existing h264_vaapi child is loading the vendor
+  # UMD and actively consuming/producing bytes; run the isolated sample only
+  # when no production encoder exists. intel-wsl maps the pinned driver and
+  # Intel's libigd12umd64.so; amd-wsl maps the system Mesa gallium library
+  # and the Radeon UMD from /usr/lib/wsl/drivers.
+  live_encode_result=$(docker exec -e WSL_CHECK_PINNED="${use_pinned_va}" "${container}" bash -lc '
     for pid in $(pgrep -x ffmpeg 2>/dev/null); do
       cmd=$(tr "\0" " " < "/proc/${pid}/cmdline" 2>/dev/null)
       [[ "${cmd}" == *h264_vaapi* ]] || continue
-      grep -q "/opt/wsl-vaapi/d3d12_drv_video.so" "/proc/${pid}/maps" 2>/dev/null || continue
-      grep -q "/usr/lib/wsl/drivers/.*/libigd12umd64.so" "/proc/${pid}/maps" 2>/dev/null || continue
+      if [ "${WSL_CHECK_PINNED}" = true ]; then
+        grep -q "/opt/wsl-vaapi/d3d12_drv_video.so" "/proc/${pid}/maps" 2>/dev/null || continue
+        grep -q "/usr/lib/wsl/drivers/.*/libigd12umd64.so" "/proc/${pid}/maps" 2>/dev/null || continue
+      else
+        grep -q -E "/usr/lib/x86_64-linux-gnu/(dri/d3d12_drv_video.so|libgallium)" "/proc/${pid}/maps" 2>/dev/null || continue
+        grep -q "/usr/lib/wsl/drivers/" "/proc/${pid}/maps" 2>/dev/null || continue
+      fi
       r1=$(sed -n "s/^rchar: //p" "/proc/${pid}/io")
       w1=$(sed -n "s/^wchar: //p" "/proc/${pid}/io")
       sleep 2
@@ -122,12 +180,12 @@ else
     input_delta=$(sed -n 's/.* input_delta=\([0-9][0-9]*\).*/\1/p' <<<"${live_encode_result}" | tail -1)
     output_delta=$(sed -n 's/.* output_delta=\([0-9][0-9]*\).*/\1/p' <<<"${live_encode_result}" | tail -1)
     if [ "${input_delta:-0}" -gt 0 ] && [ "${output_delta:-0}" -gt 0 ]; then
-      pass "Live Intel D3D12 VA-API encoder is consuming frames and producing H.264 (${output_delta} bytes/2s)"
+      pass "Live D3D12 VA-API encoder (${adapter_name}) is consuming frames and producing H.264 (${output_delta} bytes/2s)"
     else
-      fail 'The live Intel VA-API process exists but did not consume and produce data'
+      fail 'The live VA-API process exists but did not consume and produce data'
     fi
   else
-    encode_result=$(docker exec -i "${container}" bash -s <<'CONTAINER_TEST'
+    encode_result=$(docker exec -i -e WSL_CHECK_PINNED="${use_pinned_va}" -e WSL_CHECK_ADAPTER="${adapter_name}" "${container}" bash -s <<'CONTAINER_TEST'
 set -u
 out=$(mktemp --suffix=.mp4)
 trap 'rm -f "${out}"' EXIT
@@ -141,18 +199,19 @@ if ! "${ffmpeg_bin}" -hide_banner -encoders 2>/dev/null | grep -q 'h264_vaapi'; 
   exit 0
 fi
 va_dir=${WSL_VAAPI_DIR:-/opt/wsl-vaapi}
-if [ -f "${va_dir}/d3d12_drv_video.so" ]; then
+if [ "${WSL_CHECK_PINNED:-false}" = true ] && [ -f "${va_dir}/d3d12_drv_video.so" ]; then
   export LIBVA_DRIVERS_PATH="${va_dir}"
   export LD_LIBRARY_PATH="${va_dir}:/usr/lib/wsl/lib"
   export LD_PRELOAD=/usr/local/lib/wsl-vaapi-serialize.so
 else
+  unset LIBVA_DRIVERS_PATH
   export LD_LIBRARY_PATH=/usr/lib/wsl/lib
 fi
 timeout --signal=TERM --kill-after=2 20 \
   env -u LIBGL_ALWAYS_SOFTWARE -u MESA_LOADER_DRIVER_OVERRIDE \
   LIBVA_DRIVER_NAME=d3d12 \
   GALLIUM_DRIVER=d3d12 \
-  MESA_D3D12_DEFAULT_ADAPTER_NAME=Intel \
+  MESA_D3D12_DEFAULT_ADAPTER_NAME="${WSL_CHECK_ADAPTER:-Intel}" \
   "${ffmpeg_bin}" -nostdin -y -hide_banner -loglevel error \
   -vaapi_device /dev/dri/card0 \
   -f lavfi -i testsrc2=size=640x360:rate=30 -t 1 \
@@ -171,10 +230,10 @@ CONTAINER_TEST
     encode_bytes=$(sed -n 's/.* bytes=\([0-9][0-9]*\).*/\1/p' <<<"${encode_result}" | tail -1)
     encode_frames=$(sed -n 's/.* frames=\([0-9][0-9]*\).*/\1/p' <<<"${encode_result}" | tail -1)
     if [ "${encode_bytes:-0}" -gt 1024 ] && [ "${encode_frames:-0}" -gt 0 ]; then
-      pass "Intel D3D12 VA-API produced a valid H.264 stream (${encode_frames} frames)"
+      pass "D3D12 VA-API (${adapter_name}) produced a valid H.264 stream (${encode_frames} frames)"
     elif grep -q 'status=unavailable' <<<"${encode_result}" && \
          docker logs "${container}" 2>&1 | grep -q 'VAAPI Encoder initialized successfully'; then
-      pass 'Pixelflux initialized the Intel VA-API encoder (connect a browser to generate frames)'
+      pass 'Pixelflux initialized the VA-API encoder (connect a browser to generate frames)'
     elif grep -q 'status=unavailable' <<<"${encode_result}"; then
       warn 'The image FFmpeg CLI has no VA-API; connect a browser, then rerun to verify the Pixelflux VA-API log'
     else
@@ -184,11 +243,16 @@ CONTAINER_TEST
 
   printf '\nLive Selkies GPU policy:\n'
   live_logs=$(docker logs "${container}" 2>&1 || true)
+  # The pixelflux wheel prints "Intel" in this message for every vendor; the
+  # isolated encoder itself is vendor neutral.
   if grep -q 'External-process Intel VAAPI encoder initialized' <<<"${live_logs}" && \
      grep -Eq 'Mode: H264 \(VAAPI\)|Encoder: VAAPI \| Mode: H264' <<<"${live_logs}"; then
-    pass 'Pixelflux live stream selected the isolated Intel VA-API encoder'
+    pass "Pixelflux live stream selected the isolated D3D12 VA-API encoder (${adapter_name})"
+  elif grep -q 'falling back to CPU x264' <<<"${live_logs}"; then
+    fail 'svc-selkies found no working D3D12 VA-API encode at startup; see the [svc-selkies] lines in docker logs'
   else
     warn 'No live isolated-VAAPI stream is in the logs yet; connect a viewer and rerun'
+  fi
   fi
   decoder_hints=$(docker exec "${container}" bash -lc \
     'index=$(grep -oE '\''assets/index-[^" ]+\.js'\'' /usr/share/selkies/web/index.html | head -1); core=$(grep -oE '\''selkies-core-[A-Za-z0-9_-]+\.js'\'' "/usr/share/selkies/web/${index}" | head -1); grep -oh '\''hardwareAcceleration:"prefer-[a-z]*"'\'' "/usr/share/selkies/web/${index}" "/usr/share/selkies/web/assets/${core}" 2>/dev/null | sort -u' \

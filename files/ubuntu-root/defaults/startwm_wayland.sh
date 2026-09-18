@@ -133,6 +133,44 @@ if [ "${WSL_ENVIRONMENT:-false}" = "true" ] && [[ "${WSL_PROFILE:-}" =~ ^(intel|
   PLASMASHELL_ENV=(QT_QUICK_BACKEND=software QSG_RHI_BACKEND= QSG_RENDER_LOOP=)
 fi
 
+# startplasma-wayland hands the session environment (XDG_CONFIG_DIRS with
+# ~/.config/kdedefaults and the Kubuntu defaults, XDG_MENU_PREFIX, LC_*,
+# KDE_SESSION_*) only to its own children. A plasmashell relaunched from this
+# script with the bare service environment sees a different set of
+# mimeapps.list files than kded6 and KWin, and KService then treats the shared
+# KSycoca cache as stale on every lookup: plasmashell and kwin_wayland rebuild
+# and overwrite it in turn, forever (about 60% CPU in plasmashell and 30% in
+# kwin_wayland on an idle desktop), and the shell also ignores kdedefaults.
+# Launch plasmashell with the environment of a live session process instead;
+# plasma_session is the process that started the original shell.
+launch_plasmashell() {
+  local name pid="" kv
+  local -a session_env=()
+  for name in plasma_session kded6 kwin_wayland; do
+    pid="$(pgrep -u "$(id -u)" -x "${name}" | head -1)"
+    if [ -n "${pid}" ] && [ -r "/proc/${pid}/environ" ]; then
+      break
+    fi
+    pid=""
+  done
+  if [ -n "${pid}" ]; then
+    while IFS= read -r -d '' kv; do
+      case "${kv}" in
+        _=*|SHLVL=*|OLDPWD=*|PWD=*) ;;
+        *=*) session_env+=("${kv}") ;;
+      esac
+    done < "/proc/${pid}/environ"
+  fi
+  if [ "${#session_env[@]}" -gt 0 ]; then
+    env -i "${session_env[@]}" WAYLAND_DISPLAY=wayland-0 DISPLAY="${DISPLAY:-:0}" \
+      "${PLASMASHELL_ENV[@]}" /usr/bin/plasmashell "$@"
+  else
+    echo "startwm_wayland: no live Plasma session process found; starting plasmashell with the script environment." >&2
+    WAYLAND_DISPLAY=wayland-0 DISPLAY="${DISPLAY:-:0}" \
+      env "${PLASMASHELL_ENV[@]}" /usr/bin/plasmashell "$@"
+  fi
+}
+
 # Qt's RHI pipeline cache survives in the persistent home directory.  A WSL
 # D3D12 device reset or Windows Intel driver update can leave those blobs
 # usable enough to load but with corrupt glyph/color shaders: Plasma then
@@ -337,16 +375,14 @@ if [ -x /usr/bin/startplasma-wayland ]; then
     # startplasma launches its own plasmashell. Replace that initial process
     # once when a component-specific backend override is required.
     if [ "${PLASMASHELL_BACKEND_SELECTED}" != "true" ] && [ "${#PLASMASHELL_ENV[@]}" -gt 0 ]; then
-      WAYLAND_DISPLAY=wayland-0 DISPLAY="${DISPLAY:-:0}" \
-        env "${PLASMASHELL_ENV[@]}" /usr/bin/plasmashell --replace >"/dev/shm/plasmashell-${LOG_SUFFIX}.log" 2>&1 &
+      launch_plasmashell --replace >"/dev/shm/plasmashell-${LOG_SUFFIX}.log" 2>&1 &
       PLASMASHELL_BACKEND_SELECTED=true
       sleep .5
       continue
     fi
 
     if ! pgrep -u "$(id -u)" -x plasmashell >/dev/null 2>&1; then
-      WAYLAND_DISPLAY=wayland-0 DISPLAY="${DISPLAY:-:0}" \
-        env "${PLASMASHELL_ENV[@]}" /usr/bin/plasmashell >"/dev/shm/plasmashell-${LOG_SUFFIX}.log" 2>&1 &
+      launch_plasmashell >"/dev/shm/plasmashell-${LOG_SUFFIX}.log" 2>&1 &
     fi
 
     if pgrep -u "$(id -u)" -x plasmashell >/dev/null 2>&1; then
@@ -376,8 +412,7 @@ if [ -x /usr/bin/startplasma-wayland ]; then
       if [ "${STABLE_KWIN_POLLS}" -ge 2 ] && ! pgrep -u "$(id -u)" -x plasmashell >/dev/null 2>&1; then
         echo "startwm_wayland: restarting plasmashell after compositor recovery." >&2
         reset_plasma_gpu_caches
-        WAYLAND_DISPLAY=wayland-0 DISPLAY="${DISPLAY:-:0}" \
-          env "${PLASMASHELL_ENV[@]}" /usr/bin/plasmashell --replace >>"/dev/shm/plasmashell-${LOG_SUFFIX}.log" 2>&1 &
+        launch_plasmashell --replace >>"/dev/shm/plasmashell-${LOG_SUFFIX}.log" 2>&1 &
         STABLE_KWIN_POLLS=0
       fi
       sleep 1

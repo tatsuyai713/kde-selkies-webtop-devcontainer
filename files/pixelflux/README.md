@@ -79,6 +79,92 @@ VAAPI SPS; the codec-builder function is replaced as a whole so a trailing
 viewport-based level calculation cannot override it. `init-nginx` reapplies and cache-busts that patch after copying
 the dashboard, so restarts do not restore `prefer-software`.
 
+## NVIDIA WSL NVENC
+
+The nvidia-wsl profile needs no wheel change; the vendor module is used as
+built. Two properties of Pixelflux 2.0 kept it on CPU x264 on WSL2:
+
+1. `get_gpu_driver()` reads `/sys/class/drm/renderD<N>/device/driver` and
+   selects NVENC only when the link name contains `nvidia`. WSL2 exposes the
+   GPU as `/dev/dxg` plus CUDA; its only DRM node reports `faux_driver`, so
+   the Wayland decision ended at "CPU encoding selected".
+2. `NvencEncoder::new()` resolves its whole CUDA table up front, including
+   `cuGraphicsEGLRegisterImage` and `cuGraphicsResourceGetMappedEglFrame`,
+   which the WSL `libcuda.so.1` does not export. They are used only by the
+   zero-copy EGL path, which Mesa D3D12 cannot provide anyway.
+
+`svc-selkies` therefore preloads
+[pixelflux-nvenc-wsl.so](../ubuntu-root/usr/local/src/pixelflux-nvenc-wsl.c)
+into the Selkies process (`PIXELFLUX_NVENC_WSL_NODE=renderD128`): it answers
+that single `readlink()` with an NVIDIA driver path and returns
+`CUDA_ERROR_NOT_SUPPORTED` stubs for the two symbols when the real lookup
+fails. `PIXELFLUX_ENCODE_NODE_PATH=/dev/dxg` makes the encoder node differ
+from the render node, which selects the readback path: D3D12 renders the
+desktop, Pixelflux reads the frame back, converts to NV12, uploads it to CUDA
+device 0 (the PCI bus id lookup fails on the virtual node and falls back to
+the default device) and NVENC compresses it. The multi-GPU ioctl filter stays
+inactive because `/proc/driver/nvidia/gpus` does not exist on WSL.
+
+Validation on an RTX PRO 1000 laptop GPU (driver 597.06, NvEncodeAPI 13.0,
+Ubuntu 26.04 container):
+
+- `[Wayland] NVENC Encoder initialized successfully` and
+  `Mode: H264 (NVENC) FullFrame Streaming` for the standalone capture;
+  205 frames in 8 s at 1280x720 with 3% encoder utilisation.
+- The emitted SPS is High Profile, constraint 0x00, level_idc 52 for every
+  size from 1280x720 to 3840x2160 at 30 and 60 fps, so
+  `patch-selkies-hardware-decode.py` declares `avc1.640034` (mirroring
+  Pixelflux's `min_h264_level` table) for the NVENC profiles instead of the
+  Intel `avc1.640C29`.
+
+Re-run the standalone regression inside the container:
+
+```bash
+docker cp files/pixelflux/check-nvenc-wsl.py \
+  linuxserver-kde-tatsuyai:/tmp/check-nvenc-wsl.py
+docker exec --user tatsuyai linuxserver-kde-tatsuyai env \
+  XDG_RUNTIME_DIR=/tmp/nvenc-check LD_LIBRARY_PATH=/usr/lib/wsl/lib \
+  GALLIUM_DRIVER=d3d12 MESA_LOADER_DRIVER_OVERRIDE=d3d12 \
+  MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA \
+  LD_PRELOAD=/usr/local/lib/pixelflux-nvenc-wsl.so \
+  PIXELFLUX_NVENC_WSL_NODE=renderD128 PIXELFLUX_ENCODE_NODE_PATH=/dev/dxg \
+  /opt/selkies-env/bin/python3 /tmp/check-nvenc-wsl.py 1920 1080 30
+```
+
+Native `nvidia` profiles do not use the shim: there the NVIDIA DRM node is
+real, and `svc-selkies` now passes it as both render node and `--dri-node` so
+that a hybrid machine does not render on the iGPU and encode through its
+VA-API driver.
+
+## AMD WSL VA-API
+
+`amd-wsl` reuses the isolated FFmpeg readback encoder above unchanged: it is
+vendor neutral (`/usr/bin/ffmpeg -vaapi_device <node> ... -c:v h264_vaapi`),
+so no wheel change is needed. Differences from Intel:
+
+- The system Mesa d3d12 VA-API driver is used (`LIBVA_DRIVERS_PATH` unset);
+  Intel's pinned Mesa 25.2.8 build and `wsl-vaapi-serialize.so` are not
+  loaded.
+- Pixelflux's same-process zero-copy VA path is skipped deliberately. On WSL
+  it cannot import the D3D12 GL buffers (Intel showed `vaCreateSurfaces`
+  returning `VA_STATUS_ERROR_UNIMPLEMENTED`), and when it fails Pixelflux only
+  falls back to CPU x264, never to the readback encoder.
+- `svc-selkies` gates `PIXELFLUX_VAAPI_EXTERNAL_PROCESS=1` on a 30-frame
+  `h264_vaapi` test encode of `testsrc2` on `/dev/dri/card0` with the
+  container's `MESA_D3D12_DEFAULT_ADAPTER_NAME` (default `Radeon`) and counts
+  the coded packets, because some Windows drivers advertise `EncSlice` but
+  return empty bitstreams. A failed test logs `falling back to CPU x264`.
+- Rate control, the 8 Mbps ceiling and the disabled paint-over follow the
+  Intel configuration because they are properties of the isolated encoder
+  (bitrate-only `h264_vaapi`, `-level 4.1`), not of the Intel UMD. The
+  `SELKIES_WSL_VAAPI_TARGET_MBPS` / `_MAX_MBPS` / `_CBR_MBPS` variables tune
+  it; the older `SELKIES_INTEL_*` names are still accepted.
+- The wheel prints `External-process Intel VAAPI encoder initialized.` for
+  every vendor; `check-wsl-gpu.sh` accepts that line for AMD as well.
+
+This path has not been exercised on AMD hardware here; the startup test and
+`./check-wsl-gpu.sh` are the acceptance checks.
+
 ## Rebuild notes
 
 Apply the patch to the pinned source, build against Ubuntu 26.04's system

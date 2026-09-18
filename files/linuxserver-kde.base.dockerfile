@@ -805,6 +805,25 @@ RUN \
 # add local files - this will overwrite ubuntu-root files if conflicts exist
 COPY ubuntu-root/ /
 
+# Pixelflux 2.0 recognises NVENC only through an NVIDIA DRM render node, which
+# WSL2 never provides (the GPU is /dev/dxg plus CUDA), and the WSL libcuda lacks
+# two CUDA/EGL interop symbols it resolves up front. svc-selkies preloads this
+# shim into the nvidia-wsl Selkies process; the source explains the mechanism.
+# The self-test runs against paths that need not exist in the build sandbox.
+RUN if [ "$(dpkg --print-architecture)" = "amd64" ] && [ -f /usr/local/src/pixelflux-nvenc-wsl.c ]; then \
+      gcc -shared -fPIC -O2 -Wall -Wextra \
+        -o /usr/local/lib/pixelflux-nvenc-wsl.so /usr/local/src/pixelflux-nvenc-wsl.c -ldl && \
+      chmod 755 /usr/local/lib/pixelflux-nvenc-wsl.so && \
+      test "$(LD_PRELOAD=/usr/local/lib/pixelflux-nvenc-wsl.so PIXELFLUX_NVENC_WSL_NODE=renderD128 \
+              readlink /sys/class/drm/renderD128/device/driver)" = "../../../bus/pci/drivers/nvidia" && \
+      ! LD_PRELOAD=/usr/local/lib/pixelflux-nvenc-wsl.so PIXELFLUX_NVENC_WSL_NODE=renderD128 \
+          readlink /sys/class/drm/renderD250/device/driver >/dev/null 2>&1 && \
+      LD_PRELOAD=/usr/local/lib/pixelflux-nvenc-wsl.so PIXELFLUX_NVENC_WSL_NODE=renderD128 \
+        python3 -c 'import ctypes; assert ctypes.CDLL(None).cuGraphicsEGLRegisterImage() == 801' && \
+      LD_PRELOAD=/usr/local/lib/pixelflux-nvenc-wsl.so \
+        python3 -c 'import ctypes; assert not hasattr(ctypes.CDLL(None), "cuGraphicsEGLRegisterImage")'; \
+    fi
+
 # A streamed framebuffer has no physical LCD subpixel order.  Ubuntu enables
 # RGB subpixel antialiasing by default, which becomes coloured fringes after
 # RGBA capture and H.264 4:2:0 conversion.  Keep grayscale antialiasing while
