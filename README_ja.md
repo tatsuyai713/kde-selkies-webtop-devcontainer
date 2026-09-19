@@ -839,6 +839,7 @@ kde-selkies-webtop-devcontainer/
 - **VirtualGL:** 3.1.4（Dockerfile のビルド引数）
 - **Pixelflux:** 1.6.0（`files/pixelflux/` 内のローカル `.whl` ファイル）
 - **Selkies:** デフォルトで最新 `main` ブランチを追跡。`--build-arg SELKIES_COMMIT=<hash>` で特定コミットに固定可能
+- **python-xlib:** 固定コミットの Selkies は `python-xlib @ https://github.com/selkies-project/python-xlib/archive/master.zip` を要求するが、このフォークは GitHub から削除済み（全 Ubuntu 版の `install selkies` ステップで HTTP 404）。ベースイメージではこの要求を外し、PyPI の `python-xlib==0.33` を入れたうえで、フォーク唯一の機能差分（RANDR の `BadRR*Error` を `Xlib.error.XError` 派生にする）を再適用する。Selkies が Xlib を使うのは display/xfixes/xtest のみ。
 
 ハードウェアエンコード:
 - **NVIDIA:** Pixelflux 経由の NVENC

@@ -534,6 +534,14 @@ RUN \
   tar xf selkies.tar.gz && \
   cd selkies-* && \
   sed -i '/cryptography/d' pyproject.toml && \
+  # This selkies commit pins python-xlib to the selkies-project/python-xlib fork
+  # (archive/master.zip). That repository was deleted from GitHub, so pip fails
+  # with HTTP 404 on every Ubuntu release. Its only change over the PyPI release
+  # python-xlib 0.33 made the three RANDR error classes derive from XError;
+  # selkies itself uses Xlib for display/xfixes/xtest only. Drop the URL
+  # requirement here and install the PyPI release plus that fix below.
+  sed -i '/python-xlib @ https:\/\/github.com\/selkies-project\/python-xlib/d' pyproject.toml && \
+  ! grep -q 'selkies-project/python-xlib' pyproject.toml && \
   UBUNTU_VERSION="$(. /etc/os-release && echo ${VERSION_ID})" && \
   if [ "$(echo "${UBUNTU_VERSION}" | cut -d. -f1)" -lt 24 ]; then \
     echo "**** Ubuntu ${UBUNTU_VERSION}: removing xkbcommon dependency (not compatible) ****" && \
@@ -564,6 +572,15 @@ RUN \
   fi && \
   python3 -m venv --system-site-packages /opt/selkies-env && \
   export PKG_CONFIG_PATH="/usr/local/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig:/usr/lib/pkgconfig" && \
+  echo "**** install python-xlib 0.33 from PyPI (the selkies fork was deleted) ****" && \
+  /opt/selkies-env/bin/pip install "python-xlib==0.33" && \
+  XLIB_RANDR="$(/opt/selkies-env/bin/python3 -c 'import Xlib.ext.randr as m; print(m.__file__)')" && \
+  # The PyPI files use CRLF line endings; keep them intact while re-applying the
+  # fork's change (BadRR*Error classes derive from Xlib.error.XError).
+  { grep -q '^from Xlib\.error import XError' "${XLIB_RANDR}" || \
+    sed -i 's/^\(from Xlib\.protocol import rq\)\(\r\{0,1\}\)$/\1\2\nfrom Xlib.error import XError\2/' "${XLIB_RANDR}"; } && \
+  sed -i 's/^class \(BadRR[A-Za-z]*Error\)(Exception): pass\(\r\{0,1\}\)$/class \1(XError): pass\2/' "${XLIB_RANDR}" && \
+  /opt/selkies-env/bin/python3 -c 'from Xlib.ext import randr; from Xlib.error import XError; assert all(issubclass(c, XError) for c in (randr.BadRROutputError, randr.BadRRCrtcError, randr.BadRRModeError)); from Xlib import display, X, XK; from Xlib.ext import xfixes, xtest' && \
   if [ "${UBUNTU_VERSION}" = "22.04" ]; then \
     printf '%s\n' "av==14.4.0" "pcmflux==1.0.8" "pixelflux==1.6.0" > /tmp/selkies-constraints.txt; \
     /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt .; \

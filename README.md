@@ -878,6 +878,7 @@ External dependencies are pinned for reproducible builds:
 - **VirtualGL:** 3.1.4 (build argument in Dockerfile)
 - **Pixelflux:** 1.6.0 (local `.whl` files in `files/pixelflux/`)
 - **Selkies:** Tracks latest `main` branch by default. Pin to a specific commit via `--build-arg SELKIES_COMMIT=<hash>`
+- **python-xlib:** The pinned Selkies commit declares `python-xlib @ https://github.com/selkies-project/python-xlib/archive/master.zip`, and that fork has been deleted from GitHub (HTTP 404 in the `install selkies` build step on every Ubuntu release). The base image drops that requirement and installs `python-xlib==0.33` from PyPI, then re-applies the fork's only functional change (the RANDR `BadRR*Error` classes derive from `Xlib.error.XError`); Selkies uses Xlib for display/xfixes/xtest only.
 
 Hardware encoding:
 - **NVIDIA:** NVENC via Pixelflux
