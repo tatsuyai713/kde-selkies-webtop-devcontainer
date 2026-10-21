@@ -57,6 +57,48 @@ if [ "${WSL_ENVIRONMENT:-false}" = "true" ]; then
   export VK_ICD_FILENAMES=/dev/null
   DBUS_GPU_ENV=(NODEVICE_SELECT VK_DRIVER_FILES VK_ICD_FILENAMES)
 
+  # Hide GL timer queries. KWin samples GL_TIMESTAMP at the start of every
+  # frame (KWin::GLRenderTimeQuery::begin) to estimate render time. Mesa's
+  # d3d12 driver answers that with a CPU wait on a D3D12 fence, which over
+  # WSL's paravirtualised GPU (D3DKMTWaitForSynchronizationObjectFromCpu)
+  # stalls the compositor's main thread every frame: the whole desktop then
+  # crawls (down to ~0.1 FPS) although CPU and GPU are idle. Without the
+  # extensions KWin skips the measurement and schedules frames normally.
+  # Set WSL_GL_TIMER_QUERY=1 to keep them (e.g. for GPU profiling tools).
+  if [ "${WSL_GL_TIMER_QUERY:-0}" != "1" ]; then
+    _no_tq="-GL_ARB_timer_query -GL_EXT_timer_query -GL_EXT_disjoint_timer_query"
+    export MESA_EXTENSION_OVERRIDE="${MESA_EXTENSION_OVERRIDE:+${MESA_EXTENSION_OVERRIDE} }${_no_tq}"
+    unset _no_tq
+    DBUS_GPU_ENV+=(MESA_EXTENSION_OVERRIDE)
+  fi
+
+  # Mesa's Kopper presentation path crashes GLX/EGL-on-X11 clients on WSL once the
+  # vgem render node exists ("failed to load driver: d3d12", then SIGSEGV in
+  # glXCreateContext). Chromium's ANGLE then gives up and runs with
+  # --use-gl=disabled (CPU rendering: choppy Chrome / VS Code). Without Kopper,
+  # Mesa uses its plain swrast presentation and GLX renders on D3D12 again.
+  export LIBGL_KOPPER_DISABLE=true
+  DBUS_GPU_ENV+=(LIBGL_KOPPER_DISABLE)
+
+  # Xwayland: no glamor. With glamor, Xwayland renders X11 pixmaps through
+  # Mesa d3d12 into vgem gbm buffers, i.e. it memcpy()s every frame between
+  # system memory and the GPU on its single main thread. X11 GL clients
+  # (Chrome / VS Code over XWayland) already hand over CPU-side frames, so a
+  # large window pinned Xwayland at ~100% CPU and stalled at <1 FPS. Without
+  # glamor Xwayland passes those frames to KWin as wl_shm buffers directly.
+  # Set WSL_XWAYLAND_GLAMOR=1 to keep glamor.
+  if [ "${WSL_XWAYLAND_GLAMOR:-0}" != "1" ]; then
+    export XWAYLAND_NO_GLAMOR=1
+    DBUS_GPU_ENV+=(XWAYLAND_NO_GLAMOR)
+  fi
+
+  # Electron apps (VS Code) get the same XWayland presentation policy as
+  # Chrome: per-user menu entries that start them through wsl-electron-x11.
+  # --watch keeps following package installs/upgrades for the whole session.
+  if [ -x /usr/local/bin/wsl-electron-desktop-overrides ]; then
+    /usr/local/bin/wsl-electron-desktop-overrides --watch >/dev/null 2>&1 &
+  fi
+
   # Session-wide software GL unless everything is allowed on the GPU. Without
   # MESA_LOADER_DRIVER_OVERRIDE the vgem render node has no DRI driver, so
   # Mesa's EGL/GLX fall back to llvmpipe over wl_shm (and Xwayland runs without

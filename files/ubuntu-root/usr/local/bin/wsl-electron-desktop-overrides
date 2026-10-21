@@ -1,0 +1,90 @@
+#!/bin/bash
+# wsl-electron-desktop-overrides - route every Chromium/Electron app through
+# wsl-electron-x11 (XWayland presentation + GPU GL on WSL2, see that script).
+#
+# Apps are detected by content, not by name: a menu entry qualifies when the
+# program it starts lives next to Chromium's runtime files
+# (v8_context_snapshot.bin / chrome_crashpad_handler / snapshot_blob.bin).
+# That covers VS Code, Chromium, Edge, Electron apps in general. Entries that
+# already start one of our browser wrappers (Google Chrome, Chromium) are left
+# as they are.
+#
+# For each qualifying /usr/share/applications/<id>.desktop an override with the
+# same id is written whose Exec lines are prefixed with wsl-electron-x11. Same
+# id + earlier XDG data dir = it shadows the package's entry, so package
+# upgrades never undo it. Outside WSL2 the wrapper starts the app unchanged,
+# so the overrides are harmless on any host.
+#
+#   --system   (root) write to /usr/local/share/applications. Run at image
+#              build time and at every container start (init-wsl-electron).
+#   --user     write to ~/.local/share/applications (desktop session start).
+#   --watch    like --user, then re-scan whenever /usr/share/applications
+#              changes (checked every 20 s) while the parent process lives.
+# Overrides carry the marker X-Webtop-WSL-Electron=true; files without it
+# (made or edited by an admin/user) are never touched, and overrides whose
+# app was uninstalled are removed.
+set -u
+MODE="${1:---user}"
+SRC_DIR=/usr/share/applications
+MARK="X-Webtop-WSL-Electron=true"
+WRAP=/usr/local/bin/wsl-electron-x11
+case "${MODE}" in
+  --system) DST="/usr/local/share/applications" ;;
+  --user|--watch) DST="${HOME}/.local/share/applications" ;;
+  *) echo "usage: $0 --system|--user|--watch" >&2; exit 2 ;;
+esac
+
+is_chromium_app() {  # $1 = executable path
+  local bin dir
+  bin="$(readlink -f "$1" 2>/dev/null)" || return 1
+  [ -x "${bin}" ] || return 1
+  case "${bin}" in
+    */wsl-electron-x11|*/google-chrome-wrapped|*/wrapped-chromium) return 1 ;;
+  esac
+  dir="$(dirname "${bin}")"
+  [ -f "${dir}/v8_context_snapshot.bin" ] || [ -f "${dir}/snapshot_blob.bin" ] || [ -x "${dir}/chrome_crashpad_handler" ]
+}
+
+exec_bin_of() {  # first Exec= program of a .desktop file, resolved through PATH
+  local cmd
+  cmd="$(sed -n 's/^Exec=//p' "$1" | head -1)"
+  cmd="${cmd%% *}"; cmd="${cmd//\"/}"
+  [ -n "${cmd}" ] || return 1
+  case "${cmd}" in /*) echo "${cmd}" ;; *) command -v "${cmd}" 2>/dev/null ;; esac
+}
+
+scan() {
+  mkdir -p "${DST}" || return 1
+  local changed=0 src id dst bin
+  for src in "${SRC_DIR}"/*.desktop; do
+    [ -f "${src}" ] || continue
+    id="$(basename "${src}")"; dst="${DST}/${id}"
+    bin="$(exec_bin_of "${src}")" || continue
+    is_chromium_app "${bin}" || continue
+    if [ -f "${dst}" ] && ! grep -qx "${MARK}" "${dst}"; then continue; fi
+    # Prefix every Exec= (main entry and desktop actions) with the wrapper.
+    sed -E "s#^Exec=(env [^ ]+ )*#&${WRAP} #; s#${WRAP} ${WRAP} #${WRAP} #g; /^\[Desktop Entry\]/a ${MARK}" "${src}" > "${dst}.tmp" || continue
+    if ! cmp -s "${dst}.tmp" "${dst}" 2>/dev/null; then mv -f "${dst}.tmp" "${dst}"; chmod 644 "${dst}"; changed=1; echo "override: ${id} (${bin})"; else rm -f "${dst}.tmp"; fi
+  done
+  # drop our overrides whose app is gone
+  for dst in "${DST}"/*.desktop; do
+    [ -f "${dst}" ] && grep -qx "${MARK}" "${dst}" || continue
+    [ -f "${SRC_DIR}/$(basename "${dst}")" ] || { rm -f "${dst}"; changed=1; echo "removed: $(basename "${dst}")"; }
+  done
+  if [ "${changed}" = 1 ] && [ "${MODE}" != "--system" ]; then
+    command -v kbuildsycoca6 >/dev/null 2>&1 && kbuildsycoca6 >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+scan
+[ "${MODE}" = "--watch" ] || exit 0
+parent=$PPID
+last="$(stat -c %Y "${SRC_DIR}" 2>/dev/null)"
+while kill -0 "${parent}" 2>/dev/null; do
+  sleep 20
+  now="$(stat -c %Y "${SRC_DIR}" 2>/dev/null)"
+  [ "${now}" = "${last}" ] && continue
+  last="${now}"
+  scan
+done

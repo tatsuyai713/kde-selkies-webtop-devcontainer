@@ -1,0 +1,127 @@
+diff --git a/drivers/net/usb/ax88179_178a.c b/drivers/net/usb/ax88179_178a.c
+index b034ef8a73ea..58548b45192e 100644
+--- a/drivers/net/usb/ax88179_178a.c
++++ b/drivers/net/usb/ax88179_178a.c
+@@ -1721,7 +1721,7 @@ static const struct driver_info ax88179_info = {
+ 	.link_reset = ax88179_link_reset,
+ 	.reset = ax88179_net_reset,
+ 	.stop = ax88179_stop,
+-	.flags = FLAG_ETHER | FLAG_FRAMING_AX,
++	.flags = FLAG_ETHER | FLAG_FRAMING_AX | FLAG_NOMAXMTU,
+ 	.rx_fixup = ax88179_rx_fixup,
+ 	.tx_fixup = ax88179_tx_fixup,
+ };
+@@ -1734,7 +1734,7 @@ static const struct driver_info ax88178a_info = {
+ 	.link_reset = ax88179_link_reset,
+ 	.reset = ax88179_net_reset,
+ 	.stop = ax88179_stop,
+-	.flags = FLAG_ETHER | FLAG_FRAMING_AX,
++	.flags = FLAG_ETHER | FLAG_FRAMING_AX | FLAG_NOMAXMTU,
+ 	.rx_fixup = ax88179_rx_fixup,
+ 	.tx_fixup = ax88179_tx_fixup,
+ };
+@@ -1747,7 +1747,7 @@ static const struct driver_info cypress_GX3_info = {
+ 	.link_reset = ax88179_link_reset,
+ 	.reset = ax88179_net_reset,
+ 	.stop = ax88179_stop,
+-	.flags = FLAG_ETHER | FLAG_FRAMING_AX,
++	.flags = FLAG_ETHER | FLAG_FRAMING_AX | FLAG_NOMAXMTU,
+ 	.rx_fixup = ax88179_rx_fixup,
+ 	.tx_fixup = ax88179_tx_fixup,
+ };
+@@ -1760,7 +1760,7 @@ static const struct driver_info dlink_dub1312_info = {
+ 	.link_reset = ax88179_link_reset,
+ 	.reset = ax88179_net_reset,
+ 	.stop = ax88179_stop,
+-	.flags = FLAG_ETHER | FLAG_FRAMING_AX,
++	.flags = FLAG_ETHER | FLAG_FRAMING_AX | FLAG_NOMAXMTU,
+ 	.rx_fixup = ax88179_rx_fixup,
+ 	.tx_fixup = ax88179_tx_fixup,
+ };
+@@ -1773,7 +1773,7 @@ static const struct driver_info sitecom_info = {
+ 	.link_reset = ax88179_link_reset,
+ 	.reset = ax88179_net_reset,
+ 	.stop = ax88179_stop,
+-	.flags = FLAG_ETHER | FLAG_FRAMING_AX,
++	.flags = FLAG_ETHER | FLAG_FRAMING_AX | FLAG_NOMAXMTU,
+ 	.rx_fixup = ax88179_rx_fixup,
+ 	.tx_fixup = ax88179_tx_fixup,
+ };
+@@ -1786,7 +1786,7 @@ static const struct driver_info samsung_info = {
+ 	.link_reset = ax88179_link_reset,
+ 	.reset = ax88179_net_reset,
+ 	.stop = ax88179_stop,
+-	.flags = FLAG_ETHER | FLAG_FRAMING_AX,
++	.flags = FLAG_ETHER | FLAG_FRAMING_AX | FLAG_NOMAXMTU,
+ 	.rx_fixup = ax88179_rx_fixup,
+ 	.tx_fixup = ax88179_tx_fixup,
+ };
+@@ -1799,7 +1799,7 @@ static const struct driver_info lenovo_info = {
+ 	.link_reset = ax88179_link_reset,
+ 	.reset = ax88179_net_reset,
+ 	.stop = ax88179_stop,
+-	.flags = FLAG_ETHER | FLAG_FRAMING_AX,
++	.flags = FLAG_ETHER | FLAG_FRAMING_AX | FLAG_NOMAXMTU,
+ 	.rx_fixup = ax88179_rx_fixup,
+ 	.tx_fixup = ax88179_tx_fixup,
+ };
+@@ -1812,7 +1812,7 @@ static const struct driver_info belkin_info = {
+ 	.link_reset = ax88179_link_reset,
+ 	.reset	= ax88179_net_reset,
+ 	.stop	= ax88179_stop,
+-	.flags	= FLAG_ETHER | FLAG_FRAMING_AX,
++	.flags	= FLAG_ETHER | FLAG_FRAMING_AX | FLAG_NOMAXMTU,
+ 	.rx_fixup = ax88179_rx_fixup,
+ 	.tx_fixup = ax88179_tx_fixup,
+ };
+@@ -1825,7 +1825,7 @@ static const struct driver_info toshiba_info = {
+ 	.link_reset = ax88179_link_reset,
+ 	.reset	= ax88179_net_reset,
+ 	.stop = ax88179_stop,
+-	.flags	= FLAG_ETHER | FLAG_FRAMING_AX,
++	.flags	= FLAG_ETHER | FLAG_FRAMING_AX | FLAG_NOMAXMTU,
+ 	.rx_fixup = ax88179_rx_fixup,
+ 	.tx_fixup = ax88179_tx_fixup,
+ };
+@@ -1838,7 +1838,7 @@ static const struct driver_info mct_info = {
+ 	.link_reset = ax88179_link_reset,
+ 	.reset	= ax88179_net_reset,
+ 	.stop	= ax88179_stop,
+-	.flags	= FLAG_ETHER | FLAG_FRAMING_AX,
++	.flags	= FLAG_ETHER | FLAG_FRAMING_AX | FLAG_NOMAXMTU,
+ 	.rx_fixup = ax88179_rx_fixup,
+ 	.tx_fixup = ax88179_tx_fixup,
+ };
+@@ -1851,7 +1851,7 @@ static const struct driver_info at_umc2000_info = {
+ 	.link_reset = ax88179_link_reset,
+ 	.reset  = ax88179_net_reset,
+ 	.stop   = ax88179_stop,
+-	.flags  = FLAG_ETHER | FLAG_FRAMING_AX,
++	.flags  = FLAG_ETHER | FLAG_FRAMING_AX | FLAG_NOMAXMTU,
+ 	.rx_fixup = ax88179_rx_fixup,
+ 	.tx_fixup = ax88179_tx_fixup,
+ };
+@@ -1864,7 +1864,7 @@ static const struct driver_info at_umc200_info = {
+ 	.link_reset = ax88179_link_reset,
+ 	.reset  = ax88179_net_reset,
+ 	.stop   = ax88179_stop,
+-	.flags  = FLAG_ETHER | FLAG_FRAMING_AX,
++	.flags  = FLAG_ETHER | FLAG_FRAMING_AX | FLAG_NOMAXMTU,
+ 	.rx_fixup = ax88179_rx_fixup,
+ 	.tx_fixup = ax88179_tx_fixup,
+ };
+@@ -1877,7 +1877,7 @@ static const struct driver_info at_umc2000sp_info = {
+ 	.link_reset = ax88179_link_reset,
+ 	.reset  = ax88179_net_reset,
+ 	.stop   = ax88179_stop,
+-	.flags  = FLAG_ETHER | FLAG_FRAMING_AX,
++	.flags  = FLAG_ETHER | FLAG_FRAMING_AX | FLAG_NOMAXMTU,
+ 	.rx_fixup = ax88179_rx_fixup,
+ 	.tx_fixup = ax88179_tx_fixup,
+ };
+@@ -1956,3 +1956,5 @@ module_usb_driver(ax88179_178a_driver);
+ 
+ MODULE_DESCRIPTION("ASIX AX88179/178A based USB 3.0/2.0 Gigabit Ethernet Devices");
+ MODULE_LICENSE("GPL");
++
++MODULE_INFO(jumbo_patch, "FLAG_NOMAXMTU");

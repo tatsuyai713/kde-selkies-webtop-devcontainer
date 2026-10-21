@@ -1,0 +1,33 @@
+diff --git a/drivers/gpu/drm/Makefile b/drivers/gpu/drm/Makefile
+index b248e64587ed..d5b699a9d8ca 100644
+--- a/drivers/gpu/drm/Makefile
++++ b/drivers/gpu/drm/Makefile
+@@ -93,6 +93,8 @@ drm-$(CONFIG_DRM_ACCEL) += ../../accel/drm_accel.o
+ drm-$(CONFIG_DRM_PANIC) += drm_panic.o
+ drm-$(CONFIG_DRM_DRAW) += drm_draw.o
+ drm-$(CONFIG_DRM_PANIC_SCREEN_QR_CODE) += drm_panic_qr.o
++# kde-selkies-webtop: HDMI infoframe helpers inside drm.ko (stock WSL2 kernel has no CONFIG_HDMI)
++drm-y += drm_hdmi_lib.o
+ obj-$(CONFIG_DRM)	+= drm.o
+ 
+ obj-$(CONFIG_DRM_PANEL_ORIENTATION_QUIRKS) += drm_panel_orientation_quirks.o
+diff --git a/drivers/gpu/drm/drm_hdmi_lib.c b/drivers/gpu/drm/drm_hdmi_lib.c
+new file mode 100644
+index 000000000000..c65a9468b67a
+--- /dev/null
++++ b/drivers/gpu/drm/drm_hdmi_lib.c
+@@ -0,0 +1,14 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * kde-selkies-webtop: the stock WSL2 kernel is built without CONFIG_HDMI, so the
++ * infoframe helpers from drivers/video/hdmi.c are not available to an
++ * out-of-tree drm.ko. Compile them into drm.ko instead, as internal symbols:
++ * the vmlinux of this build exports them too (DRM selects HDMI) and modpost
++ * rejects a symbol exported twice.
++ */
++#include <linux/export.h>
++#undef EXPORT_SYMBOL
++#undef EXPORT_SYMBOL_GPL
++#define EXPORT_SYMBOL(sym)
++#define EXPORT_SYMBOL_GPL(sym)
++#include "../../video/hdmi.c"

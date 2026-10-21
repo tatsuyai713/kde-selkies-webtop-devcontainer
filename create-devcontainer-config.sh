@@ -110,7 +110,7 @@ GPU_VENDOR="${ENCODER}"
 
 # Must run before compose-env.sh: it only passes /dev/dri through to the
 # container when the node already exists on the host.
-shared_ensure_wsl_render_node
+shared_ensure_wsl_render_node "${ENCODER}"
 COMPOSE_ENV_SCRIPT="${SCRIPT_DIR}/compose-env.sh"
 
 if [ ! -x "${COMPOSE_ENV_SCRIPT}" ]; then
@@ -244,25 +244,23 @@ case "${GPU_VENDOR}" in
         ;;
 esac
 
-# Build forward port list
-FORWARD_PORTS=("${HOST_PORT_SSL}" "${HOST_PORT_HTTP}")
-
-FORWARD_PORTS_JSON=""
-for PORT in "${FORWARD_PORTS[@]}"; do
-    if [ -n "${FORWARD_PORTS_JSON}" ]; then
-        FORWARD_PORTS_JSON="${FORWARD_PORTS_JSON},
-"
-    fi
-    FORWARD_PORTS_JSON="${FORWARD_PORTS_JSON}    ${PORT}"
-done
-
-PORT_ATTRIBUTES_JSON="    \"${HOST_PORT_SSL}\": {
-      \"label\": \"HTTPS Web UI\",
-      \"onAutoForward\": \"notify\"
+# Port attributes.
+# The Web UI ports are published by docker compose ("ports:" below), so they are
+# already reachable on the host as localhost:${HOST_PORT_SSL}/${HOST_PORT_HTTP}.
+# Do NOT list them in "forwardPorts": VS Code would then open its own listener
+# on the Windows/host side for the same numbers, and on WSL2 with
+# networkingMode=mirrored that listener occupies the port inside WSL too, so
+# the next "docker compose up" fails with
+# "failed to bind host port 0.0.0.0:<port>/tcp: address already in use".
+# The container-side ports are told to "ignore" so the auto-forwarder does not
+# grab them either.
+PORT_ATTRIBUTES_JSON="    \"3000\": {
+      \"label\": \"HTTP Web UI (published as localhost:${HOST_PORT_HTTP})\",
+      \"onAutoForward\": \"ignore\"
     },
-    \"${HOST_PORT_HTTP}\": {
-      \"label\": \"HTTP Web UI\",
-      \"onAutoForward\": \"silent\"
+    \"3001\": {
+      \"label\": \"HTTPS Web UI (published as localhost:${HOST_PORT_SSL})\",
+      \"onAutoForward\": \"ignore\"
     }"
 
 # devcontainer.json
@@ -279,9 +277,6 @@ cat > .devcontainer/devcontainer.json << EOF
   "overrideCommand": false,
   "shutdownAction": "none",
   "initializeCommand": "cd \${localWorkspaceFolder:-${PWD}} && bash .devcontainer/initialize.sh",
-  "forwardPorts": [
-${FORWARD_PORTS_JSON}
-  ],
   "portsAttributes": {
 ${PORT_ATTRIBUTES_JSON}
   },
@@ -380,6 +375,7 @@ services:
       - MESA_LOADER_DRIVER_OVERRIDE=\${RUNTIME_MESA_LOADER_DRIVER_OVERRIDE}
       - MESA_D3D12_DEFAULT_ADAPTER_NAME=\${RUNTIME_MESA_D3D12_DEFAULT_ADAPTER_NAME}
       - LIBGL_ALWAYS_SOFTWARE=\${RUNTIME_LIBGL_ALWAYS_SOFTWARE}
+      - LIBGL_KOPPER_DISABLE=\${RUNTIME_LIBGL_KOPPER_DISABLE}
       - __GLX_VENDOR_LIBRARY_NAME=\${RUNTIME_GLX_VENDOR_LIBRARY_NAME}
       - __EGL_VENDOR_LIBRARY_FILENAMES=\${RUNTIME_EGL_VENDOR_LIBRARY_FILENAMES}
       - PIXELFLUX_WAYLAND=\${PIXELFLUX_WAYLAND:-false}

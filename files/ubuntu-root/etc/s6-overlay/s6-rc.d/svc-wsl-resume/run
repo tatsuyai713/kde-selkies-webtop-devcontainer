@@ -1,0 +1,6 @@
+#!/usr/bin/with-contenv bash
+# Only meaningful for the WSL2 pixelflux (Wayland) desktop.
+if [[ "${WSL_ENVIRONMENT,,}" != "true" || "${PIXELFLUX_WAYLAND,,}" != "true" ]]; then
+  exec sleep infinity
+fi
+exec /usr/local/bin/wsl-resume-watchdog.sh

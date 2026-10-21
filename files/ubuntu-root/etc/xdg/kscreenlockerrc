@@ -1,0 +1,4 @@
+# kde-selkies-webtop: no automatic screen lock in the remote container desktop
+[Daemon]
+Autolock=false
+LockOnResume=false

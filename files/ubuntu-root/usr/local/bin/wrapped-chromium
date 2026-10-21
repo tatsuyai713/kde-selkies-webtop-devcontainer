@@ -63,6 +63,23 @@ if [ "${WSL_ENVIRONMENT:-false}" = "true" ] && [ "${WSL_D3D12_PROFILE}" = "true"
   export NODEVICE_SELECT=1
   export VK_DRIVER_FILES=/dev/null
   export VK_ICD_FILENAMES=/dev/null
+  # Mesa's Kopper presentation path crashes GLX/EGL-on-X11 clients on WSL once the
+  # vgem render node exists ("failed to load driver: d3d12", then SIGSEGV in
+  # glXCreateContext). Chromium's ANGLE then gives up and runs with
+  # --use-gl=disabled (CPU rendering: choppy Chrome / VS Code). Without Kopper,
+  # Mesa uses its plain swrast presentation and GLX renders on D3D12 again.
+  export LIBGL_KOPPER_DISABLE=true
+  # XWayland runs without glamor on WSL (XWAYLAND_NO_GLAMOR, see startwm_wayland.sh).
+  # Mesa's GLX then hands ANGLE a GL 3.2 context by default and ANGLE refuses it
+  # ("GLES3 is unsupported") -> --use-gl=disabled. D3D12 really offers GL 4.6
+  # core; advertising it lets ANGLE run on the GPU (measured 59.6 vs 31 FPS on a
+  # full-window animation; ANGLE's EGL backend only reached 31.8).
+  export MESA_GL_VERSION_OVERRIDE="${MESA_GL_VERSION_OVERRIDE:-4.6}"
+  # Drop GPU caches written under a different (possibly broken) GL setup.
+  if [ -r /usr/local/lib/wsl-gpu-cache-guard.sh ]; then
+    . /usr/local/lib/wsl-gpu-cache-guard.sh
+    wsl_gpu_cache_guard "$(wsl_user_data_dir "${HOME}/.config/chromium" "$@")" "$(dirname "$(readlink -f "${BIN}")")/"
+  fi
   GPU_FLAGS=(
     --ozone-platform=x11
     --qt-version=6

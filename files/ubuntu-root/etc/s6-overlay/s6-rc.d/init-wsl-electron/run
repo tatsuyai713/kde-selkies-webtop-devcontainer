@@ -1,0 +1,6 @@
+#!/usr/bin/with-contenv bash
+# Container start: route every installed Chromium/Electron app (including ones
+# installed after the image was built, e.g. VS Code from a .deb) through
+# wsl-electron-x11 via system-wide menu overrides in /usr/local/share/applications.
+# Harmless outside WSL2 (the wrapper then starts apps unchanged).
+/usr/local/bin/wsl-electron-desktop-overrides --system || true

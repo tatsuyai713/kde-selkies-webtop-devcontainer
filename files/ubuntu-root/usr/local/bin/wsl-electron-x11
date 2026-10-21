@@ -1,0 +1,55 @@
+#!/bin/bash
+# wsl-electron-x11 <electron-app> [args...] - start a Chromium/Electron app
+# (VS Code, ...) with the WSL2 GPU presentation policy used for Chrome.
+#
+# On the WSL2 D3D12 profiles (nvidia-wsl / intel-wsl / amd-wsl), Chromium's
+# native Ozone/Wayland path shares buffers through the virtual vgem GBM/dmabuf
+# node, and its synchronisation is extremely slow in this nested compositor:
+# editor windows repaint with long delays even though GPU rendering works.
+# Presenting through XWayland (--ozone-platform=x11) avoids that bottleneck
+# while ANGLE keeps rendering on Mesa D3D12 (the GPU selected by the profile).
+# Vulkan is kept off as for Chrome (WSL's D3D12 Vulkan path is unstable).
+# Anywhere else the app is started unchanged.
+set -e
+[ $# -ge 1 ] || { echo "usage: $0 <electron-app> [args...]" >&2; exit 2; }
+APP="$1"; shift
+case "${ENCODER:-${GPU_VENDOR:-}}" in
+  intel-wsl|nvidia-wsl|amd-wsl) PROFILE=wsl ;;
+  *) PROFILE=other ;;
+esac
+if [ "${WSL_ENVIRONMENT:-false}" != "true" ] || [ "${PROFILE}" != "wsl" ] || [ "${WSL_ELECTRON_WAYLAND:-0}" = "1" ]; then
+  exec "${APP}" "$@"
+fi
+export NODEVICE_SELECT=1 VK_DRIVER_FILES=/dev/null VK_ICD_FILENAMES=/dev/null
+# Mesa's Kopper presentation path crashes GLX/EGL-on-X11 clients on WSL once the
+# vgem render node exists ("failed to load driver: d3d12", then SIGSEGV in
+# glXCreateContext). Chromium's ANGLE then gives up and runs with
+# --use-gl=disabled (CPU rendering: choppy Chrome / VS Code). Without Kopper,
+# Mesa uses its plain swrast presentation and GLX renders on D3D12 again.
+export LIBGL_KOPPER_DISABLE=true
+# XWayland runs without glamor on WSL (XWAYLAND_NO_GLAMOR, see startwm_wayland.sh).
+# Mesa's GLX then hands ANGLE a GL 3.2 context by default and ANGLE refuses it
+# ("GLES3 is unsupported") -> --use-gl=disabled. D3D12 really offers GL 4.6
+# core; advertising it lets ANGLE run on the GPU (measured 59.6 vs 31 FPS on a
+# full-window animation; ANGLE's EGL backend only reached 31.8).
+export MESA_GL_VERSION_OVERRIDE="${MESA_GL_VERSION_OVERRIDE:-4.6}"
+# Drop GPU caches written under a different GL setup (VS Code: ~/.config/Code).
+if [ -r /usr/local/lib/wsl-gpu-cache-guard.sh ]; then
+  . /usr/local/lib/wsl-gpu-cache-guard.sh
+  case "$(basename "$(readlink -f "${APP}")")" in
+    code|code-insiders|bin) _ud="${HOME}/.config/Code" ;;
+    *) _ud="${HOME}/.config/$(basename "$(dirname "$(readlink -f "${APP}")")")" ;;
+  esac
+  case "${APP}" in */code-insiders*) _ud="${HOME}/.config/Code - Insiders" ;; esac
+  wsl_gpu_cache_guard "$(wsl_user_data_dir "${_ud}" "$@")" "$(dirname "$(readlink -f "${APP}")")/"
+  unset _ud
+fi
+if [ -z "${DISPLAY:-}" ]; then export DISPLAY=:0; fi
+exec "${APP}" \
+  --ozone-platform=x11 \
+  --enable-gpu-rasterization \
+  --disable-lcd-text \
+  --use-gl=angle --use-angle=gl \
+  --use-vulkan=disabled \
+  --disable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,SkiaGraphite,WebGPU,WebGPUService \
+  "$@"

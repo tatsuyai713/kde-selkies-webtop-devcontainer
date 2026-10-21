@@ -693,6 +693,59 @@ COPY --chmod=644 ubuntu-root/usr/local/lib/pulse-runtime.sh /usr/local/lib/pulse
 COPY --chmod=755 ubuntu-root/etc/s6-overlay/s6-rc.d/init-adduser/run /etc/s6-overlay/s6-rc.d/init-adduser/run
 COPY --chmod=755 ubuntu-root/etc/s6-overlay/s6-rc.d/svc-pulseaudio/run /etc/s6-overlay/s6-rc.d/svc-pulseaudio/run
 
+# WSL2: svc-wsl-resume reports Windows sleep/resume (VM pause detected from
+# wall clock vs boot clock). Log-only by default; WSL_RESUME_RESTART=true
+# makes it restart svc-selkies (and with it the Plasma session) after resume.
+# Idle dim / screen-off / auto-sleep / auto-lock are off by default
+# (system-wide defaults, users can still override them).
+COPY --chmod=755 ubuntu-root/usr/local/bin/wsl-resume-watchdog.sh /usr/local/bin/wsl-resume-watchdog.sh
+# Electron apps (VS Code) on WSL2: present through XWayland like Chrome, see
+# wsl-electron-x11. "code" in /usr/local/bin shadows the package's /usr/bin/code.
+COPY --chmod=755 ubuntu-root/usr/local/bin/wsl-electron-x11 /usr/local/bin/wsl-electron-x11
+COPY --chmod=755 ubuntu-root/usr/local/bin/wsl-electron-desktop-overrides /usr/local/bin/wsl-electron-desktop-overrides
+COPY --chmod=755 ubuntu-root/usr/local/bin/code /usr/local/bin/code
+COPY --chmod=644 ubuntu-root/usr/local/lib/wsl-gpu-cache-guard.sh /usr/local/lib/wsl-gpu-cache-guard.sh
+COPY --chmod=644 ubuntu-root/etc/profile.d/wsl-gl.sh /etc/profile.d/wsl-gl.sh
+COPY --chmod=755 ubuntu-root/etc/s6-overlay/s6-rc.d/init-wsl-electron/run /etc/s6-overlay/s6-rc.d/init-wsl-electron/run
+COPY --chmod=644 ubuntu-root/etc/s6-overlay/s6-rc.d/init-wsl-electron/type /etc/s6-overlay/s6-rc.d/init-wsl-electron/type
+COPY --chmod=644 ubuntu-root/etc/s6-overlay/s6-rc.d/init-wsl-electron/up /etc/s6-overlay/s6-rc.d/init-wsl-electron/up
+COPY --chmod=755 ubuntu-root/etc/s6-overlay/s6-rc.d/svc-wsl-resume/run /etc/s6-overlay/s6-rc.d/svc-wsl-resume/run
+COPY --chmod=644 ubuntu-root/etc/s6-overlay/s6-rc.d/svc-wsl-resume/type /etc/s6-overlay/s6-rc.d/svc-wsl-resume/type
+COPY --chmod=644 ubuntu-root/etc/xdg/powerdevilrc /etc/xdg/powerdevilrc
+COPY --chmod=644 ubuntu-root/etc/xdg/kscreenlockerrc /etc/xdg/kscreenlockerrc
+RUN set -eux; \
+  mkdir -p /etc/s6-overlay/s6-rc.d/svc-wsl-resume/dependencies.d /etc/s6-overlay/s6-rc.d/user/contents.d; \
+  touch /etc/s6-overlay/s6-rc.d/svc-wsl-resume/dependencies.d/svc-selkies; \
+  touch /etc/s6-overlay/s6-rc.d/user/contents.d/svc-wsl-resume; \
+  mkdir -p /etc/s6-overlay/s6-rc.d/init-wsl-electron/dependencies.d; \
+  touch /etc/s6-overlay/s6-rc.d/init-wsl-electron/dependencies.d/init-config \
+        /etc/s6-overlay/s6-rc.d/user/contents.d/init-wsl-electron \
+        /etc/s6-overlay/s6-rc.d/svc-de/dependencies.d/init-wsl-electron; \
+  /usr/local/bin/wsl-electron-desktop-overrides --system
+RUN set -eux; \
+  for f in /usr/local/bin/wsl-electron-x11 /usr/local/bin/wsl-electron-desktop-overrides /usr/local/bin/code \
+           /usr/local/bin/wsl-resume-watchdog.sh /etc/s6-overlay/s6-rc.d/svc-wsl-resume/run; do \
+    test -x "$f"; bash -n "$f"; \
+  done; \
+  test -f /etc/s6-overlay/s6-rc.d/user/contents.d/svc-wsl-resume; \
+  grep -q '^AutoSuspendAction=0' /etc/xdg/powerdevilrc; \
+  grep -q '^Autolock=false' /etc/xdg/kscreenlockerrc; \
+  grep -q 'GL_ARB_timer_query' /defaults/startwm_wayland.sh; \
+  grep -q 'wsl-electron-desktop-overrides' /defaults/startwm_wayland.sh; \
+  grep -q 'LIBGL_KOPPER_DISABLE=true' /defaults/startwm_wayland.sh; \
+  grep -q 'LIBGL_KOPPER_DISABLE=true' /usr/local/bin/google-chrome-wrapped; \
+  grep -q 'LIBGL_KOPPER_DISABLE=true' /usr/local/bin/wrapped-chromium; \
+  grep -q 'LIBGL_KOPPER_DISABLE=true' /usr/local/bin/wsl-electron-x11; \
+  grep -q 'XWAYLAND_NO_GLAMOR=1' /defaults/startwm_wayland.sh; \
+  grep -q 'MESA_GL_VERSION_OVERRIDE' /usr/local/bin/google-chrome-wrapped; \
+  grep -q 'MESA_GL_VERSION_OVERRIDE' /usr/local/bin/wrapped-chromium; \
+  grep -q 'MESA_GL_VERSION_OVERRIDE' /usr/local/bin/wsl-electron-x11; \
+  grep -q 'wsl_gpu_cache_guard' /usr/local/bin/google-chrome-wrapped; \
+  test -r /usr/local/lib/wsl-gpu-cache-guard.sh; \
+  test -f /etc/s6-overlay/s6-rc.d/user/contents.d/init-wsl-electron; \
+  test -r /etc/profile.d/wsl-gl.sh; \
+  echo "WSL desktop fixes present"
+
 # Same reasoning for svc-selkies/run (audio endpoint and XKB_DEFAULT_* export)
 # and for the selkies keymap patch below: both live in the base image, so apply
 # them here too so a user-image rebuild is enough.
@@ -718,3 +771,38 @@ RUN set -eux; \
   gcc -shared -fPIC -O2 -Wall -o /usr/local/lib/kwin-d3d12-noscanout.so /usr/local/src/kwin-d3d12-noscanout.c -ldl; \
   chmod 755 /usr/local/lib/kwin-d3d12-noscanout.so; \
   if [ -x /usr/bin/kwin_wayland ]; then setcap -r /usr/bin/kwin_wayland || true; fi
+
+COPY glycin-bwrap-shim /usr/local/libexec/glycin-bwrap-shim
+# Ubuntu 25.10+ gdk-pixbuf loads every image through glycin, whose loaders run
+# in a bubblewrap sandbox. This container runs privileged (seccomp and AppArmor
+# unconfined), and on a host with kernel.apparmor_restrict_unprivileged_userns=1
+# an unconfined unprivileged process may create a user namespace but gets no
+# capabilities in it: bwrap fails after the fact ("setting up uid map:
+# Permission denied", "loopback: Failed RTM_NEWADDR"). glycin only falls back
+# to running loaders unsandboxed when namespace creation itself is refused (as
+# under Docker's default seccomp profile), so here every icon and PNG load
+# fails and GTK applications such as STM32CubeIDE abort in gtkiconhelper.c
+# right after the workspace chooser, before the main window appears. glycin has
+# no switch to skip the sandbox, so divert bwrap and let the shim execute glycin
+# loaders directly; every other bwrap caller still reaches the real binary.
+# Verified with the IDE under Xvfb in a container started with
+# --security-opt seccomp=unconfined --security-opt apparmor=unconfined.
+RUN set -eux; \
+  chmod 755 /usr/local/libexec/glycin-bwrap-shim; \
+  bash -n /usr/local/libexec/glycin-bwrap-shim; \
+  if dpkg -s glycin-loaders >/dev/null 2>&1 && [ -x /usr/bin/bwrap ] && [ ! -e /usr/bin/bwrap.distrib ]; then \
+    dpkg-divert --local --rename --add /usr/bin/bwrap; \
+    test -x /usr/bin/bwrap.distrib; \
+    ln -sf /usr/local/libexec/glycin-bwrap-shim /usr/bin/bwrap; \
+    # a non-glycin command is passed through to the real bwrap
+    /usr/bin/bwrap --version | grep -q '^bubblewrap'; \
+    # a glycin-style command line runs the loader directly with glycin's env
+    LOADER_DIR="$(ls -d /usr/libexec/glycin-loaders/* | head -1)"; \
+    printf '%s\n' '#!/bin/sh' 'printf "%s|%s|%s|%s\n" "$HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$*"' > "${LOADER_DIR}/.shim-selftest"; \
+    chmod 755 "${LOADER_DIR}/.shim-selftest"; \
+    OUT="$(HOME=/root /usr/bin/bwrap --unshare-all --die-with-parent --chdir / --ro-bind /usr /usr --dev /dev --tmpfs /tmp-home --tmpfs /tmp-run --clearenv --setenv HOME /tmp-home --setenv XDG_RUNTIME_DIR /tmp-run --setenv XDG_RUNTIME_DIR /run/user/0 --symlink /usr/lib64 /lib64 --ro-bind-try /etc/fonts/conf.d /etc/fonts/conf.d --bind-try /tmp/xc /tmp/xc --setenv XDG_CACHE_HOME /tmp/xc --seccomp 128 "${LOADER_DIR}/.shim-selftest" --dbus-fd 127)"; \
+    rm -f "${LOADER_DIR}/.shim-selftest"; \
+    test "${OUT}" = "/root|/tmp/xc|/run/user/0|--dbus-fd 127"; \
+  else \
+    echo "glycin-loaders not installed (or bwrap already diverted); keeping the distribution bwrap"; \
+  fi

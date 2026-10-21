@@ -209,7 +209,7 @@ shared_collect_interactive_settings() {
     echo "  3) NVIDIA WSL2 (NVENC)"
     echo "  4) Intel (VA-API)"
     echo "  5) AMD (VA-API)"
-    echo "  6) Intel WSL2 (CPU rendering + x264; Intel D3D12 path is unstable, see README)"
+    echo "  6) Intel WSL2 (VA-API via Mesa D3D12, isolated FFmpeg encoder)"
     echo "  7) AMD WSL2 (VA-API via Mesa D3D12)"
     shared_prompt_choice_default encoder_choice "Select [1-7]" "${default_encoder_choice}" '^[1-7]$'
 
@@ -382,45 +382,37 @@ shared_collect_interactive_settings() {
 }
 
 # WSL2 exposes the GPU as /dev/dxg and provides no DRM render node out of the
-# box; vgem ships as a module that nothing loads. The desktop needs that node:
+# box; Microsoft's stock kernels since 6.18 have no DRM/vgem at all. The desktop needs that node:
 # without /dev/dri pixelflux keeps its framebuffer on the CPU and does not
 # advertise linux-dmabuf, so KWin can only run the QPainter software compositor
 # (no desktop effects, CPU-bound WebGL, high host load). With vgem loaded and
 # the kwin-d3d12-noscanout shim in the image, KWin composites on the real GPU
 # ("Compositing Type: OpenGL", renderer "D3D12 (NVIDIA ...)").
 shared_ensure_wsl_render_node() {
+    # $1 (or $ENCODER): the selected encoder profile. Only the WSL2 GPU profiles
+    # (nvidia-wsl / intel-wsl / amd-wsl) need the render node; "software" and
+    # the native-Linux profiles return immediately.
+    local encoder="${1:-${ENCODER:-}}"
     grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || return 0
+    case "${encoder}" in *-wsl) ;; *) return 0 ;; esac
     [ -e /dev/dri/renderD128 ] && return 0
 
-    echo "WSL2 host without a DRM render node (/dev/dri) detected."
-    if ! modinfo vgem >/dev/null 2>&1; then
-        echo "  WARNING: the vgem kernel module is not available on this kernel."
-        echo "           The desktop will run on software compositing."
-        echo ""
-        return 0
-    fi
-
-    echo "  The vgem module provides /dev/dri/renderD128, which the desktop needs"
-    echo "  for GPU compositing. Loading it requires sudo."
-    if shared_prompt_yes_no_default "Load vgem now?" "yes"; then
-        if sudo modprobe vgem && [ -e /dev/dri/renderD128 ]; then
-            echo "  Loaded: $(ls /dev/dri 2>/dev/null | tr '\n' ' ')"
-            if [ ! -f /etc/modules-load.d/vgem.conf ]; then
-                if printf 'vgem\n' | sudo tee /etc/modules-load.d/vgem.conf >/dev/null; then
-                    echo "  Persisted to /etc/modules-load.d/vgem.conf."
-                    if [ "$(ps -p 1 -o comm= 2>/dev/null)" != "systemd" ]; then
-                        echo "  NOTE: this distro does not boot systemd, so modules-load.d is ignored."
-                        echo "        Add this to /etc/wsl.conf instead and run 'wsl --shutdown':"
-                        echo "            [boot]"
-                        echo "            command = modprobe vgem"
-                    fi
-                fi
-            fi
+    local here
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    echo "WSL2 profile '${encoder}' selected, but the host has no DRM render node (/dev/dri)."
+    echo "  GPU compositing (desktop effects, GPU WebGL) needs it; without it KWin uses the"
+    echo "  QPainter software compositor. ${here}/setup-wsl-host.sh prepares the host:"
+    echo "  it loads vgem, or - on Microsoft's stock kernel, which has no DRM - installs/builds"
+    echo "  the DRM + vgem modules for this kernel (sudo; a build takes 15-30 min)."
+    if shared_prompt_yes_no_default "Run the WSL host setup now?" "yes"; then
+        if "${here}/setup-wsl-host.sh"; then
+            echo ""
         else
-            echo "  WARNING: could not load vgem; the desktop will run on software compositing." >&2
+            echo "  WARNING: the host setup did not complete; the desktop will run on software compositing." >&2
+            echo "           Re-run ${here}/setup-wsl-host.sh and then regenerate the container configuration." >&2
         fi
     else
-        echo "  Skipped. Run 'sudo modprobe vgem' before starting the container for GPU compositing."
+        echo "  Skipped. Run ${here}/setup-wsl-host.sh later and regenerate the container configuration."
     fi
     echo ""
 }

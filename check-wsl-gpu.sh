@@ -27,12 +27,12 @@ done
 if [ -e /dev/dri/card0 ]; then
   pass '/dev/dri/card0 is present (documented WSL VA-API node)'
 else
-  fail '/dev/dri/card0 is missing; load vgem before creating the container'
+  fail '/dev/dri/card0 is missing; the kernel has no DRM/vgem - run build-wsl-modules.sh --install, then recreate the container'
 fi
 if [ -e /dev/dri/renderD128 ]; then
   pass '/dev/dri/renderD128 is present'
 else
-  fail '/dev/dri/renderD128 is missing; load vgem before creating the container'
+  fail '/dev/dri/renderD128 is missing; the kernel has no DRM/vgem - run build-wsl-modules.sh --install, then recreate the container'
 fi
 
 if command -v powershell.exe >/dev/null 2>&1; then

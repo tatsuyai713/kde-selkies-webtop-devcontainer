@@ -1,0 +1,72 @@
+#!/bin/bash
+# bwrap front end that runs glycin image loaders without a sandbox.
+#
+# Ubuntu 25.10+ routes every gdk-pixbuf/GTK image load through glycin, which
+# starts each loader inside a bubblewrap sandbox. This container runs
+# privileged (seccomp and AppArmor unconfined); on a host with
+# kernel.apparmor_restrict_unprivileged_userns=1 the desktop user can create a
+# user namespace but gets no capabilities in it, so bwrap fails after the fact
+# ("setting up uid map: Permission denied", "loopback: Failed RTM_NEWADDR").
+# glycin falls back to unsandboxed loaders only when namespace creation itself
+# is refused, so here every icon and PNG fails to load and GTK applications
+# such as STM32CubeIDE abort in gtkiconhelper.c before their main window
+# appears. glycin has no switch to skip the sandbox, so this script (installed
+# as /usr/bin/bwrap through dpkg-divert) executes glycin loaders directly with
+# the environment glycin asked for. Any other bwrap invocation is handed to the
+# real binary unchanged.
+set -u
+
+REAL_BWRAP=/usr/bin/bwrap.distrib
+if [ ! -x "${REAL_BWRAP}" ]; then
+  REAL_BWRAP=/usr/bin/bwrap
+fi
+
+args=("$@")
+n=${#args[@]}
+i=0
+declare -a env_assign=()
+chdir=""
+while [ "$i" -lt "$n" ]; do
+  a="${args[$i]}"
+  case "$a" in
+    --) i=$((i + 1)); break ;;
+    --setenv) env_assign+=("${args[$((i + 1))]}=${args[$((i + 2))]}"); i=$((i + 3)) ;;
+    --unsetenv) env_assign+=("-u" "${args[$((i + 1))]}"); i=$((i + 2)) ;;
+    --chdir) chdir="${args[$((i + 1))]}"; i=$((i + 2)) ;;
+    # options taking three arguments
+    --overlay) i=$((i + 4)) ;;
+    # options taking two arguments
+    --bind|--bind-try|--dev-bind|--dev-bind-try|--ro-bind|--ro-bind-try|--symlink|--file|--bind-data|--ro-bind-data|--bind-fd|--ro-bind-fd|--overlay-src|--tmp-overlay|--ro-overlay|--chmod)
+      i=$((i + 3)) ;;
+    # options taking one argument
+    --tmpfs|--dev|--proc|--mqueue|--dir|--remount-ro|--seccomp|--add-seccomp-fd|--args|--argv0|--exec-label|--file-label|--uid|--gid|--hostname|--userns|--userns2|--pidns|--sync-fd|--block-fd|--userns-block-fd|--info-fd|--json-status-fd|--lock-file|--cap-add|--cap-drop|--perms|--size|--level-prefix)
+      i=$((i + 2)) ;;
+    # flags without arguments (--unshare-*, --clearenv, --die-with-parent, --new-session, ...)
+    --*) i=$((i + 1)) ;;
+    *) break ;;
+  esac
+done
+
+if [ "$i" -ge "$n" ]; then
+  exec "${REAL_BWRAP}" "$@"
+fi
+cmd=("${args[@]:$i}")
+case "${cmd[0]}" in
+  /usr/libexec/glycin-loaders/*|/usr/lib/*/glycin-loaders/*) ;;
+  *) exec "${REAL_BWRAP}" "$@" ;;
+esac
+
+# Keep the caller's environment (glycin's --clearenv only matters inside the
+# sandbox) and apply its --setenv/--unsetenv requests, except the placeholders
+# for the sandbox-private home and runtime directories, which do not exist here.
+declare -a env_args=()
+for kv in "${env_assign[@]}"; do
+  case "$kv" in
+    HOME=/tmp-home|XDG_RUNTIME_DIR=/tmp-run) ;;
+    *) env_args+=("$kv") ;;
+  esac
+done
+if [ -n "$chdir" ]; then
+  cd "$chdir" || exit 1
+fi
+exec env "${env_args[@]}" "${cmd[@]}"

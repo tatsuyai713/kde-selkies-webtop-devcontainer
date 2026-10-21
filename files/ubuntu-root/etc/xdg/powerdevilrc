@@ -1,0 +1,33 @@
+# kde-selkies-webtop: the desktop is a remote container session. Idle dimming,
+# screen blanking (DPMS) and sleep have no meaning here: the container cannot
+# suspend, and blanking only stalls the stream. Users can still override this
+# in System Settings (~/.config/powerdevilrc wins over this file).
+[AC][Display]
+DimDisplayWhenIdle=false
+TurnOffDisplayWhenIdle=false
+LockBeforeTurnOffDisplay=false
+
+[AC][SuspendAndShutdown]
+AutoSuspendAction=0
+LidAction=0
+PowerButtonAction=0
+
+[Battery][Display]
+DimDisplayWhenIdle=false
+TurnOffDisplayWhenIdle=false
+LockBeforeTurnOffDisplay=false
+
+[Battery][SuspendAndShutdown]
+AutoSuspendAction=0
+LidAction=0
+PowerButtonAction=0
+
+[LowBattery][Display]
+DimDisplayWhenIdle=false
+TurnOffDisplayWhenIdle=false
+LockBeforeTurnOffDisplay=false
+
+[LowBattery][SuspendAndShutdown]
+AutoSuspendAction=0
+LidAction=0
+PowerButtonAction=0

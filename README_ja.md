@@ -106,7 +106,7 @@
 
 **WSL2 + Intel / AMD**
 ```bash
-sudo modprobe vgem                        # 仮想 DRM レンダーノード（各スクリプトも対話的に提案）
+./setup-wsl-host.sh                       # WSL2 ホスト準備: DRM + vgem モジュールを配置/ビルド（stock WSL2 カーネルには DRM/vgem が無い）。WSL 系プロファイル選択時は各スクリプトが提案
 ./start-container.sh --encoder intel-wsl  # Docker GPU は「None」。--all は指定しない
 ```
 
@@ -225,9 +225,9 @@ test -c /dev/dxg && echo "OK: /dev/dxg"
 test -f /usr/lib/wsl/lib/libd3d12.so && echo "OK: libd3d12.so"
 test -f /usr/lib/wsl/lib/libdxcore.so && echo "OK: libdxcore.so"
 
-# vgemとDRMノード。再起動後も必要なら /etc/modules-load.d/vgem.conf に vgem を記載
-sudo modprobe vgem
+# vgemとDRMノード（stock WSL2 カーネルは ./setup-wsl-host.sh で導入。WSL 再起動後の復元は wsl-kernel-modules.service）
 ls -l /dev/dri/renderD128
+files/wsl-kernel/wsl-kernel-modules.sh status
 
 # Docker daemonと容量
 docker version
@@ -625,6 +625,10 @@ sudo update-ca-certificates
 # Google Chrome/ChromiumはOSとは別のNSS信頼DBを使用するため、こちらも実行
 ./trust-local-ca-chrome.sh
 
+# WSL2: Windows側のChrome/Edgeから使う場合は、Windowsの「信頼されたルート証明機関」（現在のユーザー）へ登録
+# （Windowsのセキュリティ警告で拇印を確認して「はい」。解除は --remove）
+./trust-local-ca-windows.sh
+
 ./start-container.sh --encoder nvidia --all   # ssl/ を自動検出
 ```
 
@@ -748,10 +752,10 @@ docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pact
 - Plasma 5のX11 session（Ubuntu 22.04/24.04、Xvfb上）にはcompositor scalingがないため、`startwm.sh`はPlasma 5のX11標準の方式でXのfont DPIを唯一の基準にする。`forceFontDPI`を`DPI`に設定し（startplasma-x11が`Xft.dpi`へ書き込み、kde-gtk-configがxsettingsd経由でGTKへ配布）、Qtアプリには`QT_SCREEN_SCALE_FACTORS=<DPI/96>`を渡す（logical DPIも同じ係数で割られるためフォントは二重に拡大されない）。`GDK_SCALE=1`とし、`QT_SCALE_FACTOR`、`QT_FONT_DPI`、`GDK_DPI_SCALE`は設定しない。従来の`QT_SCALE_FACTOR`+`QT_FONT_DPI=96`+`GDK_SCALE=2`の組み合わせでは、パネルとデスクトップアイコンが等倍のまま（Plasma 5の`plasmashell`はX11でQt scalingを無視しfont DPIに従う）、KWinの装飾も等倍のまま（`kwin_x11`もfont DPIにのみ従う）、Chromium/Chrome/Electron（VS Code）は3.0倍（`GDK_SCALE`とfont DPIを掛け合わせる）になっていた。ブラウザやアプリのwrapperで`--force-device-scale-factor`を付与することはしない。Plasma 6（Ubuntu 26.04）はWaylandで動作するため影響しない。
 - `nvidia`のXvfb profileでは、X11 sessionがデスクトップから起動するアプリにGPU OpenGLを継承させるため`plasmashell`をZinkで再起動する。この再起動（およびkwin_x11/plasmashellの監視による再起動）は、稼働中のPlasma sessionプロセスの環境変数を引き継いで行う。startplasma-x11は自身の子プロセスにだけ`~/.config/kdedefaults`を含む`XDG_CONFIG_DIRS`を渡すため、これがないと再起動後のshellは選択したグローバルテーマを無視し（汎用ランチャーアイコン、Breeze Light配色）、同じ不完全な環境を全アプリへ渡していた。Zinkのshellはさらに`QT_XCB_GL_INTEGRATION=xcb_egl`を使う。GLXではタスクマネージャのウィンドウサムネイルが`GLX_EXT_texture_from_pixmap`を経由し、そのコピーがNVIDIA Vulkanドライバ内でクラッシュしていた（タスクボタンにポインタを乗せた直後にplasmashellがSIGSEGV）。EGLではサムネイルがウィンドウアイコンへフォールバックし、描画はZinkのまま維持される。plasmashellの監視はKCrash/drkonqi待ちで停止（またはdefunct）したshellも停止扱いにして再起動し、Zink再起動は`plasmashell --replace`の競合（shellが1つも残らず黒画面になる）を避けて旧shellの終了を待ってから起動する。
 - 全GPUプロセス停止後も両方のVAドライバーが`vaInitialize ... resource allocation failed`になる場合、WSL VMの`/dev/dxg`がfault状態にある。Docker再起動ではホストデバイスをresetできない。Windows PowerShellで`wsl --shutdown`を実行し、distributionを起動し直してから`./check-wsl-gpu.sh`を実行する。この状態で永続コンテナの再作成やイメージ再buildは不要。
-- vgem 未ロード（ホストで `sudo modprobe vgem`）の場合は `/dev/dri` が無いため、KWin はソフトウェア合成となり `intel-wsl` / `amd-wsl` もソフトウェアエンコードにフォールバック
+- `/dev/dri` が無い（DRM/vgem 無しの stock カーネル）場合は、KWin はソフトウェア合成となり `intel-wsl` / `amd-wsl` もソフトウェアエンコードにフォールバック
 - WSL GPUデスクトップでは、OpenGL/WebGLのD3D12高速化に不要で、検証済みIntel/NVIDIA WSL stackのdevice-select/Dozen経路でfault報告があるためVulkanを無効化する
 - Plasma文字消失のA/B試験では、GPU版Qt Quickだけで再現し、Folder Viewの`DropShadow` FBO無効化と`Text.NativeRendering`でも改善しなかった。Qt Quickの文字テクスチャとMesa D3D12間の問題であり、QML単体の修正ではない。Ubuntu標準Mesa 26.0.8はdznを同梱せず、Kisak 26.2.2のdznを隔離試験した場合もIntel UMD内の`vkCreateDevice`でSIGSEGVしたため、Vulkan RHIへの切替も現在は採用しない
-- **GPU 合成（デスクトップエフェクト）には DRM レンダーノードが必要。** WSL2 は GPU を `/dev/dxg` としてのみ公開し `/dev/dri` を作らないため、そのままでは pixelflux が linux-dmabuf を公開できず KWin は QPainter（ソフトウェア合成：OpenGL エフェクト無効、WebGL は CPU 描画、ホスト負荷が高い）に落ちる。ホストで `vgem` を読み込む（`sudo modprobe vgem`。永続化は `echo vgem | sudo tee /etc/modules-load.d/vgem.conf`、systemd 無しなら `/etc/wsl.conf` に `[boot] command = modprobe vgem`）。`start-container.sh` / `create-devcontainer-config.sh` は未読み込みを検出すると対話的に提案する。`/dev/dri` は存在する場合のみコンテナへ渡されるので、**コンテナ設定を生成する前に**ノードが必要
+- **GPU 合成（デスクトップエフェクト）には DRM レンダーノードが必要。** WSL2 は GPU を `/dev/dxg` としてのみ公開し `/dev/dri` を作らないため、そのままでは pixelflux が linux-dmabuf を公開できず KWin は QPainter（ソフトウェア合成：OpenGL エフェクト無効、WebGL は CPU 描画、ホスト負荷が高い）に落ちる。Microsoft 配布の WSL2 カーネルは `# CONFIG_DRM is not set` で `vgem` モジュールも無いため、`build-wsl-modules.sh --install` で同バージョンのソースから `drm.ko` / `drm_shmem_helper.ko` / `vgem.ko`（と `files/wsl-kernel/*.patch` のドライバ）をビルドし `/lib/modules/<release>` に配置する（カーネル本体は stock のまま。`wsl --update` でカーネルが変わるたびに再実行）。WSL は `/lib/modules/<release>` を VM 側の overlay として起動のたびに作り直すため、そこへコピーしただけのモジュールは `wsl --shutdown` / Windows 再起動で消える。そこでモジュールをディストリ内の `/var/lib/wsl-kernel-modules/<release>/` に保存し、`wsl-kernel-modules.service`（`files/wsl-kernel/wsl-kernel-modules.sh`）が毎起動時に docker より前に書き戻して `modprobe vgem` する。状態確認は `files/wsl-kernel/wsl-kernel-modules.sh status`、ログは `journalctl -b -u wsl-kernel-modules`。`start-container.sh` / `create-devcontainer-config.sh` は WSL 系プロファイル選択時に `/dev/dri` が無いと `setup-wsl-host.sh` の実行を提案する。`/dev/dri` は存在する場合のみコンテナへ渡されるので、**コンテナ設定を生成する前に**ノードが必要
 - **KWin 6.6 + Mesa d3d12 には `kwin-d3d12-noscanout` シムが必要**（[ソース](files/ubuntu-root/usr/local/src/kwin-d3d12-noscanout.c)）。KWin は gbm バッファを `GBM_BO_USE_SCANOUT` 付きで確保するが d3d12 ドライバはこれを拒否するため、レンダーノードがあると KWin は OpenGL を選んだ後に毎フレーム失敗していた（`Could not find a suitable render format` → 黒画面）。ユーザーイメージでシムをビルドし、`kwin_wayland` の `cap_sys_nice` を外し（glibc が `LD_PRELOAD` を無視するため）、`startwm_wayland.sh` は `/dev/dri/renderD128` とシムが揃えば `KWIN_COMPOSE=O2` + `LD_PRELOAD`、揃わなければ `KWIN_COMPOSE=Q` を使う
 - 確認はセッション内で `qdbus6 org.kde.KWin /KWin supportInformation`。`Compositing Type: OpenGL` / `OpenGL renderer string: D3D12 (Intel ...)` なら GPU 合成、`QPainter` なら vgem かシムが欠けている
 - 音声はPipeWire-Pulseの`output.monitor`をSelkiesが取り込む。`pactl list short source-outputs`に`output.monitor`向けの`python3`録音ストリームがあればサーバー側の音声Encodeは動作中。Plasmaのprivate `XDG_RUNTIME_DIR`とは別に`PULSE_SERVER`/`PIPEWIRE_REMOTE`を標準の`/run/user/<uid>`へ固定する

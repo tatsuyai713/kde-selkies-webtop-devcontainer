@@ -586,7 +586,7 @@ GPU_VENDOR="${ENCODER}"
 
 # Must run before the GPU branch below: /dev/dri is only passed through to the
 # container when the node already exists on the host.
-shared_ensure_wsl_render_node
+shared_ensure_wsl_render_node "${ENCODER}"
 
 DOCKER_MODE=$(echo "${DOCKER_MODE}" | tr '[:upper:]' '[:lower:]')
 case "${DOCKER_MODE}" in
@@ -786,6 +786,7 @@ add_wsl_d3d12_flags() {
     -e MESA_LOADER_DRIVER_OVERRIDE=d3d12
     -e MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-${default_adapter}}"
     -e LIBGL_ALWAYS_SOFTWARE=0
+    -e LIBGL_KOPPER_DISABLE=true
     -e LIBVA_DRIVER_NAME=d3d12
     -e __GLX_VENDOR_LIBRARY_NAME=mesa
     -e __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json

@@ -1,0 +1,6 @@
+#!/bin/bash
+# "code" CLI with the WSL2 presentation policy (see wsl-electron-x11).
+# /usr/local/bin comes before /usr/bin, so this survives VS Code package upgrades.
+REAL=/usr/share/code/bin/code
+[ -x "${REAL}" ] || { echo "VS Code is not installed (${REAL} missing)" >&2; exit 127; }
+exec /usr/local/bin/wsl-electron-x11 "${REAL}" "$@"
