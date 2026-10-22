@@ -497,11 +497,25 @@ RUN set -eux; \
     "/home/${USER_NAME}/Desktop/container-stop.desktop"; \
   rm -f /tmp/container-commit.desktop /tmp/container-flatten.desktop /tmp/container-stop.desktop
   
-# browser wrappers (Chromium on arm64, Chrome on amd64) to enforce flags even after package updates
+# browser wrappers (Chromium on arm64, Chrome on amd64) to enforce flags even after package updates.
+# Chromium's layer-1 sandbox needs the setuid helper /usr/lib/chromium/chrome-sandbox where
+# unprivileged user namespaces are denied (Ubuntu 24.04+ hosts); xtradeb ships it as the separate
+# package chromium-sandbox, installed here from the PPA the base image already carries. Without it
+# wrapped-chromium falls back to --no-sandbox on such hosts and says so.
 RUN <<'EOF'
 set -eux
 
 ARCH="$(dpkg --print-architecture)"
+if [ -x /usr/lib/chromium/chromium ] && ! [ -u /usr/lib/chromium/chrome-sandbox ]; then
+  apt-get update
+  if apt-cache show chromium-sandbox >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium-sandbox
+    test -u /usr/lib/chromium/chrome-sandbox
+  else
+    echo "chromium-sandbox is not available from the configured repositories; wrapped-chromium will fall back to --no-sandbox where user namespaces are denied"
+  fi
+  apt-get clean && rm -rf /var/lib/apt/lists/*
+fi
 if [ -x /usr/lib/chromium/chromium ] || [ -x /usr/bin/chromium ] || [ -x /usr/bin/chromium.distrib ]; then
   cat > /usr/local/bin/wrapped-chromium <<'EOF_WRAPPED_CHROMIUM'
 #!/bin/bash
@@ -548,8 +562,30 @@ if ! pgrep chromium > /dev/null; then
   rm -f $HOME/.config/chromium/Singleton*
 fi
 
-# Run with --no-sandbox (same as Chrome wrapper)
-exec ${BIN} ${DEFAULT_FLAGS} ${WSL_GPU_FLAGS} --no-sandbox "${EXTRA_FLAGS[@]}" "$@"
+# Chrome's own sandbox instead of --no-sandbox. Its layer 1 is either
+# unprivileged user namespaces or the setuid helper shipped next to the binary
+# (owned by root, mode 4755; usable while this process may still gain
+# privileges, i.e. no no_new_privs). Ubuntu 24.04+ hosts set
+# kernel.apparmor_restrict_unprivileged_userns=1, which denies user namespaces
+# to this AppArmor-unconfined container, and Chrome then uses the helper; both
+# paths were verified in the running container. Only when neither can work is
+# --no-sandbox added, so the browser still starts, and the fallback is reported.
+chrome_sandbox_usable() {
+  local helper
+  if ! grep -qs '^NoNewPrivs:[[:space:]]*1' /proc/self/status; then
+    for helper in "${CHROME_DEVEL_SANDBOX:-}" "$@"; do
+      [ -n "${helper}" ] && [ -u "${helper}" ] && [ -x "${helper}" ] \
+        && [ "$(stat -c %u "${helper}" 2>/dev/null)" = "0" ] && return 0
+    done
+  fi
+  unshare -Urn true 2>/dev/null
+}
+SANDBOX_FLAGS=()
+if ! chrome_sandbox_usable "$(dirname "$(readlink -f "${BIN}")")/chrome-sandbox" /usr/lib/chromium/chrome-sandbox; then
+  echo "wrapped-chromium: no usable Chrome sandbox (setuid helper or user namespaces); starting with --no-sandbox" >&2
+  SANDBOX_FLAGS=(--no-sandbox)
+fi
+exec ${BIN} ${DEFAULT_FLAGS} ${WSL_GPU_FLAGS} "${SANDBOX_FLAGS[@]}" "${EXTRA_FLAGS[@]}" "$@"
 EOF_WRAPPED_CHROMIUM
   chmod 755 /usr/local/bin/wrapped-chromium
 fi
@@ -615,7 +651,30 @@ elif [ -n "${WAYLAND_DISPLAY}" ] && [ -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
 else
   OZONE_FLAGS="--ozone-platform=x11"
 fi
-exec "${CHROME_BIN}" --password-store=basic ${OZONE_FLAGS} ${WSL_GPU_FLAGS} --no-sandbox ${CHROME_EXTRA_FLAGS} "$@"
+# Chrome's own sandbox instead of --no-sandbox. Its layer 1 is either
+# unprivileged user namespaces or the setuid helper shipped next to the binary
+# (owned by root, mode 4755; usable while this process may still gain
+# privileges, i.e. no no_new_privs). Ubuntu 24.04+ hosts set
+# kernel.apparmor_restrict_unprivileged_userns=1, which denies user namespaces
+# to this AppArmor-unconfined container, and Chrome then uses the helper; both
+# paths were verified in the running container. Only when neither can work is
+# --no-sandbox added, so the browser still starts, and the fallback is reported.
+chrome_sandbox_usable() {
+  local helper
+  if ! grep -qs '^NoNewPrivs:[[:space:]]*1' /proc/self/status; then
+    for helper in "${CHROME_DEVEL_SANDBOX:-}" "$@"; do
+      [ -n "${helper}" ] && [ -u "${helper}" ] && [ -x "${helper}" ] \
+        && [ "$(stat -c %u "${helper}" 2>/dev/null)" = "0" ] && return 0
+    done
+  fi
+  unshare -Urn true 2>/dev/null
+}
+SANDBOX_FLAGS=()
+if ! chrome_sandbox_usable "$(dirname "$(readlink -f "${CHROME_BIN}")")/chrome-sandbox" /opt/google/chrome/chrome-sandbox; then
+  echo "google-chrome-wrapped: no usable Chrome sandbox (setuid helper or user namespaces); starting with --no-sandbox" >&2
+  SANDBOX_FLAGS=(--no-sandbox)
+fi
+exec "${CHROME_BIN}" --password-store=basic ${OZONE_FLAGS} ${WSL_GPU_FLAGS} "${SANDBOX_FLAGS[@]}" ${CHROME_EXTRA_FLAGS} "$@"
 EOF_GCW
     chmod 755 /usr/local/bin/google-chrome-wrapped
     for chrome_bin in google-chrome-beta google-chrome-unstable; do
