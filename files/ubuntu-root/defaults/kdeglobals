@@ -1,11 +1,6 @@
-[KScreen]
-ScaleFactor=2
-ScreenScaleFactors=eDP-1=2;
+[$Version]
+update_info=filepicker.upd:filepicker-remove-old-previews-entry,fonts_global.upd:Fonts_Global,fonts_global_toolbar.upd:Fonts_Global_Toolbar,icons_remove_effects.upd:IconsRemoveEffects,kwin.upd:animation-speed,style_widgetstyle_default_breeze.upd:StyleWidgetStyleDefaultBreeze
 
-[General]
-fixed=Ubuntu Mono,13,-1,5,50,0,0,0,0,0
-font=Ubuntu,12,-1,5,50,0,0,0,0,0
-menuFont=Ubuntu,12,-1,5,50,0,0,0,0,0
-smallestReadableFont=Ubuntu,11,-1,5,50,0,0,0,0,0
-taskbarFont=Ubuntu,12,-1,5,50,0,0,0,0,0
-toolBarFont=Ubuntu,11,-1,5,50,0,0,0,0,0
+[KDE]
+LookAndFeelPackage=org.kubuntu.desktop
+SingleClick=false

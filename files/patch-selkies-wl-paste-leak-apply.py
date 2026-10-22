@@ -30,6 +30,13 @@ v3 solution:
 Also adds _get_wl_clipboard_env() to force WAYLAND_DISPLAY=wayland-0 for the
 remaining image-clipboard wl-paste calls (KDE apps write to wayland-0, not
 wayland-1 which selkies streams on).
+
+4. Host text starting with '-' never reached the container (v4.2 fix):
+   gdbus parses a positional argument that starts with '-' as an option, so
+   setClipboardContents("--no-sandbox") failed, the wl-copy fallback blocked on
+   wayland-0 (no focus -> no selection), timed out after 2 s and was left
+   running. The call now passes '--' before the text, a failed Klipper call is
+   logged with gdbus' stderr, and a timed-out wl-copy is killed.
 """
 import glob
 import pathlib
@@ -43,9 +50,21 @@ HANDLER = "/opt/selkies-env/lib/python3.14/site-packages/selkies/input_handler.p
 with open(HANDLER, encoding="utf-8") as f:
     src = f.read()
 
-if "_find_kde_dbus_address" in src and "setClipboardContents" in src and "dbus_addr_bin" in src:
-    print("Already patched (v4.1), skipping.")
+if "_find_kde_dbus_address" in src and "setClipboardContents" in src and "dbus_addr_bin" in src \
+        and "gdbus: '--' keeps" in src:
+    print("Already patched (v4.2), skipping.")
     sys.exit(0)
+
+if "_find_kde_dbus_address" in src and "setClipboardContents" in src and "dbus_addr_bin" in src:
+    # v4.1 applied but not v4.2 (gdbus '--' guard missing) -- restore and reapply
+    bak = HANDLER + ".bak"
+    if os.path.exists(bak):
+        print("v4.1 patch detected without the gdbus '--' guard -- restoring from backup for clean v4.2 apply.")
+        shutil.copy(bak, HANDLER)
+        with open(HANDLER, encoding="utf-8") as f:
+            src = f.read()
+    else:
+        sys.exit("ERROR: v4.1 detected but no backup at %s; cannot apply v4.2 cleanly." % bak)
 
 if "_find_kde_dbus_address" in src and "setClipboardContents" in src:
     # v4 applied but not v4.1 (binary mode Klipper check missing) — restore and reapply
@@ -390,21 +409,25 @@ NEW_WRITE_CLIPBOARD_WAYLAND = (
     '                            klipper_env = os.environ.copy()\n'
     "                            klipper_env['DBUS_SESSION_BUS_ADDRESS'] = dbus_addr\n"
     "                            text_str = input_bytes.decode('utf-8', errors='replace')\n"
+    "                            # gdbus: '--' keeps text starting with '-' from being parsed as an option\n"
     '                            proc_klipper = await subprocess.create_subprocess_exec(\n'
     "                                'gdbus', 'call', '--session',\n"
     "                                '--dest', 'org.kde.klipper',\n"
     "                                '--object-path', '/klipper',\n"
     "                                '--method', 'org.kde.klipper.klipper.setClipboardContents',\n"
-    '                                text_str,\n'
+    "                                '--', text_str,\n"
     '                                stdout=subprocess.DEVNULL,\n'
-    '                                stderr=subprocess.DEVNULL,\n'
+    '                                stderr=subprocess.PIPE,\n'
     '                                env=klipper_env\n'
     '                            )\n'
-    '                            await asyncio.wait_for(proc_klipper.communicate(), timeout=2.0)\n'
+    '                            _, _klipper_err = await asyncio.wait_for(proc_klipper.communicate(), timeout=2.0)\n'
     '                            if proc_klipper.returncode == 0:\n'
     '                                return True\n'
+    '                            logger_webrtc_input.warning(\n'
+    '                                f"Klipper D-Bus write failed (code {proc_klipper.returncode}): "\n'
+    "                                f\"{_klipper_err.decode('utf-8', errors='replace').strip()}; falling back to wl-copy\")\n"
     '                        except Exception as _e:\n'
-    '                            logger_webrtc_input.debug(f"Klipper D-Bus write failed: {_e}")\n'
+    '                            logger_webrtc_input.warning(f"Klipper D-Bus write failed: {_e}; falling back to wl-copy")\n'
     '                    # Fallback: wl-copy on wayland-0 (not wayland-1, to avoid taskbar)\n'
     '                    clip_env = self._get_wl_clipboard_env()\n'
     "                    if 'LANG' not in clip_env or clip_env['LANG'] == 'C':\n"
@@ -432,14 +455,22 @@ NEW_WRITE_CLIPBOARD_WAYLAND = (
     '                    process.stdin.write(input_bytes)\n'
     '                    await process.stdin.drain()\n'
     '                    process.stdin.close()\n'
-    '                await asyncio.wait_for(process.communicate(), timeout=2.0)\n'
+    '                try:\n'
+    '                    await asyncio.wait_for(process.communicate(), timeout=2.0)\n'
+    '                except asyncio.TimeoutError:\n'
+    '                    # Without keyboard focus KWin never takes the selection from\n'
+    '                    # wl-copy, which would otherwise stay alive holding stale data.\n'
+    '                    process.kill()\n'
+    '                    await process.wait()\n'
+    '                    logger_webrtc_input.warning("wl-copy timed out on wayland-0; killed")\n'
+    '                    return False\n'
     '                if process.returncode == 0:\n'
     '                    return True\n'
     '                else:\n'
     '                    logger_webrtc_input.warning(f"wl-copy failed code: {process.returncode}")\n'
     '                    return False\n'
     '            except Exception as e:\n'
-    '                logger_webrtc_input.warning(f"wl-copy exception: {e}")\n'
+    '                logger_webrtc_input.warning(f"wl-copy exception: {e!r}")\n'
     '                return False\n'
 )
 
@@ -481,7 +512,7 @@ NEW_WL_COPY_CLEAR = (
     "                                '--dest', 'org.kde.klipper',\n"
     "                                '--object-path', '/klipper',\n"
     "                                '--method', 'org.kde.klipper.klipper.setClipboardContents',\n"
-    "                                '',\n"
+    "                                '--', '',\n"
     '                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n'
     '                                env=_env_clear\n'
     '                            )\n'
@@ -513,5 +544,5 @@ for pyc in glob.glob(
 ):
     pathlib.Path(pyc).unlink(missing_ok=True)
 
-print(f"\nPatch v3 applied successfully to {HANDLER}")
+print(f"\nPatch v4.2 applied successfully to {HANDLER}")
 print(f"Backup at {HANDLER}.bak")

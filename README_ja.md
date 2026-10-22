@@ -390,7 +390,7 @@ USER_PASSWORD=yourpass ./build-user-image.sh
 ./build-user-image.sh -u 22.04           # Ubuntu 22.04
 ./build-user-image.sh -u 26.04           # Ubuntu 26.04（X11/Xvfb）
 ./build-user-image.sh -v 2.0.0           # カスタムバージョン
-./build-user-image.sh -b my-base:1.1.0   # カスタムベースイメージタグ
+./build-user-image.sh -b my-base:1.2.0   # カスタムベースイメージタグ
 ./build-user-image.sh -i ghcr.io/you/img  # カスタムベースイメージ名
 ./build-user-image.sh -a amd64           # アーキテクチャヒント
 ./build-user-image.sh -p linux/amd64     # 明示的なプラットフォーム指定
@@ -695,7 +695,7 @@ docker exec linuxserver-kde-$(whoami) ls -la /run/user/$(id -u)
 - `docker compose` は compose ファイル中の `${VAR}` を**呼び出し元シェルの環境変数を最優先**で展開し、`.env` はその後に参照します。WSLg は `WAYLAND_DISPLAY=wayland-0`（と `XDG_RUNTIME_DIR`）を常時エクスポートしているため、`.env` に素の名前で置いた値は乗っ取られ、デスクトップは selkies が作らないソケットを永遠に待ち続けていました。コンテナへ渡す値は `.env` 内で `RUNTIME_*` 接頭辞（`RUNTIME_WAYLAND_DISPLAY` など）を使い、`svc-de` は selkies が実際に作った `wayland-*` ソケットへフォールバックします。**GPU / ディスプレイ関連の変数を追加するときは必ず接頭辞付きにしてください。**
 - `/mnt/wslg` はマウントしなくなりました。`/mnt/wslg/.X11-unix` を `/tmp/.X11-unix` に被せると root 所有の tmpfs になり、`startwm_wayland.sh` の `chmod` が `set -e` で失敗してセッションが起動しませんでした。d3d12 GPU ドライバに必要なのは `/usr/lib/wsl` と `/dev/dxg` だけです。
 
-ホストで `vgem` を読み込んだ**後に**黒画面になる場合は、ユーザーイメージが `kwin-d3d12-noscanout` シム導入前のものです（既知の制限の [WSL2](#wsl2) を参照）。ユーザーイメージを再ビルドしてください。
+ホストで `vgem` を読み込んだ**後に**黒画面になる場合は、ベースイメージが `kwin-d3d12-noscanout` シム導入前のものです（既知の制限の [WSL2](#wsl2) を参照）。ベースイメージを再ビルドしてから、ユーザーイメージを再ビルドしてください。
 
 ### WebGL/Vulkan が動かない
 
@@ -776,7 +776,7 @@ docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pact
 |---|---|---|
 | `CONTAINER_NAME` | コンテナ名 | `linuxserver-kde-$(whoami)` |
 | `IMAGE_BASE` | イメージベース名 | `webtop-kde` |
-| `IMAGE_VERSION` | イメージバージョン | `1.1.0` |
+| `IMAGE_VERSION` | イメージバージョン | `1.2.0` |
 
 #### 表示
 

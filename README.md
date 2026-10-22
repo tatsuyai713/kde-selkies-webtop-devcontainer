@@ -381,7 +381,7 @@ USER_PASSWORD=yourpass ./build-user-image.sh
 ./build-user-image.sh -u 22.04           # Ubuntu 22.04
 ./build-user-image.sh -u 26.04           # Ubuntu 26.04 (X11/Xvfb)
 ./build-user-image.sh -v 2.0.0           # Custom version
-./build-user-image.sh -b my-base:1.1.0   # Custom base image tag
+./build-user-image.sh -b my-base:1.2.0   # Custom base image tag
 ./build-user-image.sh -i ghcr.io/you/img  # Custom base image name
 ./build-user-image.sh -a amd64           # Architecture hint
 ./build-user-image.sh -p linux/amd64     # Explicit platform override
@@ -724,7 +724,7 @@ Causes: `/run/user/<uid>` missing or wrong permissions, plasmashell crash → re
 - `docker compose` interpolates `${VAR}` in the compose file from the invoking shell *before* falling back to `.env`. WSLg exports `WAYLAND_DISPLAY=wayland-0` (and `XDG_RUNTIME_DIR`), so an unprefixed key in `.env` was silently overridden and the desktop waited forever for a socket selkies never creates. Container-bound values therefore use `RUNTIME_*` keys (`RUNTIME_WAYLAND_DISPLAY`, ...) in `.env`, and `svc-de` falls back to whichever `wayland-*` socket selkies actually created. **Always use the prefixed form when adding GPU/display variables.**
 - `/mnt/wslg` is deliberately not mounted any more. Bind-mounting `/mnt/wslg/.X11-unix` over `/tmp/.X11-unix` handed the container a root-owned tmpfs whose `chmod` failed under `set -e` in `startwm_wayland.sh`, aborting the session. Only `/usr/lib/wsl` and `/dev/dxg` are needed for the d3d12 GPU driver.
 
-If the desktop is black on WSL2 *after* loading `vgem` on the host, the user image predates the `kwin-d3d12-noscanout` shim (see [WSL2](#wsl2) under Known Limitations) — rebuild the user image.
+If the desktop is black on WSL2 *after* loading `vgem` on the host, the base image predates the `kwin-d3d12-noscanout` shim (see [WSL2](#wsl2) under Known Limitations) — rebuild the base image, then the user image.
 
 On WSL2, `D3D12: Removing Device.` means a process lost its D3D12 device. Invalid resource/view descriptors can cause this as well as driver failures; the message alone does not establish a host GPU reset. Check which process emitted it. If it is Pixelflux and repeated `error in client communication` follows, `svc-de` restarts Selkies automatically; to restart it by hand: `docker exec linuxserver-kde-$(whoami) s6-svc -r /run/service/svc-selkies`. Restarting Selkies does not repair KWin's invalid texture views; see the Ubuntu 24.04 Mesa fix below.
 
@@ -811,7 +811,7 @@ Check browser audio permissions and use HTTPS (some browsers block audio over HT
 |---|---|---|
 | `CONTAINER_NAME` | Container name | `linuxserver-kde-$(whoami)` |
 | `IMAGE_BASE` | Image base name | `webtop-kde` |
-| `IMAGE_VERSION` | Image version | `1.1.0` |
+| `IMAGE_VERSION` | Image version | `1.2.0` |
 
 #### Display
 

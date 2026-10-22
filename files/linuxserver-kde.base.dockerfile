@@ -67,7 +67,11 @@ RUN set -eux; \
 ###########################################
 FROM ubuntu:24.04 AS wsl-vaapi-stage
 ARG TARGETARCH
-ARG WSL_VAAPI_MESA_VERSION=25.2.8-0ubuntu0.24.04.2
+# Must be the Mesa version noble-updates currently ships (the final image's
+# distro Mesa and the libgallium-<version>.so name below have to agree). Pin
+# every Mesa binary of the set, otherwise a newer libglx-mesa0 pulled in by
+# libva-dev conflicts with the pinned mesa-libgallium.
+ARG WSL_VAAPI_MESA_VERSION=25.2.8-0ubuntu0.24.04.4
 COPY ubuntu-root/usr/local/src/wsl-vaapi-serialize.c /tmp/wsl-vaapi-serialize.c
 COPY pixelflux/test-vaapi-serialize.c /tmp/test-vaapi-serialize.c
 RUN set -eux; \
@@ -76,7 +80,9 @@ RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       "mesa-va-drivers=${WSL_VAAPI_MESA_VERSION}" \
-      "mesa-libgallium=${WSL_VAAPI_MESA_VERSION}" libllvm20 libva-dev gcc libc6-dev; \
+      "mesa-libgallium=${WSL_VAAPI_MESA_VERSION}" \
+      "libgl1-mesa-dri=${WSL_VAAPI_MESA_VERSION}" \
+      "libglx-mesa0=${WSL_VAAPI_MESA_VERSION}" libllvm20 libva-dev gcc libc6-dev; \
     cp -L /usr/lib/x86_64-linux-gnu/dri/d3d12_drv_video.so /vaapi-out/; \
     cp -L /usr/lib/x86_64-linux-gnu/libLLVM.so.20.1 /vaapi-out/; \
     cp -L /usr/lib/x86_64-linux-gnu/libxml2.so.2 /vaapi-out/; \
@@ -249,7 +255,8 @@ COPY ubuntu-root/ /
 FROM ubuntu-base-temp AS wsl-d3d12-mesa-stage
 
 ARG TARGETARCH
-ARG WSL_D3D12_MESA_VERSION=25.2.8-0ubuntu0.24.04.2
+# Keep in step with WSL_VAAPI_MESA_VERSION above (noble-updates' current Mesa).
+ARG WSL_D3D12_MESA_VERSION=25.2.8-0ubuntu0.24.04.4
 COPY patches/mesa-d3d12-valid-disabled-pso-state.patch /tmp/mesa-d3d12-valid-disabled-pso-state.patch
 COPY patches/mesa-d3d12-bgrx-srv-format.patch /tmp/mesa-d3d12-bgrx-srv-format.patch
 
@@ -581,18 +588,33 @@ RUN \
     sed -i 's/^\(from Xlib\.protocol import rq\)\(\r\{0,1\}\)$/\1\2\nfrom Xlib.error import XError\2/' "${XLIB_RANDR}"; } && \
   sed -i 's/^class \(BadRR[A-Za-z]*Error\)(Exception): pass\(\r\{0,1\}\)$/class \1(XError): pass\2/' "${XLIB_RANDR}" && \
   /opt/selkies-env/bin/python3 -c 'from Xlib.ext import randr; from Xlib.error import XError; assert all(issubclass(c, XError) for c in (randr.BadRROutputError, randr.BadRRCrtcError, randr.BadRRModeError)); from Xlib import display, X, XK; from Xlib.ext import xfixes, xtest' && \
+  # pcmflux 1.x and pixelflux 1.x were removed from PyPI (only 2.x remains, with
+  # wheels for every CPython/arch used here). pcmflux 2.0.0 is used on every
+  # release through patch-selkies-pcmflux2.py (applied below with the other
+  # selkies patches). The pixelflux wheels vendored in pixelflux/ are offered to
+  # pip through --find-links so the pixelflux constraints resolve without PyPI.
+  PIP_LINKS="--find-links /tmp/pixelflux" && \
   if [ "${UBUNTU_VERSION}" = "22.04" ]; then \
-    printf '%s\n' "av==14.4.0" "pcmflux==1.0.8" "pixelflux==1.6.0" > /tmp/selkies-constraints.txt; \
-    /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt .; \
+    if [ "$(dpkg --print-architecture)" = "arm64" ]; then \
+      # pixelflux 1.6.0 only exists as the vendored x86_64 wheel; arm64 keeps
+      # the last Jammy-compatible PyPI build, still served by its hashed URL.
+      curl -fL --retry 3 -o /tmp/pixelflux/pixelflux-1.4.7-cp310-cp310-manylinux_2_28_aarch64.whl \
+        "https://files.pythonhosted.org/packages/4f/6e/832ed1b22373e0a1b80826b5dab8d38634a7f4db2bf7254b0aaea4dfe928/pixelflux-1.4.7-cp310-cp310-manylinux_2_28_aarch64.whl" && \
+      echo "650ba1dbfafceb8b64ebdbee7e935928a705c341e7bc2336b6c9942bc4b7bcd3  /tmp/pixelflux/pixelflux-1.4.7-cp310-cp310-manylinux_2_28_aarch64.whl" | sha256sum -c - && \
+      printf '%s\n' "av==14.4.0" "pcmflux==2.0.0" "pixelflux==1.4.7" > /tmp/selkies-constraints.txt; \
+    else \
+      printf '%s\n' "av==14.4.0" "pcmflux==2.0.0" "pixelflux==1.6.0" > /tmp/selkies-constraints.txt; \
+    fi; \
+    /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt ${PIP_LINKS} .; \
   elif [ "${UBUNTU_VERSION}" = "24.04" ]; then \
     # pixelflux 2.0 (NVENC on X11 and Wayland) via patch-selkies-pixelflux2.py
-    printf '%s\n' "av==14.4.0" "pcmflux==1.0.8" "pixelflux==2.0.0" > /tmp/selkies-constraints.txt; \
-    /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt .; \
+    printf '%s\n' "av==14.4.0" "pcmflux==2.0.0" "pixelflux==2.0.0" > /tmp/selkies-constraints.txt; \
+    /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt ${PIP_LINKS} .; \
   else \
-    # pcmflux 2.x predates the pinned selkies; pixelflux 2.0 is used via the
-    # patch-selkies-pixelflux2.py compatibility layer to get NVENC on Wayland.
-    printf '%s\n' "pcmflux==1.0.8" "pixelflux==2.0.0" > /tmp/selkies-constraints.txt; \
-    /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt .; \
+    # pixelflux 2.0 is used via the patch-selkies-pixelflux2.py compatibility
+    # layer to get NVENC on Wayland.
+    printf '%s\n' "pcmflux==2.0.0" "pixelflux==2.0.0" > /tmp/selkies-constraints.txt; \
+    /opt/selkies-env/bin/pip install -c /tmp/selkies-constraints.txt ${PIP_LINKS} .; \
   fi && \
   /opt/selkies-env/bin/pip install setuptools && \
   if [ "$(dpkg --print-architecture)" = "amd64" ] && [ "${UBUNTU_VERSION}" = "22.04" ]; then \
@@ -907,6 +929,19 @@ RUN if [ -f /usr/local/bin/patch-selkies-pixelflux2.py ]; then \
       /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-pixelflux2.py; \
     fi
 
+# Adapt the pinned selkies to pcmflux 2.x (pcmflux 1.x is gone from PyPI):
+# plain-callable AudioFrame callbacks, strict bool settings, and the header
+# that 2.x would add in front of each Opus frame is switched off because
+# selkies adds its own on the WebSocket path and WebRTC needs raw Opus.
+RUN if [ -f /usr/local/bin/patch-selkies-pcmflux2.py ]; then \
+      chmod +x /usr/local/bin/patch-selkies-pcmflux2.py && \
+      /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-pcmflux2.py && \
+      /opt/selkies-env/bin/python3 -m py_compile \
+        /opt/selkies-env/lib/python3*/site-packages/selkies/selkies.py \
+        /opt/selkies-env/lib/python3*/site-packages/selkies/media_pipeline.py && \
+      /opt/selkies-env/bin/python3 -c 'import pcmflux; assert not hasattr(pcmflux, "AudioChunkCallback"); s = pcmflux.AudioCaptureSettings(); s.omit_audio_header = True'; \
+    fi
+
 # Ignore tiny viewport-size jitter. Recreating the in-process VA-API encoder
 # for a 1-8 px browser chrome/fractional-scaling change can crash Intel's WSL
 # D3D12 video UMD and take the parent Wayland compositor down with it.
@@ -959,6 +994,12 @@ RUN \
     KDE_OPTIONAL_PACKAGES="${KDE_OPTIONAL_PACKAGES} kubuntu-web-shortcuts"; \
   else \
     echo "**** kubuntu-web-shortcuts unavailable; skipping ****"; \
+  fi && \
+  if apt-cache show chromium-sandbox >/dev/null 2>&1; then \
+    echo "**** chromium-sandbox: setuid helper so Chromium keeps its sandbox where user namespaces are denied ****" && \
+    KDE_OPTIONAL_PACKAGES="${KDE_OPTIONAL_PACKAGES} chromium-sandbox"; \
+  else \
+    echo "**** chromium-sandbox unavailable; wrapped-chromium falls back to --no-sandbox where user namespaces are denied ****"; \
   fi && \
   DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
     bc chromium dolphin gwenview kde-config-gtk-style kdialog kfind khotkeys \
@@ -1013,6 +1054,239 @@ RUN apt-get update && \
     
 # add local files for KDE webtop
 COPY kde-root/ /
+
+# ---------------------------------------------------------------------------
+# Desktop-wide fixes. Everything below is independent of the desktop user and
+# of the user image's build arguments, so it belongs here and not in the user
+# image (which used to re-copy or re-apply several of these so that a user
+# image rebuild was enough).
+# ---------------------------------------------------------------------------
+
+# Make every later apt-get update cheap. deb-src and apt-file are enabled
+# above, so each update fetched ~375 MB of indexes (7 Contents files of
+# 40-60 MB each, 12 Sources, AppStream). Drop deb-src and stop fetching the
+# Contents indexes by default; `apt-file update` still requests them explicitly.
+RUN set -eux; \
+  sed -i '/^deb-src /d' /etc/apt/sources.list; \
+  for f in /etc/apt/sources.list.d/*.sources; do \
+    [ -f "$f" ] && sed -i 's/^Types: deb deb-src$/Types: deb/' "$f"; \
+  done; \
+  printf '%s\n' 'Acquire::IndexTargets::deb::Contents-deb::DefaultEnabled "false";' \
+    > /etc/apt/apt.conf.d/99-webtop-no-contents-index
+
+# im-config (pulled in by kubuntu-desktop) logs through systemd-cat whenever the
+# binary exists. There is no journald in the container, so every login shell
+# printed "Failed to create stream fd: No such file or directory" three times
+# via /etc/profile.d/im-config_wayland.sh. Only use systemd-cat when the journal
+# stdout socket is actually present; otherwise im-config falls back to logger,
+# which is silent without a syslog socket.
+RUN set -eux; \
+  if [ -f /usr/share/im-config/initializer ]; then \
+    sed -i 's|^if \[ -e /usr/bin/systemd-cat \] ; then$|if [ -e /usr/bin/systemd-cat ] \&\& [ -S /run/systemd/journal/stdout ] ; then|' \
+      /usr/share/im-config/initializer; \
+  fi
+
+# Browser launch wrappers. The maintained wrappers ship in ubuntu-root
+# (/usr/local/bin/google-chrome-wrapped, /usr/local/bin/wrapped-chromium) and
+# run the browsers with their own sandbox (setuid helper or user namespaces,
+# --no-sandbox only as a reported fallback). This step routes every launch
+# path through them and keeps that routing across package upgrades with dpkg
+# post-invoke hooks; the user image reuses the hooks for per-user menu entries.
+RUN <<'EOF'
+set -eux
+
+bash -n /usr/local/bin/google-chrome-wrapped /usr/local/bin/wrapped-chromium
+grep -q 'intel-wsl|nvidia-wsl|amd-wsl' /usr/local/bin/google-chrome-wrapped
+grep -q 'intel-wsl|nvidia-wsl|amd-wsl' /usr/local/bin/wrapped-chromium
+grep -q -- '--ozone-platform=x11' /usr/local/bin/google-chrome-wrapped
+grep -q -- '--ozone-platform=x11' /usr/local/bin/wrapped-chromium
+grep -q 'chrome_sandbox_usable' /usr/local/bin/google-chrome-wrapped
+grep -q 'chrome_sandbox_usable' /usr/local/bin/wrapped-chromium
+if [ -x /usr/lib/chromium/chromium ] && ! [ -u /usr/lib/chromium/chrome-sandbox ]; then
+  echo "chromium-sandbox is not installed; wrapped-chromium will fall back to --no-sandbox where user namespaces are denied" >&2
+fi
+
+ARCH="$(dpkg --print-architecture)"
+if [ -x /usr/bin/chromium ]; then
+  cat > /usr/local/bin/ensure-chromium-wrap <<'EOF_CHROMIUM'
+#!/bin/bash
+set -e
+
+if [ -x /usr/bin/chromium ]; then
+  printf '%s\n' '#!/bin/bash' 'exec /usr/local/bin/wrapped-chromium "$@"' > /usr/bin/chromium
+  chmod 755 /usr/bin/chromium
+fi
+
+if [ -f /usr/share/applications/chromium.desktop ]; then
+  sed -i -E 's#^Exec=.*#Exec=/usr/local/bin/wrapped-chromium#g' /usr/share/applications/chromium.desktop || true
+fi
+
+if [ -n "${USER_NAME:-}" ]; then
+  USER_HOME="/home/${USER_NAME}"
+  mkdir -p "${USER_HOME}/.local/share/applications"
+  if [ -f /usr/share/applications/chromium.desktop ]; then
+    cp /usr/share/applications/chromium.desktop "${USER_HOME}/.local/share/applications/chromium.desktop"
+    sed -i -E 's#^Exec=.*#Exec=/usr/local/bin/wrapped-chromium#g' "${USER_HOME}/.local/share/applications/chromium.desktop" || true
+    chown "${USER_UID:-0}:${USER_GID:-0}" "${USER_HOME}/.local/share/applications/chromium.desktop" || true
+  fi
+fi
+EOF_CHROMIUM
+  chmod 755 /usr/local/bin/ensure-chromium-wrap
+  /usr/local/bin/ensure-chromium-wrap
+  printf '%s\n' 'DPkg::Post-Invoke {"/usr/local/bin/ensure-chromium-wrap || true";};' \
+    > /etc/apt/apt.conf.d/99-chromium-wrap
+fi
+if [ "${ARCH}" != "arm64" ]; then
+  if [ -x /usr/bin/google-chrome-stable ]; then
+    for chrome_bin in google-chrome-beta google-chrome-unstable; do
+      if [ -x "/usr/bin/${chrome_bin}" ]; then
+        printf '%s\n' '#!/bin/bash' 'exec /usr/local/bin/google-chrome-wrapped "$@"' \
+          > "/usr/local/bin/${chrome_bin}-wrapped"
+        chmod 755 "/usr/local/bin/${chrome_bin}-wrapped"
+      fi
+    done
+    for desktop in /usr/share/applications/google-chrome*.desktop; do
+      [ -f "$desktop" ] || continue
+      sed -i -E 's#^Exec=/usr/bin/google-chrome-stable(.*)#Exec=/usr/local/bin/google-chrome-wrapped\1#g' "$desktop"
+    done
+    if [ -n "${USER_NAME:-}" ]; then
+      USER_HOME="/home/${USER_NAME}"
+      mkdir -p "${USER_HOME}/.local/share/applications"
+      for desktop in /usr/share/applications/google-chrome*.desktop; do
+        [ -f "$desktop" ] || continue
+        base=$(basename "$desktop")
+        cp "$desktop" "${USER_HOME}/.local/share/applications/$base"
+        sed -i -E 's#^Exec=/usr/bin/google-chrome-stable(.*)#Exec=/usr/local/bin/google-chrome-wrapped\1#g' \
+          "${USER_HOME}/.local/share/applications/$base"
+        chown "${USER_UID:-0}:${USER_GID:-0}" "${USER_HOME}/.local/share/applications/$base"
+      done
+    fi
+    cat > /usr/local/bin/ensure-google-chrome-wrap <<'EOF_CHROME'
+#!/bin/bash
+set -e
+
+if [ -f /usr/share/applications/google-chrome.desktop ]; then
+  sed -i -E 's#^Exec=/usr/bin/google-chrome-stable(.*)#Exec=/usr/local/bin/google-chrome-wrapped\1#g' /usr/share/applications/google-chrome.desktop || true
+fi
+
+if [ -n "${USER_NAME:-}" ]; then
+  USER_HOME="/home/${USER_NAME}"
+  mkdir -p "${USER_HOME}/.local/share/applications"
+  if [ -f /usr/share/applications/google-chrome.desktop ]; then
+    cp /usr/share/applications/google-chrome.desktop "${USER_HOME}/.local/share/applications/google-chrome.desktop"
+    sed -i -E 's#^Exec=/usr/bin/google-chrome-stable(.*)#Exec=/usr/local/bin/google-chrome-wrapped\1#g' \
+      "${USER_HOME}/.local/share/applications/google-chrome.desktop" || true
+    chown "${USER_UID:-0}:${USER_GID:-0}" "${USER_HOME}/.local/share/applications/google-chrome.desktop" || true
+  fi
+fi
+EOF_CHROME
+    chmod 755 /usr/local/bin/ensure-google-chrome-wrap
+    /usr/local/bin/ensure-google-chrome-wrap
+    printf '%s\n' 'DPkg::Post-Invoke {"/usr/local/bin/ensure-google-chrome-wrap || true";};' \
+      > /etc/apt/apt.conf.d/99-google-chrome-wrap
+  fi
+fi
+EOF
+
+# WSL2 GPU compositing. KWin 6.6 asks gbm for SCANOUT|RENDERING buffers and
+# Mesa's d3d12 driver refuses SCANOUT, so on WSL2 KWin could only ever fall back
+# to QPainter. This tiny shim drops the flag (see the source for details);
+# startwm_wayland.sh preloads it into the session on WSL2 hosts only.
+# kwin_wayland carries cap_sys_nice, which makes glibc ignore LD_PRELOAD, so the
+# capability is removed here -- realtime scheduling is not available to the
+# compositor inside the container anyway.
+RUN set -eux; \
+  gcc -shared -fPIC -O2 -Wall -o /usr/local/lib/kwin-d3d12-noscanout.so /usr/local/src/kwin-d3d12-noscanout.c -ldl; \
+  chmod 755 /usr/local/lib/kwin-d3d12-noscanout.so; \
+  if [ -x /usr/bin/kwin_wayland ]; then setcap -r /usr/bin/kwin_wayland || true; fi
+
+COPY glycin-bwrap-shim /usr/local/libexec/glycin-bwrap-shim
+# Ubuntu 25.10+ gdk-pixbuf loads every image through glycin, whose loaders run
+# in a bubblewrap sandbox. This container runs privileged (seccomp and AppArmor
+# unconfined), and on a host with kernel.apparmor_restrict_unprivileged_userns=1
+# an unconfined unprivileged process may create a user namespace but gets no
+# capabilities in it: bwrap fails after the fact ("setting up uid map:
+# Permission denied", "loopback: Failed RTM_NEWADDR"). glycin only falls back
+# to running loaders unsandboxed when namespace creation itself is refused (as
+# under Docker's default seccomp profile), so here every icon and PNG load
+# fails and GTK applications such as STM32CubeIDE abort in gtkiconhelper.c
+# right after the workspace chooser, before the main window appears. glycin has
+# no switch to skip the sandbox, so divert bwrap and let the shim execute glycin
+# loaders directly; every other bwrap caller still reaches the real binary.
+# Verified with the IDE under Xvfb in a container started with
+# --security-opt seccomp=unconfined --security-opt apparmor=unconfined.
+RUN set -eux; \
+  chmod 755 /usr/local/libexec/glycin-bwrap-shim; \
+  bash -n /usr/local/libexec/glycin-bwrap-shim; \
+  if dpkg -s glycin-loaders >/dev/null 2>&1 && [ -x /usr/bin/bwrap ] && [ ! -e /usr/bin/bwrap.distrib ]; then \
+    dpkg-divert --local --rename --add /usr/bin/bwrap; \
+    test -x /usr/bin/bwrap.distrib; \
+    ln -sf /usr/local/libexec/glycin-bwrap-shim /usr/bin/bwrap; \
+    # a non-glycin command is passed through to the real bwrap
+    /usr/bin/bwrap --version | grep -q '^bubblewrap'; \
+    # a glycin-style command line runs the loader directly with glycin's env
+    LOADER_DIR="$(ls -d /usr/libexec/glycin-loaders/* | head -1)"; \
+    printf '%s\n' '#!/bin/sh' 'printf "%s|%s|%s|%s\n" "$HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$*"' > "${LOADER_DIR}/.shim-selftest"; \
+    chmod 755 "${LOADER_DIR}/.shim-selftest"; \
+    OUT="$(HOME=/root /usr/bin/bwrap --unshare-all --die-with-parent --chdir / --ro-bind /usr /usr --dev /dev --tmpfs /tmp-home --tmpfs /tmp-run --clearenv --setenv HOME /tmp-home --setenv XDG_RUNTIME_DIR /tmp-run --setenv XDG_RUNTIME_DIR /run/user/0 --symlink /usr/lib64 /lib64 --ro-bind-try /etc/fonts/conf.d /etc/fonts/conf.d --bind-try /tmp/xc /tmp/xc --setenv XDG_CACHE_HOME /tmp/xc --seccomp 128 "${LOADER_DIR}/.shim-selftest" --dbus-fd 127)"; \
+    rm -f "${LOADER_DIR}/.shim-selftest"; \
+    test "${OUT}" = "/root|/tmp/xc|/run/user/0|--dbus-fd 127"; \
+  else \
+    echo "glycin-loaders not installed (or bwrap already diverted); keeping the distribution bwrap"; \
+  fi
+
+# WSL2 desktop integration shipped in ubuntu-root: Electron apps (VS Code) are
+# presented through XWayland like Chrome by wsl-electron-x11 ("code" in
+# /usr/local/bin shadows the package's /usr/bin/code; init-wsl-electron
+# regenerates the menu overrides at every container start), svc-wsl-resume
+# reports Windows sleep/resume (WSL_RESUME_RESTART=true restarts svc-selkies
+# after resume), and idle dim / screen-off / auto-sleep / auto-lock are off by
+# default (system-wide defaults, users can still override them). The s6 wiring
+# of both services is declared under ubuntu-root/etc/s6-overlay. Generate the
+# system-wide overrides once here and check that every piece is in place.
+RUN set -eux; \
+  /usr/local/bin/wsl-electron-desktop-overrides --system; \
+  for f in /usr/local/bin/wsl-electron-x11 /usr/local/bin/wsl-electron-desktop-overrides /usr/local/bin/code \
+           /usr/local/bin/wsl-resume-watchdog.sh /etc/s6-overlay/s6-rc.d/svc-wsl-resume/run \
+           /etc/s6-overlay/s6-rc.d/init-wsl-electron/run; do \
+    test -x "$f"; bash -n "$f"; \
+  done; \
+  test -f /etc/s6-overlay/s6-rc.d/user/contents.d/svc-wsl-resume; \
+  test -f /etc/s6-overlay/s6-rc.d/user/contents.d/init-wsl-electron; \
+  test -f /etc/s6-overlay/s6-rc.d/svc-wsl-resume/dependencies.d/svc-selkies; \
+  test -f /etc/s6-overlay/s6-rc.d/init-wsl-electron/dependencies.d/init-config; \
+  test -f /etc/s6-overlay/s6-rc.d/svc-de/dependencies.d/init-wsl-electron; \
+  grep -q '^AutoSuspendAction=0' /etc/xdg/powerdevilrc; \
+  grep -q '^Autolock=false' /etc/xdg/kscreenlockerrc; \
+  grep -q 'GL_ARB_timer_query' /defaults/startwm_wayland.sh; \
+  grep -q 'wsl-electron-desktop-overrides' /defaults/startwm_wayland.sh; \
+  grep -q 'LIBGL_KOPPER_DISABLE=true' /defaults/startwm_wayland.sh; \
+  grep -q 'LIBGL_KOPPER_DISABLE=true' /usr/local/bin/google-chrome-wrapped; \
+  grep -q 'LIBGL_KOPPER_DISABLE=true' /usr/local/bin/wrapped-chromium; \
+  grep -q 'LIBGL_KOPPER_DISABLE=true' /usr/local/bin/wsl-electron-x11; \
+  grep -q 'XWAYLAND_NO_GLAMOR=1' /defaults/startwm_wayland.sh; \
+  grep -q 'MESA_GL_VERSION_OVERRIDE' /usr/local/bin/google-chrome-wrapped; \
+  grep -q 'MESA_GL_VERSION_OVERRIDE' /usr/local/bin/wrapped-chromium; \
+  grep -q 'MESA_GL_VERSION_OVERRIDE' /usr/local/bin/wsl-electron-x11; \
+  grep -q 'wsl_gpu_cache_guard' /usr/local/bin/google-chrome-wrapped; \
+  test -r /usr/local/lib/wsl-gpu-cache-guard.sh; \
+  test -r /etc/profile.d/wsl-gl.sh; \
+  grep -q 'LookAndFeelPackage=org.kubuntu.desktop' /defaults/kdeglobals; \
+  echo "WSL desktop fixes present"
+
+# Container management tools (commit / flatten / stop). The user image only
+# adds the desktop shortcuts that call them.
+COPY container-actions/container-commit.sh /usr/local/bin/container-commit.sh
+COPY container-actions/container-flatten.sh /usr/local/bin/container-flatten.sh
+COPY container-actions/docker-flatten-lib.sh /usr/local/lib/docker-flatten-lib.sh
+COPY container-actions/container-stop.sh /usr/local/bin/container-stop.sh
+COPY container-actions/patch-docker-squash-oci.py /tmp/patch-docker-squash-oci.py
+RUN set -eux; \
+  python3 -m venv /opt/container-tools; \
+  /opt/container-tools/bin/pip install --no-cache-dir docker-squash==1.2.2; \
+  /opt/container-tools/bin/python3 /tmp/patch-docker-squash-oci.py; \
+  rm -f /tmp/patch-docker-squash-oci.py; \
+  chmod 755 /usr/local/bin/container-commit.sh /usr/local/bin/container-flatten.sh /usr/local/lib/docker-flatten-lib.sh /usr/local/bin/container-stop.sh
 
 # ports and volumes
 EXPOSE 3000
