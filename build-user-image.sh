@@ -116,16 +116,29 @@ if [[ -z "${BASE_IMAGE}" ]]; then
       exit 1
     fi
   else
+    # Only a base carrying the same version tag is used. A base left over from
+    # an earlier release must never be picked up silently: it would produce a
+    # user image tagged ${VERSION} that lacks everything the new base ships.
     for candidate in "${BASE_CANDIDATES[@]}"; do
-      if [[ "${candidate}" != *":latest" ]]; then
+      if [[ "${candidate}" == *":${VERSION}" ]]; then
         BASE_IMAGE="${candidate}"
         break
       fi
     done
-    if [[ -z "${BASE_IMAGE}" ]]; then
-      BASE_IMAGE="${BASE_CANDIDATES[0]}"
+    if [[ -n "${BASE_IMAGE}" ]]; then
+      echo "Using detected base image: ${BASE_IMAGE}"
+    else
+      DEFAULT_BASE_IMAGE="${IMAGE_NAME_BASE}-base-${TARGET_ARCH}-u${UBUNTU_VERSION}:${VERSION}"
+      echo "Local base images exist, but none is tagged ${VERSION}:" >&2
+      printf '  %s\n' "${BASE_CANDIDATES[@]}" >&2
+      echo "Attempting to pull ${DEFAULT_BASE_IMAGE}..." >&2
+      if "${DOCKER_CMD[@]}" pull --platform "${PLATFORM}" "${DEFAULT_BASE_IMAGE}"; then
+        BASE_IMAGE="${DEFAULT_BASE_IMAGE}"
+      else
+        echo "No base image tagged ${VERSION} is available. Build it first (./files/build-base-image.sh -a ${TARGET_ARCH} --ubuntu ${UBUNTU_VERSION} -v ${VERSION}), or pass -b/--base to use another base on purpose." >&2
+        exit 1
+      fi
     fi
-    echo "Using detected base image: ${BASE_IMAGE}"
   fi
 fi
 

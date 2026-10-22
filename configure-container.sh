@@ -86,7 +86,13 @@ load_yaml_config() {
   local file="$1" val
   val=$(yaml_get "${file}" "container_name"); [[ -n "${val}" ]] && NAME="${val}"
   val=$(yaml_get "${file}" "image_base");     [[ -n "${val}" ]] && IMAGE_BASE="${val}"
-  val=$(yaml_get "${file}" "image_version");  [[ -n "${val}" ]] && IMAGE_VERSION_DEFAULT="${val}"
+  # image_version is not taken from the saved file: this release's default (or
+  # IMAGE_VERSION) decides, so a file written for an older image does not
+  # keep selecting that image after an update.
+  val=$(yaml_get "${file}" "image_version")
+  if [[ -n "${val}" && "${val}" != "${IMAGE_VERSION_DEFAULT}" ]]; then
+    echo "Note: ${file} was saved with image_version ${val}; using ${IMAGE_VERSION_DEFAULT} instead (set IMAGE_VERSION=${val} to keep the old image)." >&2
+  fi
   val=$(yaml_get "${file}" "ubuntu_version"); [[ -n "${val}" ]] && UBUNTU_VERSION="${val}"
   val=$(yaml_get "${file}" "arch");           [[ -n "${val}" ]] && TARGET_ARCH="${val}"
   val=$(yaml_get "${file}" "resolution");     [[ -n "${val}" ]] && RESOLUTION="${val}"
