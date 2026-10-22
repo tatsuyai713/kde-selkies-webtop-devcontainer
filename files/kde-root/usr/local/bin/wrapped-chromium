@@ -97,4 +97,27 @@ for flag in ${CHROMIUM_FLAGS:-} "$@"; do
   esac
 done
 
-exec "${BIN}" --password-store=basic "${GPU_FLAGS[@]}" --no-sandbox "${EXTRA_FLAGS[@]}"
+# Chrome's own sandbox instead of --no-sandbox. Its layer 1 is either
+# unprivileged user namespaces or the setuid helper shipped next to the binary
+# (owned by root, mode 4755; usable while this process may still gain
+# privileges, i.e. no no_new_privs). Ubuntu 24.04+ hosts set
+# kernel.apparmor_restrict_unprivileged_userns=1, which denies user namespaces
+# to this AppArmor-unconfined container, and Chrome then uses the helper; both
+# paths were verified in the running container. Only when neither can work is
+# --no-sandbox added, so the browser still starts, and the fallback is reported.
+chrome_sandbox_usable() {
+  local helper
+  if ! grep -qs '^NoNewPrivs:[[:space:]]*1' /proc/self/status; then
+    for helper in "${CHROME_DEVEL_SANDBOX:-}" "$@"; do
+      [ -n "${helper}" ] && [ -u "${helper}" ] && [ -x "${helper}" ] \
+        && [ "$(stat -c %u "${helper}" 2>/dev/null)" = "0" ] && return 0
+    done
+  fi
+  unshare -Urn true 2>/dev/null
+}
+SANDBOX_FLAGS=()
+if ! chrome_sandbox_usable "$(dirname "$(readlink -f "${BIN}")")/chrome-sandbox" /usr/lib/chromium/chrome-sandbox; then
+  echo "wrapped-chromium: no usable Chrome sandbox (setuid helper or user namespaces); starting with --no-sandbox" >&2
+  SANDBOX_FLAGS=(--no-sandbox)
+fi
+exec "${BIN}" --password-store=basic "${GPU_FLAGS[@]}" "${SANDBOX_FLAGS[@]}" "${EXTRA_FLAGS[@]}"
