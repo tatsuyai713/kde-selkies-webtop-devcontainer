@@ -1,0 +1,472 @@
+--- src/gallium/drivers/d3d12/d3d12_bufmgr.h.orig
++++ src/gallium/drivers/d3d12/d3d12_bufmgr.h
+@@ -47,6 +47,15 @@
+    batch_bo_reference_written = (1 << 1),
+ };
+ 
++struct d3d12_texture_heap;
++
++/* A range inside one of the screen's texture heaps (see d3d12_texture_pool_alloc). */
++struct d3d12_texture_pool_block {
++   struct d3d12_texture_heap *heap;
++   uint64_t addr;
++   uint64_t size;
++};
++
+ struct d3d12_bo {
+    struct pipe_reference reference;
+    struct d3d12_screen *screen;
+@@ -70,6 +79,9 @@
+    uint64_t last_used_fence;
+    enum d3d12_residency_status residency_status;
+ 
++   /* Set when the texture lives in one of the screen's texture heaps. */
++   struct d3d12_texture_pool_block pool_block;
++
+    /* Plain committed textures go back into the screen's texture cache when
+     * the last reference is dropped (see d3d12_texture_cache_take). */
+    bool texture_cacheable;
+@@ -169,7 +181,29 @@
+ d3d12_texture_cache_take(struct d3d12_screen *screen,
+                          const D3D12_RESOURCE_DESC *desc, uint32_t format,
+                          struct d3d12_resource_state *state, bool *has_state,
+-                         enum d3d12_residency_status *residency);
++                         enum d3d12_residency_status *residency,
++                         struct d3d12_texture_pool_block *pool_block);
++
++/* Texture heaps: memory for textures is taken from a few large heaps that are
++ * created once, and a texture is only *placed* into them. Creating a heap or
++ * a committed resource is a D3DKMTCreateAllocation2 round trip to the host
++ * driver under WSL (measured: avg 6.7 ms, up to 280 ms and occasionally
++ * seconds); CreatePlacedResource is not (avg 0.3 ms, max 12 ms). So a new
++ * texture size no longer allocates GPU memory at all. Needs resource heap
++ * tier 2. D3D12_TEXTURE_HEAP_MB sets the heap size (default 256, 0 disables),
++ * at most 4 heaps are created; larger or shareable textures stay committed.
++ * Buffers that are not suballocated from a slab are placed the same way, into
++ * heaps of their own heap type (upload/readback heaps are a quarter the size). */
++bool
++d3d12_texture_pool_alloc(struct d3d12_screen *screen, D3D12_HEAP_TYPE type,
++                         const D3D12_RESOURCE_DESC *desc, ID3D12Heap **heap, uint64_t *offset,
++                         struct d3d12_texture_pool_block *block);
++
++void
++d3d12_texture_pool_free(struct d3d12_screen *screen, struct d3d12_texture_pool_block *block);
++
++void
++d3d12_texture_pool_destroy(struct d3d12_screen *screen);
+ 
+ void
+ d3d12_texture_cache_flush(struct d3d12_screen *screen);
+--- src/gallium/drivers/d3d12/d3d12_bufmgr.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_bufmgr.cpp
+@@ -31,6 +31,7 @@
+ 
+ #include "util/format/u_format.h"
+ #include "util/u_memory.h"
++#include "util/vma.h"
+ 
+ #include <dxguids/dxguids.h>
+ 
+@@ -76,8 +77,131 @@
+       describe_direct_bo(buf, ptr);
+ }
+ 
++struct d3d12_texture_heap {
++   struct list_head entry;
++   ID3D12Heap *heap;
++   D3D12_HEAP_TYPE type;
++   struct util_vma_heap vma;
++};
++
++/* util_vma_heap treats address 0 as "allocation failed". */
++static constexpr uint64_t texture_heap_vma_base = D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
++static constexpr unsigned texture_heap_max_count = 4;
++
++static bool
++texture_pool_alloc_locked(struct d3d12_screen *screen, D3D12_HEAP_TYPE type,
++                          uint64_t size, uint64_t alignment, ID3D12Heap **heap, uint64_t *offset, struct d3d12_texture_pool_block *block)
++{
++   list_for_each_entry(struct d3d12_texture_heap, th, &screen->texture_heaps, entry) {
++      uint64_t addr = th->type == type ? util_vma_heap_alloc(&th->vma, size, alignment) : 0;
++      if (addr) {
++         block->heap = th;
++         block->addr = addr;
++         block->size = size;
++         *heap = th->heap;
++         *offset = addr - texture_heap_vma_base;
++         return true;
++      }
++   }
++   return false;
++}
++
++static void texture_cache_evict_placed(struct d3d12_screen *screen);
++
++bool
++d3d12_texture_pool_alloc(struct d3d12_screen *screen, D3D12_HEAP_TYPE type,
++                         const D3D12_RESOURCE_DESC *desc, ID3D12Heap **heap,
++                         uint64_t *offset, struct d3d12_texture_pool_block *block)
++{
++   if (!screen->texture_heap_bytes ||
++       screen->opts.ResourceHeapTier < D3D12_RESOURCE_HEAP_TIER_2 ||
++       type < D3D12_HEAP_TYPE_DEFAULT || type > D3D12_HEAP_TYPE_READBACK)
++      return false;
++   const uint64_t heap_bytes = type == D3D12_HEAP_TYPE_DEFAULT ?
++      screen->texture_heap_bytes : MAX2(screen->texture_heap_bytes / 4, (uint64_t)16 * 1024 * 1024);
++   unsigned *heap_count = &screen->texture_heap_count[type - D3D12_HEAP_TYPE_DEFAULT];
++
++   D3D12_RESOURCE_DESC info_desc = *desc;
++   D3D12_RESOURCE_ALLOCATION_INFO info = GetResourceAllocationInfo(screen->dev, 0, 1, &info_desc);
++   if (info.SizeInBytes == 0 || info.SizeInBytes == UINT64_MAX ||
++       info.SizeInBytes > heap_bytes / 4)
++      return false;
++   const uint64_t alignment = MAX2(info.Alignment, (uint64_t)D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
++   const uint64_t size = align64(info.SizeInBytes, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
++
++   mtx_lock(&screen->texture_cache_mutex);
++   bool ok = texture_pool_alloc_locked(screen, type, size, alignment, heap, offset, block);
++   mtx_unlock(&screen->texture_cache_mutex);
++   if (ok)
++      return true;
++
++   /* Full: give the space held by cached (unused) textures back first. */
++   if (type == D3D12_HEAP_TYPE_DEFAULT)
++      texture_cache_evict_placed(screen);
++   mtx_lock(&screen->texture_cache_mutex);
++   ok = texture_pool_alloc_locked(screen, type, size, alignment, heap, offset, block);
++   const bool can_grow = !ok && *heap_count < texture_heap_max_count;
++   if (can_grow)
++      (*heap_count)++;
++   mtx_unlock(&screen->texture_cache_mutex);
++   if (ok || !can_grow)
++      return ok;
++
++   /* One more heap. This is the only place that allocates GPU memory. */
++   D3D12_HEAP_DESC heap_desc = {};
++   heap_desc.SizeInBytes = heap_bytes;
++   heap_desc.Properties = GetCustomHeapProperties(screen->dev, type);
++   heap_desc.Alignment = D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
++   heap_desc.Flags = D3D12_HEAP_FLAG_NONE;
++   struct d3d12_texture_heap *th = CALLOC_STRUCT(d3d12_texture_heap);
++   if (!th || FAILED(screen->dev->CreateHeap(&heap_desc, IID_PPV_ARGS(&th->heap)))) {
++      FREE(th);
++      mtx_lock(&screen->texture_cache_mutex);
++      (*heap_count)--;
++      mtx_unlock(&screen->texture_cache_mutex);
++      return false;
++   }
++   th->type = type;
++   util_vma_heap_init(&th->vma, texture_heap_vma_base, heap_bytes);
++   if (getenv("D3D12_TEXTURE_CACHE_DEBUG"))
++      fprintf(stderr, "[texcache] heap create type=%d #%u (%llu MiB) for a %llu byte resource\n",
++              (int)type, *heap_count, (unsigned long long)(heap_bytes >> 20),
++              (unsigned long long)size);
++
++   mtx_lock(&screen->texture_cache_mutex);
++   list_addtail(&th->entry, &screen->texture_heaps);
++   ok = texture_pool_alloc_locked(screen, type, size, alignment, heap, offset, block);
++   mtx_unlock(&screen->texture_cache_mutex);
++   return ok;
++}
++
++void
++d3d12_texture_pool_free(struct d3d12_screen *screen, struct d3d12_texture_pool_block *block)
++{
++   if (!block->heap)
++      return;
++   mtx_lock(&screen->texture_cache_mutex);
++   util_vma_heap_free(&block->heap->vma, block->addr, block->size);
++   mtx_unlock(&screen->texture_cache_mutex);
++   block->heap = nullptr;
++}
++
++void
++d3d12_texture_pool_destroy(struct d3d12_screen *screen)
++{
++   list_for_each_entry_safe(struct d3d12_texture_heap, th, &screen->texture_heaps, entry) {
++      list_del(&th->entry);
++      util_vma_heap_finish(&th->vma);
++      th->heap->Release();
++      FREE(th);
++   }
++   memset(screen->texture_heap_count, 0, sizeof(screen->texture_heap_count));
++}
++
+ struct d3d12_cached_texture {
+    struct list_head entry;
++   struct d3d12_screen *screen;
++   struct d3d12_texture_pool_block pool_block;
+    ID3D12Resource *res;
+    D3D12_RESOURCE_DESC desc;
+    uint32_t format;
+@@ -111,6 +235,7 @@
+    if (tex->has_state)
+       d3d12_resource_state_cleanup(&tex->state);
+    tex->res->Release();
++   d3d12_texture_pool_free(tex->screen, &tex->pool_block);
+    FREE(tex);
+ }
+ 
+@@ -141,7 +266,8 @@
+ d3d12_texture_cache_take(struct d3d12_screen *screen,
+                          const D3D12_RESOURCE_DESC *desc, uint32_t format,
+                          struct d3d12_resource_state *state, bool *has_state,
+-                         enum d3d12_residency_status *residency)
++                         enum d3d12_residency_status *residency,
++                         struct d3d12_texture_pool_block *pool_block)
+ {
+    if (screen->texture_cache_usecs <= 0)
+       return nullptr;
+@@ -161,6 +287,7 @@
+       *state = tex->state;
+       *has_state = tex->has_state;
+       *residency = tex->residency;
++      *pool_block = tex->pool_block;
+       FREE(tex);
+       break;
+    }
+@@ -189,6 +316,24 @@
+    texture_cache_release_list(&to_release);
+ }
+ 
++/* Releases every cached texture that occupies texture heap space. */
++static void
++texture_cache_evict_placed(struct d3d12_screen *screen)
++{
++   struct list_head to_release;
++   list_inithead(&to_release);
++   mtx_lock(&screen->texture_cache_mutex);
++   list_for_each_entry_safe(struct d3d12_cached_texture, tex, &screen->texture_cache, entry) {
++      if (!tex->pool_block.heap)
++         continue;
++      list_del(&tex->entry);
++      screen->texture_cache_bytes -= tex->size;
++      list_addtail(&tex->entry, &to_release);
++   }
++   mtx_unlock(&screen->texture_cache_mutex);
++   texture_cache_release_list(&to_release);
++}
++
+ /* Takes over bo->res and its tracked state. Returns false if the bo must be
+  * destroyed the normal way. */
+ static bool
+@@ -198,7 +343,7 @@
+    TEXCACHE_DBG("put  cacheable=%d res=%p %ux%u residency=%d size=%u\n", bo->texture_cacheable, (void*)bo->res,
+                 (unsigned)bo->texture_cache_desc.Width, (unsigned)bo->texture_cache_desc.Height, (int)bo->residency_status, (unsigned)bo->estimated_size);
+    if (!bo->texture_cacheable || !bo->res || screen->texture_cache_usecs <= 0 ||
+-       bo->residency_status == d3d12_permanently_resident ||
++       (bo->residency_status == d3d12_permanently_resident && !bo->pool_block.heap) ||
+        bo->estimated_size > texture_cache_max_bytes / 4)
+       return false;
+ 
+@@ -206,6 +351,8 @@
+    if (!tex)
+       return false;
+    tex->res = bo->res;
++   tex->screen = screen;
++   tex->pool_block = bo->pool_block;
+    tex->desc = bo->texture_cache_desc;
+    tex->format = bo->texture_cache_format;
+    tex->has_state = bo->global_state.subresource_states != nullptr;
+@@ -290,7 +437,30 @@
+    enum d3d12_residency_status init_residency = screen->support_create_not_resident ?
+       d3d12_evicted : d3d12_resident;
+ 
++   /* Place the buffer into one of the screen's heaps: no GPU memory allocation. */
++   {
++      ID3D12Heap *pool_heap = nullptr;
++      uint64_t pool_offset = 0;
++      struct d3d12_texture_pool_block pool_block = {};
++      if (d3d12_texture_pool_alloc(screen, heap_type, &res_desc, &pool_heap, &pool_offset, &pool_block)) {
++         if (SUCCEEDED(dev->CreatePlacedResource(pool_heap, pool_offset, &res_desc,
++                                                 D3D12_RESOURCE_STATE_COMMON, NULL,
++                                                 IID_PPV_ARGS(&res)))) {
++            struct d3d12_bo *bo = d3d12_bo_wrap_res(screen, res, d3d12_permanently_resident);
++            if (bo) {
++               bo->pool_block = pool_block;
++               return bo;
++            }
++            res->Release();
++         }
++         d3d12_texture_pool_free(screen, &pool_block);
++      }
++   }
++
+    D3D12_HEAP_PROPERTIES heap_pris = GetCustomHeapProperties(dev, heap_type);
++   if (getenv("D3D12_TEXTURE_CACHE_DEBUG"))
++      fprintf(stderr, "[texcache] buffer create %llu bytes heap_type=%d\n",
++              (unsigned long long)size, (int)heap_type);
+    HRESULT hres = dev->CreateCommittedResource(&heap_pris,
+                                                heap_flags,
+                                                &res_desc,
+@@ -354,6 +524,7 @@
+          d3d12_resource_state_cleanup(&bo->global_state);
+          if (bo->res)
+             bo->res->Release();
++         d3d12_texture_pool_free(bo->screen, &bo->pool_block);
+       }
+ 
+       uint64_t mask = bo->local_context_state_mask;
+--- src/gallium/drivers/d3d12/d3d12_screen.h.orig
++++ src/gallium/drivers/d3d12/d3d12_screen.h
+@@ -92,6 +92,15 @@
+    struct list_head texture_cache;
+    uint64_t texture_cache_bytes;
+    int64_t texture_cache_usecs;
++
++   /* Budget/usage snapshot for the per-batch residency pass. */
++   struct d3d12_memory_info residency_mem_info;
++   int64_t residency_mem_info_time;
++   int64_t residency_mem_info_usecs;
++
++   struct list_head texture_heaps;
++   uint64_t texture_heap_bytes;
++   unsigned texture_heap_count[3]; /* default, upload, readback */
+    ID3D12Fence *residency_fence;
+    uint64_t residency_fence_value;
+    unsigned num_evictions;
+--- src/gallium/drivers/d3d12/d3d12_screen.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_screen.cpp
+@@ -639,6 +639,7 @@
+       screen->bufmgr = nullptr;
+    }
+    d3d12_texture_cache_flush(screen);
++   d3d12_texture_pool_destroy(screen);
+    d3d12_deinit_residency(screen);
+    if (screen->fence) {
+       screen->fence->Release();
+@@ -1276,7 +1277,18 @@
+    list_inithead(&screen->texture_cache);
+    screen->texture_cache_bytes = 0;
+    screen->texture_cache_usecs =
+-      (int64_t)CLAMP(debug_get_num_option("D3D12_TEXTURE_CACHE_MS", 30000), 0, 600000) * 1000;
++      (int64_t)CLAMP(debug_get_num_option("D3D12_TEXTURE_CACHE_MS", 3600000), 0, 86400000) * 1000;
++   /* The residency pass asked the host for the memory budget on every batch
++    * (two QueryVideoMemoryInfo round trips per flush under WSL, several ms
++    * each and as long as any host-side stall). The budget moves slowly; reuse
++    * the answer for a while. D3D12_MEMORY_INFO_CACHE_MS, 0 = ask every time. */
++   screen->residency_mem_info_time = 0;
++   screen->residency_mem_info_usecs =
++      (int64_t)CLAMP(debug_get_num_option("D3D12_MEMORY_INFO_CACHE_MS", 500), 0, 60000) * 1000;
++   list_inithead(&screen->texture_heaps);
++   memset(screen->texture_heap_count, 0, sizeof(screen->texture_heap_count));
++   screen->texture_heap_bytes =
++      (uint64_t)CLAMP(debug_get_num_option("D3D12_TEXTURE_HEAP_MB", 256), 0, 2048) * 1024 * 1024;
+ 
+    list_inithead(&screen->context_list);
+    screen->context_id_count = 16;
+--- src/gallium/drivers/d3d12/d3d12_resource.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_resource.cpp
+@@ -324,11 +324,24 @@
+       ((templ->bind & PIPE_BIND_SHARED) ? 0x80000000u : 0u);
+    struct d3d12_resource_state cached_state = {};
+    bool cached_has_state = false;
++   struct d3d12_texture_pool_block pool_block = {};
+    if (cacheable)
+       d3d12_res = d3d12_texture_cache_take(screen, &desc, cache_format,
+-                                           &cached_state, &cached_has_state, &init_residency);
++                                           &cached_state, &cached_has_state, &init_residency,
++                                           &pool_block);
+    if (d3d12_res)
+       hres = S_OK;
++
++   /* New texture: place it into one of the screen's texture heaps instead of
++    * allocating GPU memory for it (shareable resources cannot be placed). */
++   ID3D12Heap *place_heap = heap;
++   uint64_t place_offset = placed_offset;
++   if (!d3d12_res && cacheable && !(templ->bind & PIPE_BIND_SHARED))
++      d3d12_texture_pool_alloc(screen, D3D12_HEAP_TYPE_DEFAULT, &desc, &place_heap, &place_offset, &pool_block);
++   if (!d3d12_res && !pool_block.heap && getenv("D3D12_TEXTURE_CACHE_DEBUG"))
++      fprintf(stderr, "[texcache] committed create %ux%ux%u fmt=%u bind=%x samples=%u cacheable=%d\n",
++              templ->width0, templ->height0, templ->depth0, (unsigned)templ->format, templ->bind,
++              templ->nr_samples, (int)cacheable);
+    if (!cacheable && getenv("D3D12_TEXTURE_CACHE_DEBUG") && templ->target != PIPE_BUFFER)
+       fprintf(stderr, "[texcache] NOCACHE create %ux%u fmt=%u bind=%x heap=%d\n", templ->width0, templ->height0, (unsigned)templ->format, templ->bind, heap != nullptr);
+ 
+@@ -346,6 +359,7 @@
+       }
+    }
+ 
++   for (;;) {
+    if (d3d12_res) {
+       /* reused from the texture cache */
+    } else if (screen->opts12.RelaxedFormatCastingSupported) {
+@@ -361,10 +375,10 @@
+          desc.Layout,
+          desc.Flags,
+       };
+-      if (heap) {
++      if (place_heap) {
+          init_residency = d3d12_permanently_resident;
+-         hres = screen->dev10->CreatePlacedResource2(heap,
+-                                                     placed_offset,
++         hres = screen->dev10->CreatePlacedResource2(place_heap,
++                                                     place_offset,
+                                                      &desc1,
+                                                      D3D12_BARRIER_LAYOUT_COMMON,
+                                                      nullptr,
+@@ -395,10 +409,10 @@
+    } else
+ #endif
+    {
+-      if (heap) {
++      if (place_heap) {
+          init_residency = d3d12_permanently_resident;
+-         hres = screen->dev->CreatePlacedResource(heap,
+-                                                  placed_offset,
++         hres = screen->dev->CreatePlacedResource(place_heap,
++                                                  place_offset,
+                                                   &desc,
+                                                   D3D12_RESOURCE_STATE_COMMON,
+                                                   nullptr,
+@@ -422,8 +436,17 @@
+       }
+    }
+ 
+-   if (FAILED(hres))
++      /* Placement failed: return the heap space and create a committed one. */
++      if (SUCCEEDED(hres) || !pool_block.heap || heap)
++         break;
++      d3d12_texture_pool_free(screen, &pool_block);
++      place_heap = nullptr;
++   }
++
++   if (FAILED(hres)) {
++      d3d12_texture_pool_free(screen, &pool_block);
+       return false;
++   }
+ 
+    if (screen->winsys && (templ->bind & PIPE_BIND_DISPLAY_TARGET)) {
+       struct sw_winsys *winsys = screen->winsys;
+@@ -451,8 +474,10 @@
+    if (!res->bo) {
+       if (cached_has_state)
+          d3d12_resource_state_cleanup(&cached_state);
++      d3d12_texture_pool_free(screen, &pool_block);
+       return false;
+    }
++   res->bo->pool_block = pool_block;
+    if (cacheable) {
+       res->bo->texture_cacheable = true;
+       res->bo->texture_cache_desc = desc;
+--- src/gallium/drivers/d3d12/d3d12_residency.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_residency.cpp
+@@ -164,11 +164,16 @@
+ d3d12_process_batch_residency(struct d3d12_screen *screen, struct d3d12_batch *batch)
+ {
+    d3d12_memory_info mem_info;
+-   screen->get_memory_info(screen, &mem_info);
++   int64_t current_time = os_time_get();
++   if (screen->residency_mem_info_time == 0 ||
++       current_time - screen->residency_mem_info_time >= screen->residency_mem_info_usecs) {
++      screen->get_memory_info(screen, &screen->residency_mem_info);
++      screen->residency_mem_info_time = current_time;
++   }
++   mem_info = screen->residency_mem_info;
+ 
+    uint64_t completed_fence_value = screen->fence->GetCompletedValue();
+    uint64_t pending_fence_value = screen->fence_value + 1;
+-   int64_t current_time = os_time_get();
+    int64_t grace_period = get_eviction_grace_period(&mem_info);
+ 
+    /* Gather base bos for the batch */

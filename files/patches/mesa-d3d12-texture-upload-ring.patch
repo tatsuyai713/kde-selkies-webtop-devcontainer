@@ -1,0 +1,118 @@
+--- src/gallium/drivers/d3d12/d3d12_resource.h.orig
++++ src/gallium/drivers/d3d12/d3d12_resource.h
+@@ -74,6 +74,10 @@
+    void *data;
+    unsigned zs_cpu_copy_stride;
+    unsigned zs_cpu_copy_layer_stride;
++   /* Offset of the staging data inside staging_res when it was suballocated
++    * from d3d12_context::texture_uploader (0 otherwise). */
++   unsigned staging_offset;
++   bool staging_from_uploader;
+ };
+ 
+ static inline struct d3d12_resource *
+--- src/gallium/drivers/d3d12/d3d12_context.h.orig
++++ src/gallium/drivers/d3d12/d3d12_context.h
+@@ -170,6 +170,13 @@
+    unsigned id;
+    struct slab_child_pool transfer_pool;
+    struct slab_child_pool transfer_pool_unsync;
++   /* Ring of large upload-heap buffers for write-only texture transfers.
++    * Without it every texture upload creates its own staging buffer; the
++    * buffer cache cannot recycle a buffer the GPU still references, so a
++    * stream of uploads (wl_shm surfaces, glTexSubImage2D per damage rect)
++    * turns into one CreateCommittedResource per upload. That call is a
++    * round trip to the host driver on WSL (D3DKMTCreateAllocation2). */
++   struct u_upload_mgr *texture_uploader;
+    struct list_head context_list_entry;
+    struct threaded_context *threaded_context;
+    struct d3d12_batch batches[8];
+--- src/gallium/drivers/d3d12/d3d12_context_common.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_context_common.cpp
+@@ -140,6 +140,8 @@
+          u_upload_destroy(pctx->stream_uploader);
+       if (pctx->const_uploader)
+          u_upload_destroy(pctx->const_uploader);
++      if (ctx->texture_uploader)
++         u_upload_destroy(ctx->texture_uploader);
+       if (!ctx->queries_disabled) {
+          u_suballocator_destroy(&ctx->query_allocator);
+       }  
+@@ -583,6 +585,13 @@
+ 
+       ctx->base.stream_uploader = u_upload_create_default(&ctx->base);
+       ctx->base.const_uploader = u_upload_create_default(&ctx->base);
++      /* 32 MiB holds a couple of full desktop-sized frames, so steady-state
++       * uploads reuse the ring and its retired chunks come back from the
++       * buffer cache instead of new allocations. D3D12_TEXTURE_UPLOAD_RING=0
++       * disables the ring (upstream per-transfer staging buffers). */
++      if (debug_get_bool_option("D3D12_TEXTURE_UPLOAD_RING", true))
++         ctx->texture_uploader = u_upload_create(&ctx->base, 32 * 1024 * 1024, 0,
++                                                 PIPE_USAGE_STREAM, 0);
+ 
+       ctx->base.get_sample_position = u_default_get_sample_position;
+       ctx->base.get_sample_position = u_default_get_sample_position;
+--- src/gallium/drivers/d3d12/d3d12_resource.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_resource.cpp
+@@ -34,6 +34,7 @@
+ #include "util/format/u_format.h"
+ #include "util/u_inlines.h"
+ #include "util/u_memory.h"
++#include "util/u_upload_mgr.h"
+ #include "util/format/u_format_zs.h"
+ 
+ #include "frontend/sw_winsys.h"
+@@ -1206,6 +1207,7 @@
+    buf_loc.PlacedFootprint = footprint;
+    buf_loc.PlacedFootprint.Offset = offset;
+    buf_loc.PlacedFootprint.Offset += trans->base.b.offset;
++   buf_loc.PlacedFootprint.Offset += trans->staging_offset;
+ 
+    if (util_format_has_depth(util_format_description(res->base.b.format)) &&
+        screen->opts2.ProgrammableSamplePositionsTier == D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED) {
+@@ -1929,6 +1931,32 @@
+       pipe_resource_usage staging_usage = (usage & (PIPE_MAP_DISCARD_RANGE | PIPE_MAP_DISCARD_WHOLE_RESOURCE)) ?
+          PIPE_USAGE_STREAM : PIPE_USAGE_STAGING;
+ 
++      /* Write-only texture upload: the old contents are not read back, so the
++       * staging memory can come from the context's upload ring. Depth/stencil
++       * CPU-copy layouts and buffers keep the dedicated staging resource. */
++      if (ctx->texture_uploader &&
++          res->base.b.target != PIPE_BUFFER &&
++          trans->zs_cpu_copy_stride == 0 &&
++          !(usage & (PIPE_MAP_READ | TC_TRANSFER_MAP_THREADED_UNSYNC)) &&
++          (usage & PIPE_MAP_WRITE) &&
++          (usage & (PIPE_MAP_DISCARD_RANGE | PIPE_MAP_DISCARD_WHOLE_RESOURCE))) {
++         void *upload_ptr = NULL;
++         struct pipe_resource *upload_buf = NULL;
++         unsigned upload_offset = 0;
++         u_upload_alloc_ref(ctx->texture_uploader, 0, staging_res_size,
++                            D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT,
++                            &upload_offset, &upload_buf, &upload_ptr);
++         if (upload_buf && upload_ptr) {
++            trans->staging_res = upload_buf;
++            trans->staging_offset = upload_offset;
++            trans->staging_from_uploader = true;
++            pipe_resource_reference(&ptrans->resource, pres);
++            *transfer = ptrans;
++            return (uint8_t *)upload_ptr + range.Begin;
++         }
++         pipe_resource_reference(&upload_buf, NULL);
++      }
++
+       trans->staging_res = pipe_buffer_create(pctx->screen, 0,
+                                               staging_usage,
+                                               staging_res_size);
+@@ -1975,6 +2003,12 @@
+       if (trans->base.b.usage & PIPE_MAP_WRITE)
+          write_zs_surface(pctx, res, trans);
+       free(trans->data);
++   } else if (trans->staging_res && trans->staging_from_uploader) {
++      /* The ring stays mapped (persistently where supported); unmap it before
++       * the copy is recorded so non-persistent mappings are flushed. */
++      u_upload_unmap(ctx->texture_uploader);
++      transfer_buf_to_image(ctx, res, d3d12_resource(trans->staging_res), trans, 0);
++      pipe_resource_reference(&trans->staging_res, NULL);
+    } else if (trans->staging_res) {
+       if(util_format_is_yuv(res->overall_format)) {
+ 

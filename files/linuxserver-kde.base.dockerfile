@@ -3,6 +3,10 @@
 ###########################################
 # Stage 1: Alpine rootfs builder
 ###########################################
+# Release codename (jammy, noble, resolute); also selects the Docker Hub image
+# that the Ubuntu rootfs stage falls back to.
+ARG UBUNTU_REL=noble
+
 FROM alpine:3.21 AS alpine-rootfs-stage
 
 ARG S6_OVERLAY_VERSION="3.2.1.0"
@@ -102,6 +106,9 @@ RUN set -eux; \
 ###########################################
 # Stage 2: Ubuntu rootfs builder
 ###########################################
+# Fallback source of the Ubuntu base rootfs, see "grab base tarball" below.
+FROM ubuntu:${UBUNTU_REL} AS ubuntu-official-rootfs
+
 FROM alpine:3 AS ubuntu-rootfs-stage
 
 ARG UBUNTU_ARCH=amd64
@@ -116,19 +123,36 @@ RUN \
   apk add --no-cache bash curl git jq tzdata xz
 
 # grab base tarball
-RUN \
-  git clone --depth=1 https://git.launchpad.net/cloud-images/+oci/ubuntu-base -b ${TAG} /build && \
-  cd /build/oci && \
-  DIGEST=$(jq -r '.manifests[0].digest[7:]' < index.json) && \
-  cd /build/oci/blobs/sha256 && \
-  if jq -e '.layers // empty' < "${DIGEST}" >/dev/null 2>&1; then \
-    TARBALL=$(jq -r '.layers[0].digest[7:]' < ${DIGEST}); \
-  else \
-    MULTIDIGEST=$(jq -r ".manifests[] | select(.platform.architecture == \"${ARCH}\") | .digest[7:]" < ${DIGEST}) && \
-    TARBALL=$(jq -r '.layers[0].digest[7:]' < ${MULTIDIGEST}); \
-  fi && \
+# The rootfs comes from Canonical's OCI repository on git.launchpad.net. That
+# server answers 504 ("Path translation timed out") for minutes at a time, so
+# after a few attempts fall back to the rootfs of the official ubuntu image on
+# Docker Hub, which is published from the same repository.
+RUN --mount=type=bind,from=ubuntu-official-rootfs,source=/,target=/official-rootfs \
   mkdir /root-out && \
-  tar xf ${TARBALL} -C /root-out && \
+  n=0; cloned=false; \
+  while [ "${n}" -lt 3 ]; do \
+    n=$((n + 1)); \
+    if git clone --depth=1 https://git.launchpad.net/cloud-images/+oci/ubuntu-base -b ${TAG} /build; then cloned=true; break; fi; \
+    echo "git clone of ubuntu-base failed (attempt ${n} of 3)" >&2; \
+    rm -rf /build; \
+    if [ "${n}" -lt 3 ]; then sleep $((n * 15)); fi; \
+  done; \
+  if [ "${cloned}" = "true" ]; then \
+    cd /build/oci && \
+    DIGEST=$(jq -r '.manifests[0].digest[7:]' < index.json) && \
+    cd /build/oci/blobs/sha256 && \
+    if jq -e '.layers // empty' < "${DIGEST}" >/dev/null 2>&1; then \
+      TARBALL=$(jq -r '.layers[0].digest[7:]' < ${DIGEST}); \
+    else \
+      MULTIDIGEST=$(jq -r ".manifests[] | select(.platform.architecture == \"${ARCH}\") | .digest[7:]" < ${DIGEST}) && \
+      TARBALL=$(jq -r '.layers[0].digest[7:]' < ${MULTIDIGEST}); \
+    fi && \
+    tar xf ${TARBALL} -C /root-out; \
+  else \
+    echo "Using the rootfs of the Docker Hub image ubuntu:${REL} instead" >&2; \
+    cp -a /official-rootfs/. /root-out/; \
+  fi && \
+  test -x /root-out/usr/bin/apt-get && \
   rm -rf \
     /root-out/var/log/* \
     /root-out/home/ubuntu \
@@ -158,6 +182,33 @@ RUN tar -C /root-out -Jxpf /tmp/s6-overlay-symlinks-arch.tar.xz
 FROM scratch AS ubuntu-base-temp
 
 COPY --from=ubuntu-rootfs-stage /root-out/ /
+
+# Ubuntu 22.04 arm64 only: /sbin/ldconfig.real (a static-pie binary of glibc
+# 2.35) segfaults at random under QEMU user emulation (seen with QEMU 10.2.3,
+# which is how the arm64 image is built on an amd64 host). The libc-bin
+# trigger runs it after every package installation and retries once; when
+# both runs crash, dpkg fails ("libc-bin ... returned error exit status 139")
+# and the build stops. Put a wrapper in front of it that runs it again while
+# it dies from SIGSEGV. On real arm64 hardware it never crashes, so the
+# wrapper then only passes the call through.
+RUN set -eu; \
+  if [ "$(dpkg --print-architecture)" = "arm64" ] && [ "$(. /etc/os-release && echo "${VERSION_ID}")" = "22.04" ]; then \
+    dpkg-divert --add --no-rename --divert /sbin/ldconfig.real.distrib /sbin/ldconfig.real; \
+    mv /sbin/ldconfig.real /sbin/ldconfig.real.distrib; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      '# Retry wrapper, see linuxserver-kde.base.dockerfile (QEMU user emulation).' \
+      'n=0' \
+      'while :; do' \
+      '  /sbin/ldconfig.real.distrib "$@"; rc=$?' \
+      '  [ "${rc}" -ne 139 ] && exit "${rc}"' \
+      '  n=$((n + 1))' \
+      '  [ "${n}" -ge 30 ] && exit "${rc}"' \
+      'done' \
+      > /sbin/ldconfig.real; \
+    chmod 755 /sbin/ldconfig.real; \
+    /sbin/ldconfig; \
+  fi
 
 ARG VERSION
 ARG MODS_VERSION="v3"
@@ -245,47 +296,120 @@ RUN \
 COPY ubuntu-root/ /
 
 ###########################################
-# Stage 3b: Ubuntu 24.04 WSL D3D12 graphics compatibility
+# Stage 3b: WSL D3D12 graphics compatibility (Ubuntu 24.04 and 26.04)
 ###########################################
-# Mesa 25.2.8 leaves ignored blend/depth/stencil enum members zeroed.  Some
-# Intel WSL UMD versions validate those members anyway and reject KWin's PSO
-# with E_INVALIDARG, after which Mesa terminates kwin_x11.  Rebuild only the
-# affected Ubuntu release with valid no-op defaults.  Other releases and
-# architectures produce an empty overlay and continue to use distro Mesa.
+# Private libgallium for WSL D3D12 sessions under /opt/wsl-d3d12-graphics,
+# loaded through LD_LIBRARY_PATH by the desktop session, Xvfb and pixelflux;
+# distro Mesa stays untouched for native Linux GPUs.
+#
+# 24.04 (Mesa 25.2.8): Mesa leaves ignored blend/depth/stencil enum members
+# zeroed. Some Intel WSL UMD versions validate those members anyway and reject
+# KWin's PSO with E_INVALIDARG, after which Mesa terminates kwin_x11; plus the
+# BGRX SRV format fix.
+#
+# 26.04 (Mesa 26.0.8): on the Wayland desktop every damaged wl_shm surface is
+# uploaded by KWin with glTexSubImage2D and every frame is read back by
+# pixelflux with glReadPixels. Upstream creates a temporary texture and a
+# staging buffer for each of those calls, and on WSL each creation is a
+# D3DKMTCreateAllocation2 round trip to the Windows driver; the texture upload
+# also read back the temporary texture and waited for the GPU. The desktop
+# then fell to about one frame per second whenever something moved.
+#   mesa-st-temp-texture-reuse.patch: reuse those temporary textures (D3D12
+#     screens only; glTexSubImage, glReadPixels, glGetTexImage) and map the
+#     upload texture with DISCARD_RANGE.
+#   mesa-d3d12-texture-upload-ring.patch: suballocate write-only texture
+#     staging from a per-context upload ring.
+#   mesa-d3d12-buffer-cache-retention.patch: keep freed buffers for 60 s
+#     instead of 1 s, so per-frame glBufferData and staging buffers stop
+#     missing the cache. A single allocation regularly took 0.15-2 s on WSL
+#     and froze KWin or pixelflux for that long.
+#   mesa-d3d12-texture-cache.patch: keep destroyed textures (with their
+#     tracked resource state) and hand them out again. KWin recreates its
+#     OffscreenEffect texture when the scaled window size rounds differently
+#     during a drag; each creation stalled KWin's main thread for 50 ms-2 s.
+#     Shareable gbm buffers are never cached: another process (the
+#     compositor) may still show a buffer its client already destroyed, and
+#     reusing that memory let a new buffer overwrite it on screen.
+#   mesa-d3d12-texture-heap.patch: take the memory for textures and for
+#     buffers that are not slab-suballocated from a few large heaps that are
+#     created once (256 MiB default heaps, 64 MiB upload/readback heaps, at
+#     most 4 of each) and only place resources into them, so a texture of a
+#     new size no longer allocates GPU memory (measured: committed resource
+#     avg 6.7 ms / max 280 ms, placed resource avg 0.3 ms / max 12 ms).
+#     Freed ranges are reused; a heap is added only when the existing ones
+#     are full. Shareable gbm buffers cannot be placed and are not cached:
+#     they are allocated on every creation. The texture cache keeps the
+#     other textures for an hour. The
+#     per-batch memory budget query (two host round trips per flush) is
+#     answered from a 0.5 s snapshot. Edge drags from a cold start: 11-48
+#     allocations before; afterwards only shared buffers allocate.
+#     D3D12_TEXTURE_HEAP_MB=0 and D3D12_MEMORY_INFO_CACHE_MS=0
+#     turn the two parts off.
+#   mesa-d3d12-shared-flush-sync.patch: wait for the GPU at a flush when the
+#     frame rendered into a buffer another process can see (a Wayland
+#     client's window buffer, KWin's output buffer for pixelflux). dma-bufs
+#     carry an implicit fence on Linux; D3D12 shared handles under WSL carry
+#     none, so the receiver sampled the buffer while the frame was still
+#     executing: the repainted region (the lines htop just updated, a panel
+#     item) showed the wallpaper and the windows below but not the window on
+#     top until the next repaint. Measured in a nested KWin with htop -d 1:
+#     22-49 such frames per 70 s before, none from that hop after.
+#     D3D12_SHARED_FLUSH_SYNC=0 turns it off. Must stay last in the list (it
+#     is generated on top of the texture cache/heap patches).
+# Other releases and architectures produce an empty overlay.
 FROM ubuntu-base-temp AS wsl-d3d12-mesa-stage
 
 ARG TARGETARCH
-# Keep in step with WSL_VAAPI_MESA_VERSION above (noble-updates' current Mesa).
-ARG WSL_D3D12_MESA_VERSION=25.2.8-0ubuntu0.24.04.4
+# Keep in step with the Mesa each release ships (24.04: noble-updates, also
+# WSL_VAAPI_MESA_VERSION above; 26.04: resolute-updates). libgallium is
+# version-locked to the distro libEGL/libgbm/dri loader, so the overlay must
+# be built from exactly the installed version; the session scripts ignore an
+# overlay whose version is not installed.
+ARG WSL_D3D12_MESA_VERSION_2404=25.2.8-0ubuntu0.24.04.4
+ARG WSL_D3D12_MESA_VERSION_2604=26.0.8-1ubuntu0.3
 COPY patches/mesa-d3d12-valid-disabled-pso-state.patch /tmp/mesa-d3d12-valid-disabled-pso-state.patch
 COPY patches/mesa-d3d12-bgrx-srv-format.patch /tmp/mesa-d3d12-bgrx-srv-format.patch
+COPY patches/mesa-d3d12-texture-upload-ring.patch /tmp/mesa-d3d12-texture-upload-ring.patch
+COPY patches/mesa-st-temp-texture-reuse.patch /tmp/mesa-st-temp-texture-reuse.patch
+COPY patches/mesa-d3d12-buffer-cache-retention.patch /tmp/mesa-d3d12-buffer-cache-retention.patch
+COPY patches/mesa-d3d12-texture-cache.patch /tmp/mesa-d3d12-texture-cache.patch
+COPY patches/mesa-d3d12-texture-heap.patch /tmp/mesa-d3d12-texture-heap.patch
+COPY patches/mesa-d3d12-shared-flush-sync.patch /tmp/mesa-d3d12-shared-flush-sync.patch
 
 RUN set -eux; \
   mkdir -p /mesa-out; \
   ubuntu_version="$(. /etc/os-release && printf '%s' "${VERSION_ID}")"; \
-  if [ "${TARGETARCH}" = "amd64" ] && [ "${ubuntu_version}" = "24.04" ]; then \
+  mesa_version=""; mesa_patches=""; mesa_drivers=d3d12; mesa_extra_opts=""; \
+  case "${ubuntu_version}" in \
+    24.04) mesa_version="${WSL_D3D12_MESA_VERSION_2404}"; \
+           mesa_patches="mesa-d3d12-valid-disabled-pso-state.patch mesa-d3d12-bgrx-srv-format.patch"; \
+           mesa_extra_opts="-Dgallium-vdpau=disabled" ;; \
+    26.04) mesa_version="${WSL_D3D12_MESA_VERSION_2604}"; \
+           mesa_patches="mesa-st-temp-texture-reuse.patch mesa-d3d12-texture-upload-ring.patch mesa-d3d12-buffer-cache-retention.patch mesa-d3d12-texture-cache.patch mesa-d3d12-texture-heap.patch mesa-d3d12-shared-flush-sync.patch"; \
+           mesa_drivers=d3d12,llvmpipe,softpipe ;; \
+  esac; \
+  if [ "${TARGETARCH}" = "amd64" ] && [ -n "${mesa_version}" ]; then \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       devscripts dpkg-dev; \
     DEBIAN_FRONTEND=noninteractive apt-get build-dep -y mesa; \
     mkdir -p /tmp/mesa-build && cd /tmp/mesa-build; \
-    apt-get source "mesa=${WSL_D3D12_MESA_VERSION}"; \
+    apt-get source "mesa=${mesa_version}"; \
     cd mesa-*; \
-    patch -p0 < /tmp/mesa-d3d12-valid-disabled-pso-state.patch; \
-    patch -p0 < /tmp/mesa-d3d12-bgrx-srv-format.patch; \
+    for p in ${mesa_patches}; do patch -p0 < "/tmp/${p}"; done; \
     DEB_BUILD_OPTIONS=nocheck debian/rules override_dh_auto_configure; \
     mesa_build_dir="$(find . -maxdepth 1 -type d -name 'obj-*' -print -quit)"; \
     test -n "${mesa_build_dir}"; \
     meson configure "${mesa_build_dir}" \
-      -Dgallium-drivers=d3d12 \
+      -Dgallium-drivers="${mesa_drivers}" \
       -Dvulkan-drivers= -Dvulkan-layers= \
       -Dbuild-tests=false -Dgallium-rusticl=false \
-      -Dgallium-va=disabled -Dgallium-vdpau=disabled; \
+      -Dgallium-va=disabled ${mesa_extra_opts}; \
     ninja -C "${mesa_build_dir}" -j"$(nproc)" \
-      "src/gallium/targets/dri/libgallium-${WSL_D3D12_MESA_VERSION}.so"; \
+      "src/gallium/targets/dri/libgallium-${mesa_version}.so"; \
     install -Dm644 \
-      "${mesa_build_dir}/src/gallium/targets/dri/libgallium-${WSL_D3D12_MESA_VERSION}.so" \
-      "/mesa-out/opt/wsl-d3d12-graphics/libgallium-${WSL_D3D12_MESA_VERSION}.so"; \
+      "${mesa_build_dir}/src/gallium/targets/dri/libgallium-${mesa_version}.so" \
+      "/mesa-out/opt/wsl-d3d12-graphics/libgallium-${mesa_version}.so"; \
   fi
 
 ###########################################
@@ -474,7 +598,7 @@ RUN \
   if ! command -v docker >/dev/null 2>&1; then \
     echo "**** get.docker.com unavailable; trying download.docker.com noble packages ****" && \
     { install -m 0755 -d /etc/apt/keyrings && \
-      curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
+      curl --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
       chmod a+r /etc/apt/keyrings/docker.asc && \
       echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list && \
       apt-get update && \
@@ -535,7 +659,7 @@ RUN \
 # Step 2: Install selkies and related components
 RUN \
   echo "**** install selkies ****" && \
-  curl -o /tmp/selkies.tar.gz -L \
+  curl --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o /tmp/selkies.tar.gz -L \
     "https://github.com/selkies-project/selkies/archive/${SELKIES_COMMIT}.tar.gz" && \
   cd /tmp && \
   tar xf selkies.tar.gz && \
@@ -669,9 +793,9 @@ RUN \
   mv libudev.so.1.0.0-fake /opt/lib/ && \
   echo "**** add icon ****" && \
   mkdir -p /usr/share/selkies/www && \
-  curl -o /usr/share/selkies/www/icon.png \
+  curl --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o /usr/share/selkies/www/icon.png \
     https://raw.githubusercontent.com/linuxserver/docker-templates/master/linuxserver.io/img/selkies-logo.png && \
-  curl -o /usr/share/selkies/www/favicon.ico \
+  curl --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o /usr/share/selkies/www/favicon.ico \
     https://raw.githubusercontent.com/linuxserver/docker-templates/refs/heads/master/linuxserver.io/img/selkies-icon.ico && \
   echo "**** create selkies wrapper script ****" && \
   echo '#!/bin/bash' > /usr/local/bin/selkies && \
@@ -709,7 +833,7 @@ RUN \
   usermod -G dockremap dockremap && \
   echo 'dockremap:165536:65536' >> /etc/subuid && \
   echo 'dockremap:165536:65536' >> /etc/subgid && \
-  curl -o /usr/local/bin/dind -L \
+  curl --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o /usr/local/bin/dind -L \
     https://raw.githubusercontent.com/moby/moby/master/hack/dind && \
   chmod +x /usr/local/bin/dind && \
   echo 'hosts: files dns' > /etc/nsswitch.conf && \
@@ -719,15 +843,15 @@ echo "**** install VirtualGL ****" && \
   if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
     dpkg --add-architecture i386 && \
     apt-get update && \
-    curl -fsSL -O "https://github.com/VirtualGL/virtualgl/releases/download/${VIRTUALGL_VERSION}/virtualgl_${VIRTUALGL_VERSION}_amd64.deb" && \
-    curl -fsSL -O "https://github.com/VirtualGL/virtualgl/releases/download/${VIRTUALGL_VERSION}/virtualgl32_${VIRTUALGL_VERSION}_amd64.deb" && \
+    curl --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 -fsSL -O "https://github.com/VirtualGL/virtualgl/releases/download/${VIRTUALGL_VERSION}/virtualgl_${VIRTUALGL_VERSION}_amd64.deb" && \
+    curl --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 -fsSL -O "https://github.com/VirtualGL/virtualgl/releases/download/${VIRTUALGL_VERSION}/virtualgl32_${VIRTUALGL_VERSION}_amd64.deb" && \
     apt-get install -y --no-install-recommends "./virtualgl_${VIRTUALGL_VERSION}_amd64.deb" "./virtualgl32_${VIRTUALGL_VERSION}_amd64.deb" && \
     rm -f "virtualgl_${VIRTUALGL_VERSION}_amd64.deb" "virtualgl32_${VIRTUALGL_VERSION}_amd64.deb" && \
     chmod -f u+s /usr/lib/libvglfaker.so /usr/lib/libvglfaker-nodl.so /usr/lib/libvglfaker-opencl.so /usr/lib/libdlfaker.so /usr/lib/libgefaker.so 2>/dev/null || true && \
     chmod -f u+s /usr/lib32/libvglfaker.so /usr/lib32/libvglfaker-nodl.so /usr/lib32/libvglfaker-opencl.so /usr/lib32/libdlfaker.so /usr/lib32/libgefaker.so 2>/dev/null || true && \
     chmod -f u+s /usr/lib/i386-linux-gnu/libvglfaker.so /usr/lib/i386-linux-gnu/libvglfaker-nodl.so /usr/lib/i386-linux-gnu/libvglfaker-opencl.so /usr/lib/i386-linux-gnu/libdlfaker.so /usr/lib/i386-linux-gnu/libgefaker.so 2>/dev/null || true; \
   elif [ "$(dpkg --print-architecture)" = "arm64" ]; then \
-    curl -fsSL -O "https://github.com/VirtualGL/virtualgl/releases/download/${VIRTUALGL_VERSION}/virtualgl_${VIRTUALGL_VERSION}_arm64.deb" && \
+    curl --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 -fsSL -O "https://github.com/VirtualGL/virtualgl/releases/download/${VIRTUALGL_VERSION}/virtualgl_${VIRTUALGL_VERSION}_arm64.deb" && \
     apt-get update && apt-get install -y --no-install-recommends ./virtualgl_${VIRTUALGL_VERSION}_arm64.deb && \
     rm -f "virtualgl_${VIRTUALGL_VERSION}_arm64.deb" && \
     chmod -f u+s /usr/lib/libvglfaker.so /usr/lib/libvglfaker-nodl.so /usr/lib/libdlfaker.so /usr/lib/libgefaker.so 2>/dev/null || true; \
@@ -761,7 +885,7 @@ RUN \
   if [ "${UBUNTU_VERSION}" = "24.04" ] && [ "${ARCH_CUR}" = "amd64" ] && [ -n "${LIBVA_DEB_URL}" ]; then \
     echo "**** libva hack (Ubuntu ${UBUNTU_VERSION}) ****" && \
     mkdir /tmp/libva && \
-    curl -o /tmp/libva/libva.deb -L "${LIBVA_DEB_URL}" && \
+    curl --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o /tmp/libva/libva.deb -L "${LIBVA_DEB_URL}" && \
     cd /tmp/libva && \
     ar x libva.deb && \
     tar xf data.tar.zst && \
@@ -774,7 +898,7 @@ RUN \
   elif [ "${UBUNTU_VERSION}" = "24.04" ] && [ "${ARCH_CUR}" = "arm64" ] && [ -n "${LIBVA_DEB_URL_ARM64}" ]; then \
     echo "**** libva hack (Ubuntu ${UBUNTU_VERSION}, arm64) ****" && \
     mkdir /tmp/libva && \
-    curl -o /tmp/libva/libva.deb -L "${LIBVA_DEB_URL_ARM64}" && \
+    curl --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o /tmp/libva/libva.deb -L "${LIBVA_DEB_URL_ARM64}" && \
     cd /tmp/libva && \
     ar x libva.deb && \
     tar xf data.tar.zst && \
@@ -787,7 +911,7 @@ RUN \
   elif [ "${UBUNTU_VERSION}" = "22.04" ] && [ "${ARCH_CUR}" = "amd64" ] && [ -n "${LIBVA_DEB_URL_JAMMY}" ]; then \
     echo "**** libva hack (Ubuntu ${UBUNTU_VERSION}, jammy-compatible override) ****" && \
     mkdir /tmp/libva && \
-    curl -o /tmp/libva/libva.deb -L "${LIBVA_DEB_URL_JAMMY}" && \
+    curl --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o /tmp/libva/libva.deb -L "${LIBVA_DEB_URL_JAMMY}" && \
     cd /tmp/libva && \
     ar x libva.deb && \
     tar xf data.tar.zst && \
@@ -819,7 +943,7 @@ RUN \
     UBUNTU_VERSION_NODOT=$(echo "${UBUNTU_VERSION}" | tr -d '.'); \
     CUDA_VERSION="12-6"; \
     CUDA_KEYRING_VERSION="1.1"; \
-    if curl -fsSL "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VERSION_NODOT}/x86_64/cuda-keyring_${CUDA_KEYRING_VERSION}-1_all.deb" -o /tmp/cuda-keyring.deb; then \
+    if curl --retry 3 --retry-delay 10 --connect-timeout 30 --speed-limit 1024 --speed-time 60 -fsSL "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VERSION_NODOT}/x86_64/cuda-keyring_${CUDA_KEYRING_VERSION}-1_all.deb" -o /tmp/cuda-keyring.deb; then \
       dpkg -i /tmp/cuda-keyring.deb && rm -f /tmp/cuda-keyring.deb && \
       apt-get update && \
       if apt-cache show cuda-nvrtc-${CUDA_VERSION} >/dev/null 2>&1; then \
@@ -964,6 +1088,14 @@ RUN if [ -f /usr/local/bin/patch-selkies-wayland-keymap.py ]; then \
       /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-wayland-keymap.py; \
     fi
 
+# Keep the GPU statistics query (GPUtil -> nvidia-smi, about 3 s per call on
+# WSL2) out of the asyncio event loop that sends every video/audio chunk; it
+# froze the stream for seconds at a time on NVIDIA WSL sessions.
+RUN if [ -f /usr/local/bin/patch-selkies-gpu-stats.py ]; then \
+      chmod +x /usr/local/bin/patch-selkies-gpu-stats.py && \
+      /opt/selkies-env/bin/python3 /usr/local/bin/patch-selkies-gpu-stats.py; \
+    fi
+
 # ports and volumes
 EXPOSE 3000 3001
 VOLUME /config
@@ -984,7 +1116,7 @@ ENV TITLE="Ubuntu KDE" \
 
 RUN \
   echo "**** add icon ****" && \
-  curl -o /usr/share/selkies/www/icon.png \
+  curl --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o /usr/share/selkies/www/icon.png \
     https://raw.githubusercontent.com/linuxserver/docker-templates/master/linuxserver.io/img/webtop-logo.png && \
   echo "**** install packages ****" && \
   add-apt-repository ppa:xtradeb/apps && \
@@ -1009,7 +1141,7 @@ RUN \
   if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
     echo "**** install latest google-chrome (amd64) ****" && \
     cd /tmp && \
-    curl -fsSL -o google-chrome-stable.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \
+    curl --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 30 --speed-limit 1024 --speed-time 60 -fsSL -o google-chrome-stable.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y ./google-chrome-stable.deb && \
     rm -f /tmp/google-chrome-stable.deb; \
@@ -1179,6 +1311,15 @@ if [ -n "${USER_NAME:-}" ]; then
     chown "${USER_UID:-0}:${USER_GID:-0}" "${USER_HOME}/.local/share/applications/google-chrome.desktop" || true
   fi
 fi
+
+# Repoint the CLI entry points to the wrapper so terminal/taskbar/xdg-open
+# launches also get the correct ozone platform (package updates recreate
+# these symlinks pointing back at the raw launcher; this hook re-fixes them).
+for _lnk in /usr/bin/google-chrome /usr/bin/google-chrome-stable; do
+  if [ -e "${_lnk}" ] && [ "$(readlink -f "${_lnk}")" != /usr/local/bin/google-chrome-wrapped ]; then
+    ln -sf /usr/local/bin/google-chrome-wrapped "${_lnk}"
+  fi
+done
 EOF_CHROME
     chmod 755 /usr/local/bin/ensure-google-chrome-wrap
     /usr/local/bin/ensure-google-chrome-wrap
@@ -1209,8 +1350,8 @@ COPY glycin-bwrap-shim /usr/local/libexec/glycin-bwrap-shim
 # Permission denied", "loopback: Failed RTM_NEWADDR"). glycin only falls back
 # to running loaders unsandboxed when namespace creation itself is refused (as
 # under Docker's default seccomp profile), so here every icon and PNG load
-# fails and GTK applications such as STM32CubeIDE abort in gtkiconhelper.c
-# right after the workspace chooser, before the main window appears. glycin has
+# fails and GTK applications (Eclipse-based IDEs, for example) abort in
+# gtkiconhelper.c right after startup, before the main window appears. glycin has
 # no switch to skip the sandbox, so divert bwrap and let the shim execute glycin
 # loaders directly; every other bwrap caller still reaches the real binary.
 # Verified with the IDE under Xvfb in a container started with

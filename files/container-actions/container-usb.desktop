@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Enable USB Devices
+Comment=Make the USB devices attached to WSL usable in this container (debug probes, USB serial adapters, ...)
+Exec=/usr/local/bin/container-usb.sh
+Icon=container-usb
+Terminal=false
+Type=Application
+Categories=System;

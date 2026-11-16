@@ -182,7 +182,7 @@ RUN --mount=type=secret,id=user_password \
 # optional Japanese locale and input (toggle via USER_LANGUAGE=jp)
 RUN set -eux; \
   LANG_SEL="$(echo "${USER_LANGUAGE}" | tr '[:upper:]' '[:lower:]')" ; \
-  if [ "${LANG_SEL}" = "jp" ]; then \
+  if [ "${LANG_SEL}" = "jp" ] || [ "${LANG_SEL}" = "ja" ] || [ "${LANG_SEL}" = "ja_jp" ] || [ "${LANG_SEL}" = "ja-jp" ]; then \
     UBUNTU_VERSION="$(. /etc/os-release && echo ${VERSION_ID})"; \
     if dpkg --compare-versions "$UBUNTU_VERSION" ge "26.04"; then \
       # Ubuntu 26.04+ (Plasma 6): use fcitx5
@@ -370,7 +370,7 @@ RUN set -eux; \
 # Set fcitx environment variables globally when Japanese locale is selected
 ARG USER_LANGUAGE
 RUN LANG_SEL="$(echo "${USER_LANGUAGE}" | tr '[:upper:]' '[:lower:]')" ; \
-  if [ "${LANG_SEL}" = "jp" ]; then \
+  if [ "${LANG_SEL}" = "jp" ] || [ "${LANG_SEL}" = "ja" ] || [ "${LANG_SEL}" = "ja_jp" ] || [ "${LANG_SEL}" = "ja-jp" ]; then \
     UBUNTU_VERSION="$(. /etc/os-release && echo ${VERSION_ID})"; \
     mkdir -p /etc/profile.d; \
     if dpkg --compare-versions "$UBUNTU_VERSION" ge "26.04"; then \
@@ -443,23 +443,172 @@ RUN set -eux; \
   cp /defaults/kdeglobals "/home/${USER_NAME}/.config/kdeglobals"; \
   chown "${USER_UID}:${USER_GID}" "/home/${USER_NAME}/.config/kdeglobals"
 
-# Container management desktop shortcuts (commit / flatten / stop); the tools live in the base image
+# Add user to plugdev and dialout groups for USB access (amd64 only)
+RUN set -eux; \
+  ARCH="$(dpkg --print-architecture)"; \
+  if [ "${ARCH}" = "amd64" ]; then \
+    usermod -aG plugdev,dialout "${USER_NAME}" || true; \
+  fi
+
+# USB device permission fix for WSL and container environments (amd64 only)
+# In WSL (usbipd) and some Docker setups, USB devices appear as root:root 0600.
+# udev rules handle cases where udevd runs (privileged mode);
+# the svc-usb-perms daemon handles hot-plugged devices when udev is unavailable.
+RUN set -eux; \
+  ARCH="$(dpkg --print-architecture)"; \
+  if [ "${ARCH}" = "amd64" ]; then \
+    # udev rules for USB devices and USB serial adapters
+    mkdir -p /etc/udev/rules.d; \
+    printf '%s\n' \
+      '# USB devices (debug probes, DFU targets, ...)' \
+      'SUBSYSTEM=="usb", MODE="0666", GROUP="plugdev"' \
+      '# Generic USB serial adapters' \
+      'KERNEL=="ttyACM[0-9]*", MODE="0666", GROUP="dialout"' \
+      'KERNEL=="ttyUSB[0-9]*", MODE="0666", GROUP="dialout"' \
+      > /etc/udev/rules.d/99-usb-dev.rules; \
+  fi
+
+# USB permission fix script (amd64 only, for environments without working udevd)
+RUN <<'FIXUSB_EOF'
+#!/bin/bash
+set -eux
+ARCH="$(dpkg --print-architecture)"
+if [ "${ARCH}" = "amd64" ]; then
+cat > /usr/local/bin/fix-usb-perms.sh <<'SCRIPT_EOF'
+#!/bin/bash
+# Fix USB device permissions in container environments (WSL, Docker)
+# where udev rules may not trigger and devices are root-owned.
+#
+# Docker copies the device nodes only when the container starts. A device
+# attached later (for example with "usbipd attach --wsl") is listed by lsusb,
+# which reads /sys, but has no node in /dev, so libusb tools
+# (OpenOCD, flashing tools) and serial terminals cannot open it.
+# sync_nodes creates the missing nodes of /dev/bus/usb and of the USB serial
+# ports from /sys and removes the nodes of devices that are gone. It needs a
+# privileged container (docker-compose: privileged: true).
+
+# make_node <node> <major:minor>: create the character device if it is missing
+# or has another device number
+make_node() {
+  local node="$1" major="${2%:*}" minor="${2#*:}"
+  if [ -c "$node" ] && [ "$(stat -c '%t:%T' "$node")" = "$(printf '%x:%x' "$major" "$minor")" ]; then
+    return 0
+  fi
+  mkdir -p "${node%/*}"
+  rm -f "$node"
+  mknod "$node" c "$major" "$minor" && \
+    echo "[fix-usb-perms] Created $node ($major:$minor)"
+}
+
+sync_nodes() {
+  local d node keep=" "
+  for d in /sys/bus/usb/devices/*; do
+    [ -f "$d/dev" ] && [ -f "$d/busnum" ] && [ -f "$d/devnum" ] || continue
+    node=$(printf '/dev/bus/usb/%03d/%03d' "$(cat "$d/busnum")" "$(cat "$d/devnum")")
+    make_node "$node" "$(cat "$d/dev")" || continue
+    keep="$keep$node "
+  done
+  for node in /dev/bus/usb/*/*; do
+    [ -c "$node" ] || continue
+    case "$keep" in
+      *" $node "*) ;;
+      *) rm -f "$node" && echo "[fix-usb-perms] Removed $node" ;;
+    esac
+  done
+  rmdir /dev/bus/usb/* 2>/dev/null || true
+
+  for d in /sys/class/tty/ttyACM* /sys/class/tty/ttyUSB*; do
+    [ -f "$d/dev" ] || continue
+    make_node "/dev/${d##*/}" "$(cat "$d/dev")" || true
+  done
+  for node in /dev/ttyACM* /dev/ttyUSB*; do
+    [ -c "$node" ] || continue
+    [ -e "/sys/class/tty/${node##*/}" ] || { rm -f "$node" && echo "[fix-usb-perms] Removed $node"; }
+  done
+}
+
+fix_perms() {
+  sync_nodes
+  # Fix /dev/bus/usb devices
+  if [ -d /dev/bus/usb ]; then
+    find /dev/bus/usb -type c 2>/dev/null | while read -r dev; do
+      cur_mode=$(stat -c '%a' "$dev" 2>/dev/null)
+      if [ "$cur_mode" != "666" ]; then
+        chmod 0666 "$dev" 2>/dev/null && \
+          echo "[fix-usb-perms] Fixed $dev (was $cur_mode)"
+      fi
+    done
+  fi
+  # Fix serial devices (ttyACM*, ttyUSB*)
+  for dev in /dev/ttyACM* /dev/ttyUSB*; do
+    [ -e "$dev" ] || continue
+    cur_mode=$(stat -c '%a' "$dev" 2>/dev/null)
+    if [ "$cur_mode" != "666" ]; then
+      chmod 0666 "$dev" 2>/dev/null && \
+        echo "[fix-usb-perms] Fixed $dev (was $cur_mode)"
+    fi
+  done
+}
+
+# Daemon mode: poll periodically for hot-plugged devices
+# (run by the s6 service svc-usb-perms; the desktop icon "Enable USB Devices"
+# runs one pass at once through container-usb.sh)
+if [ "${1:-}" = "--daemon" ]; then
+  INTERVAL="${2:-2}"
+  echo "[fix-usb-perms] Starting USB permission daemon (interval: ${INTERVAL}s)"
+  while true; do
+    fix_perms
+    sleep "$INTERVAL"
+  done
+else
+  fix_perms
+fi
+SCRIPT_EOF
+chmod 755 /usr/local/bin/fix-usb-perms.sh
+fi
+FIXUSB_EOF
+
+# s6-rc longrun service for USB permission daemon (amd64 only)
+RUN set -eux; \
+  ARCH="$(dpkg --print-architecture)"; \
+  if [ "${ARCH}" = "amd64" ]; then \
+    mkdir -p /etc/s6-overlay/s6-rc.d/svc-usb-perms/dependencies.d; \
+    echo "longrun" > /etc/s6-overlay/s6-rc.d/svc-usb-perms/type; \
+    printf '%s\n' \
+      '#!/usr/bin/with-contenv bash' \
+      'exec /usr/local/bin/fix-usb-perms.sh --daemon 2' \
+      > /etc/s6-overlay/s6-rc.d/svc-usb-perms/run; \
+    chmod +x /etc/s6-overlay/s6-rc.d/svc-usb-perms/run; \
+    touch /etc/s6-overlay/s6-rc.d/svc-usb-perms/dependencies.d/init-services; \
+    touch /etc/s6-overlay/s6-rc.d/user/contents.d/svc-usb-perms; \
+  fi
+
+# Container management desktop shortcuts (commit / flatten / stop / USB); the generic tools live in the base image
+COPY container-actions/container-usb.sh /usr/local/bin/container-usb.sh
+COPY container-actions/container-usb.svg /usr/share/icons/hicolor/scalable/apps/container-usb.svg
 COPY container-actions/container-commit.desktop /tmp/container-commit.desktop
 COPY container-actions/container-flatten.desktop /tmp/container-flatten.desktop
 COPY container-actions/container-stop.desktop /tmp/container-stop.desktop
+COPY container-actions/container-usb.desktop /tmp/container-usb.desktop
 RUN set -eux; \
+  chmod 755 /usr/local/bin/container-usb.sh; \
+  chmod 644 /usr/share/icons/hicolor/scalable/apps/container-usb.svg; \
+  if command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -f -t -q /usr/share/icons/hicolor || true; fi; \
   cp /tmp/container-commit.desktop "/home/${USER_NAME}/Desktop/container-commit.desktop"; \
   cp /tmp/container-flatten.desktop "/home/${USER_NAME}/Desktop/container-flatten.desktop"; \
   cp /tmp/container-stop.desktop "/home/${USER_NAME}/Desktop/container-stop.desktop"; \
+  cp /tmp/container-usb.desktop "/home/${USER_NAME}/Desktop/container-usb.desktop"; \
   chmod 755 \
     "/home/${USER_NAME}/Desktop/container-commit.desktop" \
     "/home/${USER_NAME}/Desktop/container-flatten.desktop" \
-    "/home/${USER_NAME}/Desktop/container-stop.desktop"; \
+    "/home/${USER_NAME}/Desktop/container-stop.desktop" \
+    "/home/${USER_NAME}/Desktop/container-usb.desktop"; \
   chown "${USER_UID}:${USER_GID}" \
     "/home/${USER_NAME}/Desktop/container-commit.desktop" \
     "/home/${USER_NAME}/Desktop/container-flatten.desktop" \
-    "/home/${USER_NAME}/Desktop/container-stop.desktop"; \
-  rm -f /tmp/container-commit.desktop /tmp/container-flatten.desktop /tmp/container-stop.desktop
+    "/home/${USER_NAME}/Desktop/container-stop.desktop" \
+    "/home/${USER_NAME}/Desktop/container-usb.desktop"; \
+  rm -f /tmp/container-commit.desktop /tmp/container-flatten.desktop /tmp/container-stop.desktop /tmp/container-usb.desktop
   
 # Browser menu entries for the desktop user. The base image routes every launch
 # path through the maintained wrappers (/usr/local/bin/google-chrome-wrapped,

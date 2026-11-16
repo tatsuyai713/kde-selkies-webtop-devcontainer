@@ -1,0 +1,329 @@
+--- src/gallium/drivers/d3d12/d3d12_bufmgr.h.orig
++++ src/gallium/drivers/d3d12/d3d12_bufmgr.h
+@@ -69,6 +69,12 @@
+    int64_t last_used_timestamp;
+    uint64_t last_used_fence;
+    enum d3d12_residency_status residency_status;
++
++   /* Plain committed textures go back into the screen's texture cache when
++    * the last reference is dropped (see d3d12_texture_cache_take). */
++   bool texture_cacheable;
++   uint32_t texture_cache_format;
++   D3D12_RESOURCE_DESC texture_cache_desc;
+    uint16_t local_needs_resolve_state;
+ 
+    unsigned local_context_state_mask;
+@@ -151,6 +157,23 @@
+ void
+ d3d12_bo_unreference(struct d3d12_bo *bo);
+ 
++/* Texture cache: creating a committed texture is a CreateCommittedResource,
++ * i.e. a D3DKMTCreateAllocation2 round trip to the host driver under WSL that
++ * regularly takes 50 ms to 2 s. Compositors recreate same-sized textures all
++ * the time (KWin's OffscreenEffect reallocates its window texture whenever
++ * the scaled window size rounds differently while a window is dragged), so
++ * destroyed textures are kept for a while and handed out again, together with
++ * their tracked resource state. D3D12_TEXTURE_CACHE_MS sets the retention
++ * (default 30000, 0 disables). */
++ID3D12Resource *
++d3d12_texture_cache_take(struct d3d12_screen *screen,
++                         const D3D12_RESOURCE_DESC *desc, uint32_t format,
++                         struct d3d12_resource_state *state, bool *has_state,
++                         enum d3d12_residency_status *residency);
++
++void
++d3d12_texture_cache_flush(struct d3d12_screen *screen);
++
+ void *
+ d3d12_bo_map(struct d3d12_bo *bo, D3D12_RANGE *range);
+ 
+--- src/gallium/drivers/d3d12/d3d12_bufmgr.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_bufmgr.cpp
+@@ -76,6 +76,155 @@
+       describe_direct_bo(buf, ptr);
+ }
+ 
++struct d3d12_cached_texture {
++   struct list_head entry;
++   ID3D12Resource *res;
++   D3D12_RESOURCE_DESC desc;
++   uint32_t format;
++   struct d3d12_resource_state state;
++   bool has_state;
++   enum d3d12_residency_status residency;
++   uint64_t size;
++   int64_t time;
++};
++
++static constexpr uint64_t texture_cache_max_bytes = 256ull * 1024 * 1024;
++
++static bool texcache_dbg(void){ static int v=-1; if(v<0) v=getenv("D3D12_TEXTURE_CACHE_DEBUG")?1:0; return v; }
++#define TEXCACHE_DBG(...) do { if (texcache_dbg()) { fprintf(stderr, "[texcache] " __VA_ARGS__); } } while (0)
++
++/* Field-wise: the struct has padding that callers do not initialise. */
++static bool
++texture_cache_desc_equal(const D3D12_RESOURCE_DESC *a, const D3D12_RESOURCE_DESC *b)
++{
++   return a->Dimension == b->Dimension && a->Alignment == b->Alignment &&
++          a->Width == b->Width && a->Height == b->Height &&
++          a->DepthOrArraySize == b->DepthOrArraySize && a->MipLevels == b->MipLevels &&
++          a->Format == b->Format && a->SampleDesc.Count == b->SampleDesc.Count &&
++          a->SampleDesc.Quality == b->SampleDesc.Quality &&
++          a->Layout == b->Layout && a->Flags == b->Flags;
++}
++
++static void
++texture_cache_release(struct d3d12_cached_texture *tex)
++{
++   if (tex->has_state)
++      d3d12_resource_state_cleanup(&tex->state);
++   tex->res->Release();
++   FREE(tex);
++}
++
++/* Unlinks expired/excess entries; the caller releases them without the lock. */
++static void
++texture_cache_prune_locked(struct d3d12_screen *screen, int64_t now, struct list_head *to_release)
++{
++   list_for_each_entry_safe(struct d3d12_cached_texture, tex, &screen->texture_cache, entry) {
++      if (now - tex->time <= screen->texture_cache_usecs &&
++          screen->texture_cache_bytes <= texture_cache_max_bytes)
++         break;
++      list_del(&tex->entry);
++      screen->texture_cache_bytes -= tex->size;
++      list_addtail(&tex->entry, to_release);
++   }
++}
++
++static void
++texture_cache_release_list(struct list_head *to_release)
++{
++   list_for_each_entry_safe(struct d3d12_cached_texture, tex, to_release, entry) {
++      list_del(&tex->entry);
++      texture_cache_release(tex);
++   }
++}
++
++ID3D12Resource *
++d3d12_texture_cache_take(struct d3d12_screen *screen,
++                         const D3D12_RESOURCE_DESC *desc, uint32_t format,
++                         struct d3d12_resource_state *state, bool *has_state,
++                         enum d3d12_residency_status *residency)
++{
++   if (screen->texture_cache_usecs <= 0)
++      return nullptr;
++
++   ID3D12Resource *res = nullptr;
++   struct list_head to_release;
++   list_inithead(&to_release);
++
++   mtx_lock(&screen->texture_cache_mutex);
++   texture_cache_prune_locked(screen, os_time_get(), &to_release);
++   list_for_each_entry_safe(struct d3d12_cached_texture, tex, &screen->texture_cache, entry) {
++      if (tex->format != format || !texture_cache_desc_equal(&tex->desc, desc))
++         continue;
++      list_del(&tex->entry);
++      screen->texture_cache_bytes -= tex->size;
++      res = tex->res;
++      *state = tex->state;
++      *has_state = tex->has_state;
++      *residency = tex->residency;
++      FREE(tex);
++      break;
++   }
++   unsigned left = list_length(&screen->texture_cache);
++   mtx_unlock(&screen->texture_cache_mutex);
++   TEXCACHE_DBG("take %s %ux%u fmt=%u dxgi=%u flags=%x samples=%u mips=%u layout=%u align=%u cached=%u\n", res ? "HIT " : "MISS",
++                (unsigned)desc->Width, (unsigned)desc->Height, format, (unsigned)desc->Format, (unsigned)desc->Flags,
++                (unsigned)desc->SampleDesc.Count, (unsigned)desc->MipLevels, (unsigned)desc->Layout, (unsigned)desc->Alignment, left);
++
++   texture_cache_release_list(&to_release);
++   return res;
++}
++
++void
++d3d12_texture_cache_flush(struct d3d12_screen *screen)
++{
++   struct list_head to_release;
++   list_inithead(&to_release);
++   mtx_lock(&screen->texture_cache_mutex);
++   list_for_each_entry_safe(struct d3d12_cached_texture, tex, &screen->texture_cache, entry) {
++      list_del(&tex->entry);
++      list_addtail(&tex->entry, &to_release);
++   }
++   screen->texture_cache_bytes = 0;
++   mtx_unlock(&screen->texture_cache_mutex);
++   texture_cache_release_list(&to_release);
++}
++
++/* Takes over bo->res and its tracked state. Returns false if the bo must be
++ * destroyed the normal way. */
++static bool
++texture_cache_put(struct d3d12_bo *bo)
++{
++   struct d3d12_screen *screen = bo->screen;
++   TEXCACHE_DBG("put  cacheable=%d res=%p %ux%u residency=%d size=%u\n", bo->texture_cacheable, (void*)bo->res,
++                (unsigned)bo->texture_cache_desc.Width, (unsigned)bo->texture_cache_desc.Height, (int)bo->residency_status, (unsigned)bo->estimated_size);
++   if (!bo->texture_cacheable || !bo->res || screen->texture_cache_usecs <= 0 ||
++       bo->residency_status == d3d12_permanently_resident ||
++       bo->estimated_size > texture_cache_max_bytes / 4)
++      return false;
++
++   struct d3d12_cached_texture *tex = CALLOC_STRUCT(d3d12_cached_texture);
++   if (!tex)
++      return false;
++   tex->res = bo->res;
++   tex->desc = bo->texture_cache_desc;
++   tex->format = bo->texture_cache_format;
++   tex->has_state = bo->global_state.subresource_states != nullptr;
++   tex->state = bo->global_state;
++   tex->residency = bo->residency_status;
++   tex->size = bo->estimated_size;
++   tex->time = os_time_get();
++
++   struct list_head to_release;
++   list_inithead(&to_release);
++   mtx_lock(&screen->texture_cache_mutex);
++   list_addtail(&tex->entry, &screen->texture_cache);
++   screen->texture_cache_bytes += tex->size;
++   texture_cache_prune_locked(screen, tex->time, &to_release);
++   mtx_unlock(&screen->texture_cache_mutex);
++   texture_cache_release_list(&to_release);
++   return true;
++}
++
+ struct d3d12_bo *
+ d3d12_bo_wrap_res(struct d3d12_screen *screen, ID3D12Resource *res, enum d3d12_residency_status residency)
+ {
+@@ -201,9 +350,11 @@
+ 
+       mtx_unlock(&bo->screen->submit_mutex);
+ 
+-      d3d12_resource_state_cleanup(&bo->global_state);
+-      if (bo->res)
+-         bo->res->Release();
++      if (!texture_cache_put(bo)) {
++         d3d12_resource_state_cleanup(&bo->global_state);
++         if (bo->res)
++            bo->res->Release();
++      }
+ 
+       uint64_t mask = bo->local_context_state_mask;
+       while (mask) {
+--- src/gallium/drivers/d3d12/d3d12_screen.h.orig
++++ src/gallium/drivers/d3d12/d3d12_screen.h
+@@ -87,6 +87,11 @@
+    uint64_t fence_value;
+ 
+    struct list_head residency_list;
++
++   mtx_t texture_cache_mutex;
++   struct list_head texture_cache;
++   uint64_t texture_cache_bytes;
++   int64_t texture_cache_usecs;
+    ID3D12Fence *residency_fence;
+    uint64_t residency_fence_value;
+    unsigned num_evictions;
+--- src/gallium/drivers/d3d12/d3d12_screen.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_screen.cpp
+@@ -638,6 +638,7 @@
+       screen->bufmgr->destroy(screen->bufmgr);
+       screen->bufmgr = nullptr;
+    }
++   d3d12_texture_cache_flush(screen);
+    d3d12_deinit_residency(screen);
+    if (screen->fence) {
+       screen->fence->Release();
+@@ -662,6 +663,7 @@
+ {
+    slab_destroy_parent(&screen->transfer_pool);
+    mtx_destroy(&screen->submit_mutex);
++   mtx_destroy(&screen->texture_cache_mutex);
+    mtx_destroy(&screen->descriptor_pool_mutex);
+ 
+ #ifdef HAVE_GALLIUM_D3D12_GRAPHICS
+@@ -1270,6 +1272,11 @@
+       screen->adapter_luid = *adapter_luid;
+    mtx_init(&screen->descriptor_pool_mutex, mtx_plain);
+    mtx_init(&screen->submit_mutex, mtx_plain);
++   mtx_init(&screen->texture_cache_mutex, mtx_plain);
++   list_inithead(&screen->texture_cache);
++   screen->texture_cache_bytes = 0;
++   screen->texture_cache_usecs =
++      (int64_t)CLAMP(debug_get_num_option("D3D12_TEXTURE_CACHE_MS", 30000), 0, 600000) * 1000;
+ 
+    list_inithead(&screen->context_list);
+    screen->context_id_count = 16;
+--- src/gallium/drivers/d3d12/d3d12_resource.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_resource.cpp
+@@ -201,7 +201,7 @@
+              ID3D12Heap *heap,
+              uint64_t placed_offset)
+ {
+-   ID3D12Resource *d3d12_res;
++   ID3D12Resource *d3d12_res = nullptr;
+ 
+    res->mip_levels = templ->last_level + 1;
+    res->dxgi_format = d3d12_get_format(templ->format);
+@@ -310,6 +310,28 @@
+ 
+    HRESULT hres = E_FAIL;
+    enum d3d12_residency_status init_residency;
++
++   /* Committed textures can come from (and go back to) the texture cache.
++    * Shareable ones (gbm buffers) never do: another process may still hold
++    * the memory through its own handle (a compositor showing a buffer the
++    * client already destroyed), so handing it out again would let a new
++    * buffer overwrite what is still on screen. Display targets, scanout,
++    * video and placed resources are always created as well. */
++   const bool cacheable = !heap && templ->target != PIPE_BUFFER &&
++      !(templ->bind & (PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SHARED |
++                       PIPE_BIND_VIDEO_DECODE_DPB | PIPE_BIND_VIDEO_ENCODE_DPB | PIPE_BIND_CUSTOM));
++   const uint32_t cache_format = (uint32_t)templ->format |
++      ((templ->bind & PIPE_BIND_SHARED) ? 0x80000000u : 0u);
++   struct d3d12_resource_state cached_state = {};
++   bool cached_has_state = false;
++   if (cacheable)
++      d3d12_res = d3d12_texture_cache_take(screen, &desc, cache_format,
++                                           &cached_state, &cached_has_state, &init_residency);
++   if (d3d12_res)
++      hres = S_OK;
++   if (!cacheable && getenv("D3D12_TEXTURE_CACHE_DEBUG") && templ->target != PIPE_BUFFER)
++      fprintf(stderr, "[texcache] NOCACHE create %ux%u fmt=%u bind=%x heap=%d\n", templ->width0, templ->height0, (unsigned)templ->format, templ->bind, heap != nullptr);
++
+ #ifndef _GAMING_XBOX
+ 
+    if (heap && screen->max_feature_level == D3D_FEATURE_LEVEL_1_0_GENERIC) {
+@@ -324,7 +346,9 @@
+       }
+    }
+ 
+-   if (screen->opts12.RelaxedFormatCastingSupported) {
++   if (d3d12_res) {
++      /* reused from the texture cache */
++   } else if (screen->opts12.RelaxedFormatCastingSupported) {
+       D3D12_RESOURCE_DESC1 desc1 = {
+          desc.Dimension,
+          desc.Alignment,
+@@ -424,6 +448,21 @@
+    }
+ 
+    res->bo = d3d12_bo_wrap_res(screen, d3d12_res, init_residency);
++   if (!res->bo) {
++      if (cached_has_state)
++         d3d12_resource_state_cleanup(&cached_state);
++      return false;
++   }
++   if (cacheable) {
++      res->bo->texture_cacheable = true;
++      res->bo->texture_cache_desc = desc;
++      res->bo->texture_cache_format = cache_format;
++      if (cached_has_state) {
++         /* Continue from the state the driver left the resource in. */
++         d3d12_resource_state_cleanup(&res->bo->global_state);
++         res->bo->global_state = cached_state;
++      }
++   }
+ 
+    return true;
+ }

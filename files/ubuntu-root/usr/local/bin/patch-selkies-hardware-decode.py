@@ -2,8 +2,12 @@
 """Select the Selkies WebCodecs decode policy for the current environment.
 
 WSL containers stream to a Windows-host Edge/Chrome, which should decode on
-the host GPU: `prefer-hardware` plus a codec string that matches the SPS the
-server-side encoder emits. The right string depends on the encoder:
+the host GPU: `no-preference` (the browser picks its hardware decoder when it
+has one) plus a codec string that matches the SPS the server-side encoder
+emits. `prefer-hardware` is not used: when the browser reports that config as
+unsupported (hardware video decode disabled, blocked GPU, remote session),
+the stripe decoder is never created, every frame is dropped and the page
+stays at "Waiting for stream..." without an on-screen error. The right string depends on the encoder:
 
   vaapi  (intel-wsl / amd-wsl)  external h264_vaapi: High Profile with
          constraint byte 0x0C and Level 4.1 fixed -> avc1.640C29 / avc1.640C33.
@@ -44,7 +48,10 @@ WEB_ROOTS = (
     Path("/usr/share/selkies/selkies-dashboard-wish"),
 )
 OLD = 'hardwareAcceleration:"prefer-software"'
-NEW = 'hardwareAcceleration:"prefer-hardware"'
+NEW = 'hardwareAcceleration:"no-preference"'
+# Written by earlier revisions of this script; migrated to NEW (and reverted
+# to OLD in native mode) so existing web roots pick up the change.
+LEGACY = 'hardwareAcceleration:"prefer-hardware"'
 REVERT_QUERY = "?v=upstream-codec-1"
 
 # The Vite-built codec builder: ln(width, height, fullcolor, fps). Callers pass
@@ -84,8 +91,8 @@ CODEC_FUNCTION_UPSTREAM = (
 # decoder/entry chunks. Bump a suffix whenever its builder changes so browsers
 # holding the previous copy fetch the new one.
 HARDWARE_MODES = {
-    "vaapi": (CODEC_FUNCTION_VAAPI, "-intel-hwdecode-avc4-debug"),
-    "nvenc": (CODEC_FUNCTION_NVENC, "-nvenc-hwdecode-avc52"),
+    "vaapi": (CODEC_FUNCTION_VAAPI, "-intel-hwdecode-avc4-np"),
+    "nvenc": (CODEC_FUNCTION_NVENC, "-nvenc-hwdecode-avc52-np"),
 }
 ERROR_OLD = (
     'd&&(d.textContent="A critical video error occurred. Resetting to default '
@@ -128,7 +135,7 @@ def patch_web_root(web_root: Path, mode: str) -> tuple[int, bool]:
     assets = list_assets(web_root)
     for asset in assets:
         source = asset.read_text(encoding="utf-8")
-        count = source.count(OLD)
+        count = source.count(OLD) + source.count(LEGACY)
         codec_function_count = sum(
             codec_builder not in match
             for match in CODEC_FUNCTION_RE.findall(source)
@@ -136,7 +143,7 @@ def patch_web_root(web_root: Path, mode: str) -> tuple[int, bool]:
         error_count = source.count(ERROR_OLD)
         if not count and not codec_function_count and not error_count:
             continue
-        patched = source.replace(OLD, NEW).replace(ERROR_OLD, ERROR_NEW)
+        patched = source.replace(OLD, NEW).replace(LEGACY, NEW).replace(ERROR_OLD, ERROR_NEW)
         patched = CODEC_FUNCTION_RE.sub(lambda _m: codec_builder, patched)
         asset.write_text(patched, encoding="utf-8")
         replacements += count
@@ -229,7 +236,7 @@ def revert_web_root(web_root: Path) -> int:
     reverted = 0
     for asset in list_assets(web_root):
         source = asset.read_text(encoding="utf-8")
-        patched = source.replace(NEW, OLD).replace(ERROR_OLD, ERROR_NEW)
+        patched = source.replace(NEW, OLD).replace(LEGACY, OLD).replace(ERROR_OLD, ERROR_NEW)
 
         def restore_codec(match: re.Match) -> str:
             if '"7A00"' in match.group(0):

@@ -9,7 +9,7 @@
 # ("setting up uid map: Permission denied", "loopback: Failed RTM_NEWADDR").
 # glycin falls back to unsandboxed loaders only when namespace creation itself
 # is refused, so here every icon and PNG fails to load and GTK applications
-# such as STM32CubeIDE abort in gtkiconhelper.c before their main window
+# (Eclipse-based IDEs, for example) abort in gtkiconhelper.c before their main window
 # appears. glycin has no switch to skip the sandbox, so this script (installed
 # as /usr/bin/bwrap through dpkg-divert) executes glycin loaders directly with
 # the environment glycin asked for. Any other bwrap invocation is handed to the

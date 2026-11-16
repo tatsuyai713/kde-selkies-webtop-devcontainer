@@ -1,0 +1,35 @@
+--- src/gallium/drivers/d3d12/d3d12_screen.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_screen.cpp
+@@ -1657,11 +1657,21 @@
+    if (!screen->bufmgr)
+       return false;
+ 
+-   screen->cache_bufmgr = pb_cache_manager_create(screen->bufmgr, 0xfffff, 2, 0, 512 * 1024 * 1024);
++   /* Keep unused buffers for a minute instead of one second. A freed buffer
++    * can only be handed out again once the GPU is done with it, so with a
++    * short retention a steady stream of same-sized buffers (glBufferData
++    * orphaning per frame, texture staging, the texture upload ring's chunks)
++    * keeps missing the cache and each miss is a CreateCommittedResource. Under
++    * WSL that is a D3DKMTCreateAllocation2 round trip to the host driver which
++    * regularly takes 0.15-2 s and freezes the calling compositor.
++    * D3D12_BUFFER_CACHE_MS overrides the retention. */
++   const unsigned cache_usecs =
++      (unsigned)MIN2(debug_get_num_option("D3D12_BUFFER_CACHE_MS", 60000), 3600000) * 1000u;
++   screen->cache_bufmgr = pb_cache_manager_create(screen->bufmgr, cache_usecs, 2, 0, 512 * 1024 * 1024);
+    if (!screen->cache_bufmgr)
+       return false;
+ 
+-   screen->slab_cache_bufmgr = pb_cache_manager_create(screen->bufmgr, 0xfffff, 2, 0, 512 * 1024 * 1024);
++   screen->slab_cache_bufmgr = pb_cache_manager_create(screen->bufmgr, cache_usecs, 2, 0, 512 * 1024 * 1024);
+    if (!screen->slab_cache_bufmgr)
+       return false;
+ 
+@@ -1672,7 +1682,7 @@
+    if (!screen->slab_bufmgr)
+       return false;
+    
+-   screen->readback_slab_cache_bufmgr = pb_cache_manager_create(screen->bufmgr, 0xfffff, 2, 0, 512 * 1024 * 1024);
++   screen->readback_slab_cache_bufmgr = pb_cache_manager_create(screen->bufmgr, cache_usecs, 2, 0, 512 * 1024 * 1024);
+    if (!screen->readback_slab_cache_bufmgr)
+       return false;
+ 

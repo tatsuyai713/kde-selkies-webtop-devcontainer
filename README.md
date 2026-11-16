@@ -440,6 +440,19 @@ container name, Ubuntu version, architecture, docker mode (`dind`/`dood`), encod
 - `dind` runs `dockerd` inside the container; `dood` shares the host Docker socket
 - `STREAM_SCALE` reduces the actual encoding resolution, not just the display
 
+### USB Devices (debug probes, USB serial)
+
+Docker creates the device nodes of `/dev/bus/usb` only when the container
+starts. A device attached later, for example with `usbipd attach --wsl` on
+WSL2, is listed by `lsusb` but cannot be opened by libusb-based tools such as
+OpenOCD. The service `svc-usb-perms` (`/usr/local/bin/fix-usb-perms.sh`)
+runs as root from the start of the container, creates the missing nodes of
+`/dev/bus/usb`, `/dev/ttyACM*` and `/dev/ttyUSB*` from `/sys` every 2 seconds,
+removes the nodes of detached devices and makes them accessible to the user.
+
+The desktop shortcut **Enable USB Devices** runs one pass at once and shows
+the USB devices and serial ports that are usable in the container.
+
 ### Saving Changes (Important!)
 
 ```bash
@@ -748,6 +761,45 @@ Check browser audio permissions and use HTTPS (some browsers block audio over HT
 
 ---
 
+### WSL2 + NVIDIA: Desktop Hitches for ~0.15 s Every Few Seconds
+
+**Symptom.** With `--encoder nvidia-wsl` the desktop was smooth at first, but after days of use the picture
+freezes for about 0.15 s every few seconds whenever something moves (dragging a window, scrolling). Windows
+itself may also feel sluggish (audio crackle, input lag). Restarting the container or running
+`wsl --shutdown` does not help.
+
+**Cause.** This is a memory leak in the NVIDIA Windows driver (`nvlddmkm.sys`), not a fault in the container.
+Every time `nvidia-smi` is started inside WSL2, the Windows driver leaks a few kernel allocations
+(pool tag `NVRM`) that are never freed. The driver walks these leftovers in interrupt context, so once
+millions have piled up it blocks a CPU core for 120-145 ms at a time, and the WSL virtual CPUs stop with it.
+On the machine where this was diagnosed (RTX PRO 1000 laptop, driver 32.0.15.9713, Windows up for 23 days)
+the pool held 12.9 million allocations / 3.6 GB. The source was the Selkies dashboard GPU gauge, which
+started `nvidia-smi` about once per second for each connected browser.
+
+**How to check.** On Windows, open Task Manager > Performance > Memory. A *Non-paged pool* of several GB
+(normally a few hundred MB) points to this leak. To confirm, run `poolmon -b` from the Windows Driver Kit
+and look for the `NVRM` tag at the top of the non-paged list.
+
+**How to recover.** Reboot Windows. This is the only way we have verified to free the leaked memory.
+(Other users report that restarting the NVIDIA display adapter from an elevated prompt with
+`pnputil /restart-device` after `wsl --shutdown` also works; we have not tested it.)
+
+**How to prevent it.**
+
+- Base images built from this revision on no longer start the GPU gauge on WSL2
+  (`patch-selkies-gpu-stats.py`); the only thing lost is the GPU load gauge in the Selkies dashboard.
+  `SELKIES_GPU_STATS=true` turns it back on (not recommended). Images built from an older base keep leaking
+  while a browser is connected: rebuild the base image, or reboot Windows from time to time.
+- Do not run `nvidia-smi` in a loop inside WSL2 (`watch nvidia-smi`, `nvidia-smi -l`, monitoring agents,
+  shell prompts). Single manual runs are fine. For continuous monitoring use Task Manager or
+  `nvidia-smi.exe` on the Windows side.
+- No NVIDIA driver version is known to fix this as of November 2026; the same behaviour is reported for
+  driver branches 596 to 616.
+
+References: [NVIDIA forum: NVRM pool leak from nvidia-smi launched in WSL2](https://forums.developer.nvidia.com/t/rtx-pro-5000-blackwell-windows-displays-freeze-for-the-whole-duration-of-gpu-saturating-work-only-after-24h-uptime-fresh-boot-immune-only-reb/376563),
+[NVIDIA forum: GPU-PV slowdown that only a host reboot or device restart clears](https://forums.developer.nvidia.com/t/gpu-pv-dxgkrnl-cuda-workload-slows-1-7x-over-3-4-days-of-host-uptime-with-accumulating-dxgvmb-send-sync-msg-wait-for-completion-failed-in-dmesg/384279),
+[NVIDIA forum: nvlddmkm.sys DPC latency with WSL2 + Docker](https://forums.developer.nvidia.com/t/windows-11-wsl2-docker-desktop-rtx-5060-ti-16gb-system-gui-severe-lag-after-idle-hours-with-ai-inference-running-nvlddmkm-sys-high-dpc-latency/369079)
+
 ## Known Limitations
 
 ### Vulkan
@@ -762,6 +814,7 @@ Check browser audio permissions and use HTTPS (some browsers block audio over HT
 - Use native Linux or WSL2 for hardware acceleration
 
 ### WSL2
+- `nvidia-wsl`: do not run `nvidia-smi` in a loop inside WSL2. Each launch leaks kernel memory in the NVIDIA Windows driver and, after days, causes ~0.15 s hitches that only a Windows reboot clears. See [Troubleshooting](#wsl2--nvidia-desktop-hitches-for-015-s-every-few-seconds).
 - `--encoder nvidia-wsl`, `intel-wsl` and `amd-wsl` all pass `/dev/dxg`, the vgem render node and the WSLg libraries (`/usr/lib/wsl`) into the container, enabling GPU OpenGL through Mesa D3D12 for every vendor; the Windows (WDDM) driver does the rendering
 - `MESA_D3D12_DEFAULT_ADAPTER_NAME` selects the D3D12 adapter by name substring and defaults to `NVIDIA`, `Intel` or `Radeon` depending on the profile; on hybrid systems set it to a substring of the preferred adapter name
 - `nvidia-wsl` encodes with NVENC, independently from the OpenGL rendering path. WSL2 has no NVIDIA DRM render node (only the virtual `faux_driver`/vgem node), yet Pixelflux 2.0 decides on NVENC solely from the render node's sysfs driver name, and the WSL `libcuda.so.1` lacks two CUDA/EGL interop symbols Pixelflux resolves up front; unaided it silently fell back to CPU x264 while `svc-selkies` claimed NVENC. `svc-selkies` now verifies the CUDA/NvEncodeAPI runtime, preloads `pixelflux-nvenc-wsl.so` ([source](files/ubuntu-root/usr/local/src/pixelflux-nvenc-wsl.c)) into the Selkies process and points the encoder at `/dev/dxg`, which selects Pixelflux's readback path: Mesa D3D12 renders, the frame is read back and uploaded to CUDA, NVENC compresses. It also sets `SELKIES_FORCE_HARDWARE_ENCODING=1` so a browser whose saved settings still say `use_cpu=true` cannot silently keep the stream on the CPU. Verify with `./check-wsl-gpu.sh` or `docker logs linuxserver-kde-$(whoami) | grep -E 'NVENC|Mode: H264'` (expect `NVENC Encoder initialized successfully` and `Mode: H264 (NVENC)`), and `nvidia-smi --query-gpu=utilization.encoder --format=csv` inside the container while a viewer is connected (`nvidia-smi encodersessions` hangs on WSL). The host browser gets `prefer-hardware` with an NVENC-matched codec string (`avc1.640034`: High Profile, Level 5.2)

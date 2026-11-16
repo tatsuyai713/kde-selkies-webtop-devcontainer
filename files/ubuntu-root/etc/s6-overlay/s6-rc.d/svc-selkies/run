@@ -52,6 +52,36 @@ if [ "${WSL_ENVIRONMENT}" = "true" ]; then
     export PATH="/usr/lib/wsl/lib:${PATH}"
     echo "[svc-selkies] Added WSL library path at front: /usr/lib/wsl/lib"
   fi
+  # pixelflux's compositor uploads every client frame with glTexSubImage2D.
+  # Mesa D3D12 copies it row by row into a dxg-mapped upload buffer and
+  # glibc's "rep movsb" (used for copies of a few KB) crawls on that memory
+  # under WSL: 1.86 s per 2246x1370 upload, the stream fell to ~1 fps under
+  # motion at 100 % CPU. Same setting as the desktop session
+  # (startwm_wayland.sh); WSL_REP_MOVSB=1 keeps glibc's default.
+  if [ "${WSL_REP_MOVSB:-0}" != "1" ]; then
+    case ":${GLIBC_TUNABLES:-}:" in
+      *:glibc.cpu.x86_rep_movsb_threshold=*) ;;
+      *) export GLIBC_TUNABLES="${GLIBC_TUNABLES:+${GLIBC_TUNABLES}:}glibc.cpu.x86_rep_movsb_threshold=0xffffffffffffffff" ;;
+    esac
+    echo "[svc-selkies] GLIBC_TUNABLES=${GLIBC_TUNABLES}"
+  fi
+  # Same patched libgallium as the desktop session (startwm_wayland.sh):
+  # pixelflux reads back every frame with glReadPixels and uploads client
+  # buffers with glTexSubImage2D, which upstream Mesa D3D12 turns into a GPU
+  # allocation round trip per call on WSL.
+  if [ "${WSL_D3D12_MESA_OVERLAY:-1}" != "0" ]; then
+    for _overlay in /opt/wsl-d3d12-graphics/libgallium-*.so; do
+      [ -e "${_overlay}" ] || continue
+      if [ -e "/usr/lib/$(uname -m)-linux-gnu/${_overlay##*/}" ]; then
+        export LD_LIBRARY_PATH="/opt/wsl-d3d12-graphics:${LD_LIBRARY_PATH}"
+        echo "[svc-selkies] Using the patched Mesa D3D12 overlay ${_overlay}"
+      else
+        echo "[svc-selkies] Ignoring ${_overlay}: the installed Mesa differs; rebuild the base image" >&2
+      fi
+      break
+    done
+    unset _overlay
+  fi
 fi
 
 # Function to find nvidia-smi (handles WSL2 where it's in /usr/lib/wsl/lib)

@@ -1,0 +1,115 @@
+--- src/gallium/drivers/d3d12/d3d12_bufmgr.h.orig
++++ src/gallium/drivers/d3d12/d3d12_bufmgr.h
+@@ -79,6 +79,11 @@
+    uint64_t last_used_fence;
+    enum d3d12_residency_status residency_status;
+ 
++   /* Another process (or another device in this one) can reach this memory:
++    * the resource was created shareable, exported, or imported from a
++    * handle. See d3d12_flush(). */
++   bool shared_with_others;
++
+    /* Set when the texture lives in one of the screen's texture heaps. */
+    struct d3d12_texture_pool_block pool_block;
+ 
+--- src/gallium/drivers/d3d12/d3d12_batch.h.orig
++++ src/gallium/drivers/d3d12/d3d12_batch.h
+@@ -59,6 +59,8 @@
+    struct d3d12_descriptor_heap *sampler_heap;
+    struct d3d12_descriptor_heap *view_heap;
+    bool has_errors;
++   /* The batch renders or copies into a resource other processes can see. */
++   bool wrote_shared;
+    bool pending_memory_barrier;
+ 
+    uint64_t submit_id;
+--- src/gallium/drivers/d3d12/d3d12_batch.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_batch.cpp
+@@ -233,6 +233,7 @@
+ {
+    struct d3d12_screen *screen = d3d12_screen(ctx->base.screen);
+    d3d12_reset_batch(ctx, batch, OS_TIMEOUT_INFINITE);
++   batch->wrote_shared = false;
+ 
+    /* Create or reset global command list */
+    if (ctx->cmdlist) {
+@@ -393,6 +394,8 @@
+    uint8_t*state = d3d12_batch_acquire_reference(batch, res->bo);
+ 
+    uint8_t new_data = write ? batch_bo_reference_written : batch_bo_reference_read;
++   if (write && res->bo->shared_with_others)
++      batch->wrote_shared = true;
+    uint8_t old_data = (uint8_t)*state;
+    *state = (old_data | new_data);
+ }
+--- src/gallium/drivers/d3d12/d3d12_resource.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_resource.cpp
+@@ -478,6 +478,7 @@
+       return false;
+    }
+    res->bo->pool_block = pool_block;
++   res->bo->shared_with_others = (templ->bind & PIPE_BIND_SHARED) != 0;
+    if (cacheable) {
+       res->bo->texture_cacheable = true;
+       res->bo->texture_cache_desc = desc;
+@@ -864,6 +865,8 @@
+    if (!res->bo) {
+       res->bo = d3d12_bo_wrap_res(screen, d3d12_res, d3d12_permanently_resident);
+    }
++   if (res->bo && handle->type != WINSYS_HANDLE_TYPE_D3D12_RES)
++      res->bo->shared_with_others = true;
+    init_valid_range(res);
+ 
+    threaded_resource_init(&res->base.b, false);
+@@ -912,6 +915,8 @@
+ #endif
+       handle->format = pres->format;
+       handle->modifier = ~0ull;
++      if (res->bo)
++         res->bo->shared_with_others = true;
+       return true;
+    }
+    default:
+--- src/gallium/drivers/d3d12/d3d12_context_common.cpp.orig
++++ src/gallium/drivers/d3d12/d3d12_context_common.cpp
+@@ -191,6 +191,28 @@
+    struct d3d12_context *ctx = d3d12_context(pipe);
+    struct d3d12_batch *batch = d3d12_current_batch(ctx);
+ 
++   /* A buffer shared with another process (a Wayland client's window buffer,
++    * a nested compositor's output) is handed over right after this flush.
++    * Linux dma-bufs carry an implicit fence, so the receiver waits for the
++    * rendering; D3D12 shared handles under WSL carry nothing, and the
++    * receiver samples the buffer while the GPU is still executing the frame:
++    * the repainted region shows the background and the lower windows but not
++    * yet the window on top, until the next repaint. So when rendering into
++    * such a resource has been recorded since the last flush, wait for the GPU
++    * to finish it before returning. D3D12_SHARED_FLUSH_SYNC=0 disables it. */
++   static int shared_flush_sync = -1;
++   if (shared_flush_sync < 0)
++      shared_flush_sync = debug_get_bool_option("D3D12_SHARED_FLUSH_SYNC", true);
++   bool wait_for_shared = false;
++   if (shared_flush_sync) {
++      for (unsigned i = 0; i < ARRAY_SIZE(ctx->batches); i++) {
++         if (ctx->batches[i].wrote_shared) {
++            wait_for_shared = true;
++            ctx->batches[i].wrote_shared = false;
++         }
++      }
++   }
++
+    bool flushed = d3d12_flush_cmdlist(ctx);
+ 
+    if (fence) {
+@@ -199,6 +221,11 @@
+       else
+          *fence = (pipe_fence_handle *)d3d12_create_fence(d3d12_screen(ctx->base.screen), false);
+    }
++
++   if (wait_for_shared) {
++      d3d12_foreach_submitted_batch(ctx, old_batch)
++         d3d12_reset_batch(ctx, old_batch, OS_TIMEOUT_INFINITE);
++   }
+ }
+ 
+ static void

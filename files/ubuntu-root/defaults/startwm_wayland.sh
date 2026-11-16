@@ -78,6 +78,47 @@ if [ "${WSL_ENVIRONMENT:-false}" = "true" ]; then
   # --use-gl=disabled (CPU rendering: choppy Chrome / VS Code). Without Kopper,
   # Mesa uses its plain swrast presentation and GLX renders on D3D12 again.
   export LIBGL_KOPPER_DISABLE=true
+
+  # Keep glibc's memcpy from using "rep movsb" in the session. Mesa D3D12
+  # writes every texture upload (glTexSubImage2D, i.e. each damaged wl_shm
+  # surface KWin composites) row by row into a dxg-mapped upload buffer, and
+  # rows of a few KB fall in glibc's rep-movsb range. On WSL that instruction
+  # crawls on GPU-shared memory: a 2246x1370 upload took 1.86 s (7 MB/s) and
+  # the desktop dropped to about one frame per second whenever something
+  # moved, with KWin/pixelflux spinning in memcpy. With the threshold at its
+  # maximum glibc uses vector stores instead: 95 ms per full-screen upload.
+  # WSL_REP_MOVSB=1 keeps glibc's default.
+  if [ "${WSL_REP_MOVSB:-0}" != "1" ]; then
+    _no_rep_movsb="glibc.cpu.x86_rep_movsb_threshold=0xffffffffffffffff"
+    case ":${GLIBC_TUNABLES:-}:" in
+      *:glibc.cpu.x86_rep_movsb_threshold=*) ;;
+      *) export GLIBC_TUNABLES="${GLIBC_TUNABLES:+${GLIBC_TUNABLES}:}${_no_rep_movsb}" ;;
+    esac
+    unset _no_rep_movsb
+    DBUS_GPU_ENV+=(GLIBC_TUNABLES)
+  fi
+
+  # Patched libgallium from the base image (stage 3b of
+  # linuxserver-kde.base.dockerfile): KWin's glTexSubImage2D of every damaged
+  # wl_shm surface and pixelflux's per-frame glReadPixels otherwise create a
+  # temporary texture and staging buffer per call, each a
+  # D3DKMTCreateAllocation2 round trip to the Windows driver. Used only when
+  # it was built for exactly the installed Mesa; WSL_D3D12_MESA_OVERLAY=0
+  # keeps distro Mesa.
+  if [ "${WSL_D3D12_MESA_OVERLAY:-1}" != "0" ]; then
+    for _overlay in /opt/wsl-d3d12-graphics/libgallium-*.so; do
+      [ -e "${_overlay}" ] || continue
+      if [ -e "/usr/lib/$(uname -m)-linux-gnu/${_overlay##*/}" ]; then
+        export LD_LIBRARY_PATH="/opt/wsl-d3d12-graphics${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+        DBUS_GPU_ENV+=(LD_LIBRARY_PATH)
+        echo "startwm_wayland: using the patched Mesa D3D12 overlay ${_overlay}" >&2
+      else
+        echo "startwm_wayland: ignoring ${_overlay}: the installed Mesa differs; rebuild the base image" >&2
+      fi
+      break
+    done
+    unset _overlay
+  fi
   DBUS_GPU_ENV+=(LIBGL_KOPPER_DISABLE)
 
   # Xwayland: no glamor. With glamor, Xwayland renders X11 pixmaps through
@@ -135,9 +176,20 @@ if [ "${WSL_ENVIRONMENT:-false}" = "true" ]; then
 
   # Keep Qt Quick on the same Mesa D3D12 OpenGL path on every WSL GPU profile.
   # Vulkan discovery is disabled above, so selecting OpenGL explicitly avoids
-  # a failed RHI probe before the GPU renderer starts. Retain Qt Quick's
-  # threaded render loop instead of blocking its GUI thread with submission.
+  # a failed RHI probe before the GPU renderer starts.
   # WSL_QTQUICK_GPU=0 remains an explicit diagnostic escape hatch only.
+  #
+  # QSG_RENDER_LOOP must NOT be exported here. This environment is inherited
+  # by kwin_wayland itself, and "threaded" makes KWin render its own Qt Quick
+  # windows (move/resize outline, OSDs, ...) on a QSGRenderThread. KWin's
+  # internal QPA is written for the main-thread loop: with the threaded loop
+  # InternalWindow::markAsMapped() -> Workspace::addInternalWindow() ran on
+  # the render thread, the same window was announced several times through
+  # Workspace::windowAdded (delivered as queued calls), also while it was
+  # being destroyed, and KWin crashed in PlacementTracker::add() whenever a
+  # dragged window reached a screen edge. Qt picks the loop per platform;
+  # applications still get the threaded loop where their platform supports it.
+  unset QSG_RENDER_LOOP
   if [ "${WSL_GPU_MODE}" != "full" ]; then
     export QT_QUICK_BACKEND=software
   else
@@ -148,7 +200,6 @@ if [ "${WSL_ENVIRONMENT:-false}" = "true" ]; then
         else
           unset QT_QUICK_BACKEND
           export QSG_RHI_BACKEND=opengl
-          export QSG_RENDER_LOOP=threaded
           # Qt defaults desktop OpenGL to its A32 subpixel distance-field
           # material. Mesa's D3D12 path produced an R+G-only glyph texture on
           # the tested Intel stack (yellow clock and transparent Folder View
@@ -376,7 +427,7 @@ if command -v dbus-update-activation-environment >/dev/null 2>&1; then
     DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP DESKTOP_SESSION \
     KDE_FULL_SESSION KDE_SESSION_VERSION QT_QPA_PLATFORM QT_QPA_PLATFORMTHEME \
     XDG_RUNTIME_DIR HOME LANG LANGUAGE LC_ALL \
-    DPI SCALE_FACTOR KWIN_COMPOSE QT_QUICK_BACKEND QSG_RHI_BACKEND QSG_RENDER_LOOP QSG_DISTANCEFIELD_ANTIALIASING QT_SUBPIXEL_AA_TYPE \
+    DPI SCALE_FACTOR KWIN_COMPOSE QT_QUICK_BACKEND QSG_RHI_BACKEND QSG_RENDER_LOOP= QSG_DISTANCEFIELD_ANTIALIASING QT_SUBPIXEL_AA_TYPE \
     GTK_IM_MODULE QT_IM_MODULE SDL_IM_MODULE GLFW_IM_MODULE \
     XMODIFIERS INPUT_METHOD DBUS_SESSION_BUS_ADDRESS \
     PULSE_SERVER PIPEWIRE_REMOTE "${DBUS_GPU_ENV[@]}" \

@@ -42,7 +42,10 @@ if [ "${WSL_ENVIRONMENT:-false}" = "true" ] && \
   else
     unset QT_QUICK_BACKEND
     export QSG_RHI_BACKEND=opengl
-    export QSG_RENDER_LOOP=threaded
+    # Do not export QSG_RENDER_LOOP=threaded: KWin inherits it and then renders
+    # its internal Qt Quick windows on a render thread, which its internal QPA
+    # does not support (crashes while dragging windows; see startwm_wayland.sh).
+    unset QSG_RENDER_LOOP
     export QSG_DISTANCEFIELD_ANTIALIASING=gray
   fi
 fi

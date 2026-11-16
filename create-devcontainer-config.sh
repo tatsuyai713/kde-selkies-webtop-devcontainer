@@ -187,7 +187,7 @@ if [ -n "${USER_IMAGE:-}" ]; then
         echo "========================================"
         echo ""
 
-        BUILD_SCRIPT="${PROJECT_ROOT}/quokka-devenv/build-user-image.sh"
+        BUILD_SCRIPT="${SCRIPT_DIR}/build-user-image.sh"
         if [ ! -x "${BUILD_SCRIPT}" ]; then
             echo "Error: ${BUILD_SCRIPT} not found or not executable." >&2
             exit 1

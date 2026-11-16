@@ -449,6 +449,18 @@ USER_PASSWORD=yourpass ./build-user-image.sh
 - `dind` はコンテナ内 `dockerd`、`dood` はホスト Docker socket を利用
 - `STREAM_SCALE` は表示だけでなくエンコード前の実解像度を縮小
 
+### USBデバイス（デバッグプローブ、USBシリアル）
+
+Dockerは `/dev/bus/usb` のデバイスノードをコンテナ起動時にしか作りません。WSL2で
+`usbipd attach --wsl` などにより後からつないだデバイスは `lsusb` には表示されますが、
+OpenOCDなどlibusbを使うツールからは開けません。サービス `svc-usb-perms`
+（`/usr/local/bin/fix-usb-perms.sh`）がコンテナ起動時からrootで動き、2秒ごとに `/sys` から
+`/dev/bus/usb`、`/dev/ttyACM*`、`/dev/ttyUSB*` の不足しているノードを作成し、外したデバイスの
+ノードを削除して、ユーザーが使える権限にします。
+
+デスクトップの **Enable USB Devices** をダブルクリックすると、その場で1回反映し、
+コンテナで使えるUSBデバイスとシリアルポートを表示します。
+
 ### 変更の保存（重要！）
 
 ```bash
@@ -717,6 +729,44 @@ docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pact
 
 ---
 
+### WSL2 + NVIDIA: 数秒おきに約 0.15 秒引っかかる
+
+**症状。** `--encoder nvidia-wsl` で使い始めは滑らかだったのに、何日か使っているうちに、ウィンドウの移動や
+スクロールなど画面が動くたびに数秒おきに約 0.15 秒映像が止まるようになります。Windows 自体も重く感じる
+ことがあります（音切れ、入力の遅れ）。コンテナの再起動や `wsl --shutdown` では直りません。
+
+**原因。** コンテナ側の不具合ではなく、Windows 用 NVIDIA ドライバ（`nvlddmkm.sys`）のメモリリークです。
+WSL2 の中で `nvidia-smi` を起動するたびに、Windows 側のドライバがカーネルメモリ（プールタグ `NVRM`）を
+数個ずつ解放しないまま残します。ドライバはこの残骸を割り込み処理の中でたどるため、数百万個たまると
+CPU コアを 1 回あたり 120〜145 ms 占有し、WSL の仮想 CPU もその間止まります。
+この問題を調査した PC（RTX PRO 1000 搭載ノート、ドライバ 32.0.15.9713、Windows 連続稼働 23 日）では、
+1,290 万個 / 3.6 GB がたまっていました。発生源は Selkies ダッシュボードの GPU ゲージで、接続中のブラウザ
+1 つにつき毎秒約 1 回 `nvidia-smi` を起動していました。
+
+**確認方法。** Windows のタスクマネージャーで「パフォーマンス」>「メモリ」を開きます。
+「非ページ プール」が数 GB ある場合（通常は数百 MB）、このリークが疑われます。確定するには
+Windows Driver Kit の `poolmon -b` を実行し、非ページ側の上位に `NVRM` タグがあるかを見ます。
+
+**復旧方法。** Windows を再起動してください。たまったメモリを解放できると確認できているのはこれだけです。
+（`wsl --shutdown` のあと管理者権限で `pnputil /restart-device` により NVIDIA のディスプレイアダプターを
+再起動しても直る、という報告がありますが、こちらでは未検証です。）
+
+**予防方法。**
+
+- このリビジョン以降のベースイメージは、WSL2 では GPU ゲージを起動しません
+  （`patch-selkies-gpu-stats.py`）。失われるのは Selkies ダッシュボードの GPU 負荷ゲージだけです。
+  `SELKIES_GPU_STATS=true` で元に戻せますが推奨しません。古いベースイメージから作ったイメージは、
+  ブラウザ接続中にリークし続けます。ベースイメージを作り直すか、ときどき Windows を再起動してください。
+- WSL2 の中で `nvidia-smi` を繰り返し実行しないでください（`watch nvidia-smi`、`nvidia-smi -l`、
+  監視エージェント、シェルプロンプトへの組み込みなど）。手で 1 回実行する程度は問題ありません。
+  常時監視したい場合は Windows 側のタスクマネージャーか `nvidia-smi.exe` を使ってください。
+- 2026 年 11 月時点で、この問題が直った NVIDIA ドライバのバージョンは確認できていません。
+  596 系から 616 系まで同じ挙動が報告されています。
+
+参考: [NVIDIA フォーラム: WSL2 内の nvidia-smi 起動による NVRM プールのリーク](https://forums.developer.nvidia.com/t/rtx-pro-5000-blackwell-windows-displays-freeze-for-the-whole-duration-of-gpu-saturating-work-only-after-24h-uptime-fresh-boot-immune-only-reb/376563)、
+[NVIDIA フォーラム: ホスト再起動かデバイス再起動でしか直らない GPU-PV の速度低下](https://forums.developer.nvidia.com/t/gpu-pv-dxgkrnl-cuda-workload-slows-1-7x-over-3-4-days-of-host-uptime-with-accumulating-dxgvmb-send-sync-msg-wait-for-completion-failed-in-dmesg/384279)、
+[NVIDIA フォーラム: WSL2 + Docker での nvlddmkm.sys の DPC 遅延](https://forums.developer.nvidia.com/t/windows-11-wsl2-docker-desktop-rtx-5060-ti-16gb-system-gui-severe-lag-after-idle-hours-with-ai-inference-running-nvlddmkm-sys-high-dpc-latency/369079)
+
 ## 既知の制限
 
 ### Vulkan
@@ -731,6 +781,7 @@ docker exec linuxserver-kde-$(whoami) bash -lc 's6-setuidgid "${USER_NAME}" pact
 - ハードウェアアクセラレーションが必要な場合は Linux 実機または WSL2 を使用
 
 ### WSL2
+- `nvidia-wsl`: WSL2 の中で `nvidia-smi` を繰り返し実行しないでください。起動のたびに Windows 側 NVIDIA ドライバのカーネルメモリがリークし、数日たつと約 0.15 秒の引っかかりが出て、Windows を再起動するまで直りません。詳細は[トラブルシューティング](#wsl2--nvidia-数秒おきに約-015-秒引っかかる)を参照してください。
 - `--encoder nvidia-wsl` / `intel-wsl` / `amd-wsl` はいずれも `/dev/dxg`・vgem レンダーノード・WSLg ライブラリ（`/usr/lib/wsl`）をコンテナへ渡し、Mesa D3D12 で OpenGL を GPU 実行。描画そのものは Windows（WDDM）ドライバが担うためベンダー非依存
 - `MESA_D3D12_DEFAULT_ADAPTER_NAME` は D3D12 アダプターを名前の部分文字列で選択。デフォルトはプロファイルに応じて `NVIDIA` / `Intel` / `Radeon`。ハイブリッド GPU では使用したいアダプター名の部分文字列に変更可能
 - `nvidia-wsl` のハードウェアエンコード（NVENC）は OpenGL とは独立して Pixelflux から使用。WSL2 には NVIDIA の DRM レンダーノードが存在せず（仮想 `faux_driver`/vgem ノードのみ）、Pixelflux 2.0 はレンダーノードの sysfs ドライバ名だけで NVENC を判定するうえ、WSL の `libcuda.so.1` には Pixelflux が起動時に解決する CUDA/EGL 相互運用シンボルが 2 つ欠けているため、従来は `svc-selkies` が NVENC と表示しながら実際には CPU x264 に無音でフォールバックしていた。現在は `svc-selkies` が CUDA/NvEncodeAPI ランタイムを検証し、`pixelflux-nvenc-wsl.so`（[ソース](files/ubuntu-root/usr/local/src/pixelflux-nvenc-wsl.c)）を Selkies プロセスへ preload し、エンコーダーを `/dev/dxg` に向けて Pixelflux の読み戻し経路（Mesa D3D12 で描画 → 読み戻し → CUDA へ転送 → NVENC で圧縮）を選択させる。ブラウザに保存された `use_cpu=true` で CPU に戻らないよう `SELKIES_FORCE_HARDWARE_ENCODING=1` も設定する。確認は `./check-wsl-gpu.sh`、または `docker logs linuxserver-kde-$(whoami) | grep -E 'NVENC|Mode: H264'`（`NVENC Encoder initialized successfully` と `Mode: H264 (NVENC)` が出る）、およびビューア接続中にコンテナ内で `nvidia-smi --query-gpu=utilization.encoder --format=csv`（`nvidia-smi encodersessions` は WSL でハングする）。ホストブラウザには `prefer-hardware` と NVENC に合わせたコーデック文字列（`avc1.640034`: High Profile / Level 5.2）を配布する

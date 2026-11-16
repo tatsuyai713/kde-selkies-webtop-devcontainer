@@ -1,0 +1,168 @@
+--- src/mesa/state_tracker/st_context.h.orig
++++ src/mesa/state_tracker/st_context.h
+@@ -318,6 +318,11 @@
+       size_t hits;
+    } readpix_cache;
+ 
++   /** Reused temporary textures (glTexSubImage blit source, glReadPixels
++    * staging), see st_get_temp_texture(). */
++   struct pipe_resource *temp_texture_cache[4];
++   unsigned temp_texture_cache_next;
++
+    /** for glClear */
+    struct {
+       struct pipe_rasterizer_state raster;
+--- src/mesa/state_tracker/st_context.c.orig
++++ src/mesa/state_tracker/st_context.c
+@@ -986,6 +986,7 @@
+ 
+    st->pipe->sampler_view_release(st->pipe, st->pixel_xfer.pixelmap_sampler_view);
+    pipe_resource_reference(&st->pixel_xfer.pixelmap_texture, NULL);
++   st_release_temp_texture_cache(st);
+ 
+    _vbo_DestroyContext(ctx);
+ 
+--- src/mesa/state_tracker/st_texture.h.orig
++++ src/mesa/state_tracker/st_texture.h
+@@ -268,4 +268,10 @@
+ st_make_bound_images_resident(struct st_context *st,
+                               struct gl_program *prog);
+ 
++struct pipe_resource *
++st_get_temp_texture(struct st_context *st, const struct pipe_resource *templ);
++
++void
++st_release_temp_texture_cache(struct st_context *st);
++
+ #endif
+--- src/mesa/state_tracker/st_texture.c.orig
++++ src/mesa/state_tracker/st_texture.c
+@@ -40,6 +40,8 @@
+ #include "util/u_rect.h"
+ #include "util/u_math.h"
+ #include "util/u_memory.h"
++#include "util/u_debug.h"
++#include "util/u_atomic.h"
+ #include "tgsi/tgsi_from_mesa.h"
+ 
+ 
+@@ -667,3 +669,76 @@
+       bound_handles->num_handles++;
+    }
+ }
++
++
++/**
++ * Temporary 2D textures for the blit-based glTexSubImage upload and the
++ * glReadPixels staging copy.
++ *
++ * Both paths create a texture, use it once and free it. That is cheap on
++ * native drivers, but on Mesa D3D12 under WSL every texture creation is a
++ * CreateCommittedResource, i.e. a D3DKMTCreateAllocation2 round trip to the
++ * Windows driver; a Wayland compositor uploading damaged wl_shm surfaces and
++ * a screen grabber reading back each frame then stall for tens to hundreds of
++ * milliseconds per frame. Keep a few textures, sized up to coarse steps, and
++ * hand one out again once nobody else references it.
++ *
++ * Reuse relies on the driver ordering a CPU write to the texture after GPU
++ * work recorded earlier (D3D12 uploads through a staging buffer and a copy on
++ * the same queue), so it is enabled for D3D12 screens only;
++ * MESA_ST_TEMP_TEXTURE_CACHE=0 disables it, =1 forces it on.
++ */
++static bool
++st_temp_texture_cache_enabled(struct st_context *st)
++{
++   static int forced = -2;
++   if (forced == -2) {
++      const char *v = os_get_option("MESA_ST_TEMP_TEXTURE_CACHE");
++      forced = v ? (debug_parse_bool_option(v, false) ? 1 : 0) : -1;
++   }
++   if (forced >= 0)
++      return forced;
++   const char *name = st->screen->get_name ? st->screen->get_name(st->screen) : NULL;
++   return name && strncmp(name, "D3D12", 5) == 0;
++}
++
++struct pipe_resource *
++st_get_temp_texture(struct st_context *st, const struct pipe_resource *templ)
++{
++   struct pipe_screen *screen = st->screen;
++
++   if (templ->target != PIPE_TEXTURE_2D || templ->depth0 != 1 ||
++       templ->array_size > 1 || templ->nr_samples > 1 ||
++       !st_temp_texture_cache_enabled(st))
++      return screen->resource_create(screen, templ);
++
++   for (unsigned i = 0; i < ARRAY_SIZE(st->temp_texture_cache); i++) {
++      struct pipe_resource *res = st->temp_texture_cache[i];
++      if (res && res->format == templ->format && res->bind == templ->bind &&
++          res->usage == templ->usage && res->flags == templ->flags &&
++          res->width0 >= templ->width0 && res->height0 >= templ->height0 &&
++          p_atomic_read(&res->reference.count) == 1) {
++         struct pipe_resource *ret = NULL;
++         pipe_resource_reference(&ret, res);
++         return ret;
++      }
++   }
++
++   struct pipe_resource rounded = *templ;
++   rounded.width0 = MIN2(align(templ->width0, 256), screen->caps.max_texture_2d_size);
++   rounded.height0 = MIN2(align(templ->height0, 64), screen->caps.max_texture_2d_size);
++   struct pipe_resource *res = screen->resource_create(screen, &rounded);
++   if (!res)
++      return screen->resource_create(screen, templ);
++
++   unsigned slot = st->temp_texture_cache_next++ % ARRAY_SIZE(st->temp_texture_cache);
++   pipe_resource_reference(&st->temp_texture_cache[slot], res);
++   return res;
++}
++
++void
++st_release_temp_texture_cache(struct st_context *st)
++{
++   for (unsigned i = 0; i < ARRAY_SIZE(st->temp_texture_cache); i++)
++      pipe_resource_reference(&st->temp_texture_cache[i], NULL);
++}
+--- src/mesa/state_tracker/st_cb_texture.c.orig
++++ src/mesa/state_tracker/st_cb_texture.c
+@@ -235,7 +235,7 @@
+                                    &dst_templ.width0, &dst_templ.height0,
+                                    &dst_templ.depth0, &dst_templ.array_size);
+ 
+-   return screen->resource_create(screen, &dst_templ);
++   return st_get_temp_texture(st, &dst_templ);
+ }
+ 
+ static bool
+@@ -2308,7 +2308,7 @@
+    throttled = true;
+ 
+    /* Create the source texture. */
+-   src = screen->resource_create(screen, &src_templ);
++   src = st_get_temp_texture(st, &src_templ);
+    if (!src) {
+       goto fallback;
+    }
+@@ -2331,7 +2331,10 @@
+       height = 1;
+    }
+ 
+-   map = pipe_texture_map_3d(pipe, src, 0, PIPE_MAP_WRITE | PIPE_MAP_UNSYNCHRONIZED, 0, 0, 0,
++   /* Every texel of the box is written below, so the old contents of the
++    * temporary texture never need to be read back. */
++   map = pipe_texture_map_3d(pipe, src, 0, PIPE_MAP_WRITE | PIPE_MAP_UNSYNCHRONIZED |
++                                          PIPE_MAP_DISCARD_RANGE, 0, 0, 0,
+                               width, height, depth, &transfer);
+    if (!map) {
+       _mesa_unmap_teximage_pbo(ctx, unpack);
+--- src/mesa/state_tracker/st_cb_readpixels.c.orig
++++ src/mesa/state_tracker/st_cb_readpixels.c
+@@ -304,7 +304,7 @@
+                                    &dst_templ.width0, &dst_templ.height0,
+                                    &dst_templ.depth0, &dst_templ.array_size);
+ 
+-   dst = screen->resource_create(screen, &dst_templ);
++   dst = st_get_temp_texture(st, &dst_templ);
+    if (!dst)
+       return NULL;
+ 

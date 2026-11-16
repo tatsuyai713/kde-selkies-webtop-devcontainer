@@ -171,7 +171,7 @@ if ! "${DOCKER_CMD[@]}" images --format '{{.Repository}}:{{.Tag}}' | grep -q "^$
   exit 1
 fi
 
-if [[ "${USER_LANGUAGE_NORMALIZED}" == "jp" ]]; then
+if [[ "${USER_LANGUAGE_NORMALIZED}" == "jp" || "${USER_LANGUAGE_NORMALIZED}" == "ja" || "${USER_LANGUAGE_NORMALIZED}" == "ja_jp" || "${USER_LANGUAGE_NORMALIZED}" == "ja-jp" ]]; then
   LANG_ARG="ja_JP.UTF-8"
   LANGUAGE_ARG="ja_JP:ja"
 fi

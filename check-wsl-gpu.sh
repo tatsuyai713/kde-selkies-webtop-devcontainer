@@ -255,10 +255,12 @@ CONTAINER_TEST
   fi
   fi
   decoder_hints=$(docker exec "${container}" bash -lc \
-    'index=$(grep -oE '\''assets/index-[^" ]+\.js'\'' /usr/share/selkies/web/index.html | head -1); core=$(grep -oE '\''selkies-core-[A-Za-z0-9_-]+\.js'\'' "/usr/share/selkies/web/${index}" | head -1); grep -oh '\''hardwareAcceleration:"prefer-[a-z]*"'\'' "/usr/share/selkies/web/${index}" "/usr/share/selkies/web/assets/${core}" 2>/dev/null | sort -u' \
+    'index=$(grep -oE '\''assets/index-[^" ]+\.js'\'' /usr/share/selkies/web/index.html | head -1); core=$(grep -oE '\''selkies-core-[A-Za-z0-9_-]+\.js'\'' "/usr/share/selkies/web/${index}" | head -1); grep -ohE '\''hardwareAcceleration:"(prefer-[a-z]*|no-preference)"'\'' "/usr/share/selkies/web/${index}" "/usr/share/selkies/web/assets/${core}" 2>/dev/null | sort -u' \
     2>/dev/null || true)
-  if grep -q 'prefer-hardware' <<<"${decoder_hints}" && ! grep -q 'prefer-software' <<<"${decoder_hints}"; then
-    pass 'The active Selkies WebCodecs assets request hardware decoding'
+  if grep -q 'no-preference' <<<"${decoder_hints}" && ! grep -qE 'prefer-(software|hardware)' <<<"${decoder_hints}"; then
+    pass 'The active Selkies WebCodecs assets let the browser use its hardware decoder (no-preference, software fallback)'
+  elif grep -q 'prefer-hardware' <<<"${decoder_hints}"; then
+    warn 'The active Selkies WebCodecs assets force prefer-hardware; a browser without hardware decode stays at "Waiting for stream". Recreate the container with the current image'
   else
     fail "Selkies WebCodecs hardware-decode patch is missing (${decoder_hints:-no decoder hint})"
   fi

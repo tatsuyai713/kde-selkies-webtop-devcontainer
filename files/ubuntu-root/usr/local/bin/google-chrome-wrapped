@@ -19,7 +19,12 @@ elif [ -n "${_hard_nofile}" ]; then
   ulimit -Sn "${_hard_nofile}" 2>/dev/null || true
 fi
 
-CHROME_BIN=/usr/bin/google-chrome-stable
+# Call Google's real launcher directly: the /usr/bin/google-chrome* symlinks
+# are repointed to this wrapper so every launch path injects the flags.
+for _cb in /opt/google/chrome/google-chrome /opt/google/chrome/chrome; do
+  [ -x "$_cb" ] && CHROME_BIN="$_cb" && break
+done
+CHROME_BIN="${CHROME_BIN:-/opt/google/chrome/google-chrome}"
 export XMODIFIERS="@im=fcitx"
 export INPUT_METHOD=fcitx
 
@@ -91,10 +96,17 @@ if [ "${WSL_ENVIRONMENT:-false}" = "true" ] && [ "${WSL_D3D12_PROFILE}" = "true"
     --enable-features=AcceleratedVideoEncoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,VaapiIgnoreDriverChecks
     --disable-features=WebGPU,WebGPUService,WebGPUBlobCache,Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,SkiaGraphite
   )
-elif [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ]; then
-  GPU_FLAGS=(--ozone-platform=wayland)
 else
-  GPU_FLAGS=(--ozone-platform=x11)
+  # The socket may live in ~/.XDG when XDG_RUNTIME_DIR is not exported to the
+  # caller (launches outside the desktop session).
+  WL_RUNTIME="${XDG_RUNTIME_DIR:-/home/$(id -un)/.XDG}"
+  WL_SOCK="${WAYLAND_DISPLAY:-wayland-0}"
+  if [ -S "${WL_RUNTIME}/${WL_SOCK}" ]; then
+    export XDG_RUNTIME_DIR="${WL_RUNTIME}" WAYLAND_DISPLAY="${WL_SOCK}"
+    GPU_FLAGS=(--ozone-platform=wayland)
+  else
+    GPU_FLAGS=(--ozone-platform=x11)
+  fi
 fi
 
 EXTRA_FLAGS=(${CHROME_EXTRA_FLAGS:-})
